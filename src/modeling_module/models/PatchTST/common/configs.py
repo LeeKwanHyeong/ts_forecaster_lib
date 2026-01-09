@@ -1,4 +1,4 @@
-from typing import Optional, Literal, Tuple
+from typing import Optional, Literal, Tuple, List
 from dataclasses import dataclass, field
 
 from modeling_module.training.config import TrainingConfig, DecompositionConfig
@@ -90,6 +90,15 @@ class PatchTSTConfig(TrainingConfig):
     # horizon: int = 48                   # 예측 길이 (decoder/헤드 출력 길이)
     padding_patch: Optional[str] = None # 'end' or None (끝 패딩 여부)
 
+    # 과거 외생변수 설정
+    d_past_cont: int = 0                # 과거 연속형 변수 개수
+    d_past_cat: int = 0                 # 과거 범주형 변수 개수
+    cat_cardinalities: List[int] = field(default_factory=list)  # 범주형 변수별 고유값 개수(Embedding 용)
+    d_cat_emb: int = 0
+    # 미래 외생변수 설정
+    d_future: int = 0                   # 미래 연속형 변수 개수 (Head 주입용)
+
+
     # ---------- 인코더(백본) ----------
     n_layers: int = 3                   # 인코더 레이어 수
     d_model: int = 128                  # 은닉 차원(패치 임베딩 차원)
@@ -101,7 +110,7 @@ class PatchTSTConfig(TrainingConfig):
     store_attn: bool = False            # 어텐션 가중치 저장
     pe: str = 'zeros'                   # Positional Embedding 유형
     learn_pe: bool = True               # Positional Embedding 학습 여부
-    revin: bool = True                  # RevIN 사용 여부
+    use_revin: bool = True                  # RevIN 사용 여부
     affine: bool = True                 # RevIN affine 사용 여부
     subtract_last: bool = False         # RevIN 마지막값 기준 보정
     verbose: bool = False               # 상세 로그
