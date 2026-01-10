@@ -86,7 +86,7 @@ def train_patchtst_pretrain(
       - 다만 실제 학습 루프는 CommonTrainer에 의존하지 않고 torch loop로 구현합니다.
     """
     assert train_cfg is not None, "train_cfg는 필수입니다."
-    stages = stages or [StageConfig()]  # 프로젝트 정책에 맞게 기본 stage 1개
+    stages = stages or [StageConfig(epochs = 10)]  # 프로젝트 정책에 맞게 기본 stage 1개
 
     device = torch.device(_getattr(train_cfg, "device", "cuda" if torch.cuda.is_available() else "cpu"))
     use_amp = bool(_getattr(train_cfg, "use_amp", _getattr(train_cfg, "amp", True)))
@@ -109,7 +109,8 @@ def train_patchtst_pretrain(
         weight_decay = float(_getattr(cfg_i, "weight_decay", 0.0))
 
         optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
-        scaler = torch.cuda.amp.GradScaler(enabled=(use_amp and device.type == "cuda"))
+        use_cuda_amp = bool(use_amp and device.type == "cuda")
+        scaler = torch.amp.GradScaler("cuda", enabled=use_cuda_amp) if use_cuda_amp else None
 
         print(f"[Pretrain] stage={si} epochs={epochs} lr={lr} wd={weight_decay} mask_ratio={mask_ratio} loss={loss_type}")
 
@@ -124,18 +125,29 @@ def train_patchtst_pretrain(
 
                 optimizer.zero_grad(set_to_none=True)
 
-                with torch.cuda.amp.autocast(enabled=(use_amp and device.type == "cuda")):
+                if use_cuda_amp:
+                    with torch.amp.autocast("cuda"):
+                        out = model(x, mask_ratio=mask_ratio, return_loss=True, loss_type=loss_type)
+                        loss = out["loss"] if isinstance(out, dict) and "loss" in out else out
+
+                    scaler.scale(loss).backward()
+
+                    if grad_clip > 0:
+                        scaler.unscale_(optimizer)
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
                     out = model(x, mask_ratio=mask_ratio, return_loss=True, loss_type=loss_type)
                     loss = out["loss"] if isinstance(out, dict) and "loss" in out else out
 
-                scaler.scale(loss).backward()
+                    loss.backward()
 
-                if grad_clip > 0:
-                    scaler.unscale_(optimizer)
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+                    if grad_clip > 0:
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
 
-                scaler.step(optimizer)
-                scaler.update()
+                    optimizer.step()
 
                 running += float(loss.detach().cpu().item())
 

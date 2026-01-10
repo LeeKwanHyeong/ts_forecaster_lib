@@ -51,6 +51,8 @@ class SpikeLossConfig:
 class TrainingConfig:
     # ------------Loader------------
     device: str = 'cuda' if torch.cuda.is_available() else 'mps' # For Mac
+    log_every: int = 100
+    use_amp: bool = torch.cuda.is_available()
     lookback: int = 54
     horizon: int = 27
 

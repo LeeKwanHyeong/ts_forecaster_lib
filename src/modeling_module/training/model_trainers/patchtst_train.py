@@ -7,7 +7,7 @@ from typing import Optional, Callable
 
 import torch
 import torch.nn as nn
-from modeling_module.models.PatchTST.supervised.PatchTST import PointHeadWithExo
+from modeling_module.models.PatchTST.supervised.PatchTST import PointHeadWithExo, QuantileHeadWithExo
 from torch.utils.data import DataLoader, WeightedRandomSampler
 
 from modeling_module.training.adapters import DefaultAdapter
@@ -18,7 +18,6 @@ from modeling_module.utils.exogenous_utils import calendar_sin_cos
 # PatchTST 내부 head 재구성에 필요
 from modeling_module.models.PatchTST.common.patching import compute_patch_num
 
-from models.PatchTST.supervised.PatchTST import QuantileHeadWithExo
 
 
 def _dump_cfg(cfg):

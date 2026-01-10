@@ -10,7 +10,7 @@ from torch import nn
 from modeling_module.models.PatchTST.common.configs import PatchTSTConfig
 from modeling_module.models.common_layers.RevIN import RevIN
 
-from models.PatchTST.self_supervised.backbone import PatchTSTSelfSupBackbone
+from modeling_module.models.PatchTST.self_supervised.backbone import PatchTSTSelfSupBackbone
 
 
 def _masked_recon_loss(
@@ -117,10 +117,29 @@ class PatchTSTPretrainModel(nn.Module):
             mask_ratio: float in [0,1], used if patch_mask is None
             patch_mask: optional [B,N] bool
         """
-        if x.dim() != 3:
-            raise ValueError(f"Expected x as [B,C,L]. got {tuple(x.shape)}")
 
-        B, C, L = x.shape
+        if x.dim() != 3:
+            raise ValueError(f"Expected x as 3D tensor. got {tuple(x.shape)}")
+
+        B, d1, d2 = x.shape
+
+        # Accept both layouts:
+        #  - [B, C, L] where dim1 == n_vars
+        #  - [B, L, C] where dim2 == n_vars
+        if d1 == self.n_vars:
+            # already [B, C, L]
+            x_bcl = x
+        elif d2 == self.n_vars:
+            # convert [B, L, C] -> [B, C, L]
+            x_bcl = x.permute(0, 2, 1).contiguous()
+        else:
+            raise ValueError(
+                f"Input shape mismatch. cfg.n_vars={self.n_vars}, "
+                f"but got x.shape={tuple(x.shape)}. "
+                f"Expected dim1==n_vars ([B,C,L]) or dim2==n_vars ([B,L,C])."
+            )
+
+        B, C, L = x_bcl.shape
         if C != self.n_vars:
             # allow flexibility but keep it explicit
             raise ValueError(f"cfg.n_vars={self.n_vars} but got x.shape[1]={C}")
@@ -130,7 +149,7 @@ class PatchTSTPretrainModel(nn.Module):
             # RevIN expects [B,L,C] in many implementations; your module may support [B,C,L].
             # Here we support both by checking.
             # We'll convert to [B,L,C] then back to [B,C,L] for safety.
-            x_t = x.permute(0, 2, 1).contiguous()  # [B,L,C]
+            x_t = x_bcl.permute(0, 2, 1).contiguous()  # [B,L,C]
             x_n = self.revin_layer(x_t, "norm").permute(0, 2, 1).contiguous()  # [B,C,L]
         else:
             x_n = x
