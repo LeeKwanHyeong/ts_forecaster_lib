@@ -128,7 +128,7 @@ terminado @ file:///home/conda/feedstock_root/build_artifacts/bld/rattler-build_
 threadpoolctl @ file:///home/conda/feedstock_root/build_artifacts/threadpoolctl_1741878222898/work
 tinycss2 @ file:///home/conda/feedstock_root/build_artifacts/bld/rattler-build_tinycss2_1764621508/work
 tomli @ file:///home/conda/feedstock_root/build_artifacts/bld/rattler-build_tomli_1760014679/work
-torch @ file:///Users/runnerx/miniforge3/conda-bld/libtorch_1764705037409/work
+# torch @ file:///Users/runnerx/miniforge3/conda-bld/libtorch_1764705037409/work
 tornado @ file:///Users/runner/miniforge3/conda-bld/tornado_1765836479191/work
 tqdm @ file:///home/conda/feedstock_root/build_artifacts/tqdm_1735661334605/work
 traitlets @ file:///home/conda/feedstock_root/build_artifacts/traitlets_1733367359838/work

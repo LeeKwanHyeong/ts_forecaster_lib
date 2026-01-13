@@ -1,0 +1,14 @@
+numpy
+pandas
+polars
+pyarrow==22.0.0
+scipy
+scikit-learn
+statsmodels
+matplotlib
+pyyaml
+tqdm
+rich
+loguru
+ipykernel
+jupyterlab

@@ -1,0 +1,9 @@
+numpy
+pandas
+polars
+pyarrow
+scipy
+scikit-learn
+statsmodels
+pyyaml
+tqdm
