@@ -13,6 +13,7 @@ from modeling_module.models.PatchMixer.common.configs import (
 # PatchMixerConfigDaily, Hourly는 별도 클래스 없이 PatchMixerConfig + kwargs로 처리
 
 from modeling_module.models.PatchTST.common.configs import PatchTSTConfig
+from modeling_module.models.PatchTST.self_supervised.PatchTST import PatchTSTPretrainModel
 from modeling_module.models.Titan.common.configs import TitanConfig
 from modeling_module.models.model_builder import (
     build_titan_base,
@@ -27,6 +28,7 @@ from modeling_module.training.config import SpikeLossConfig, TrainingConfig, Sta
 from modeling_module.training.metrics import quantile_metrics
 from modeling_module.training.model_trainers.patchmixer_train import train_patchmixer
 from modeling_module.training.model_trainers.patchtst_finetune import train_patchtst_finetune
+from modeling_module.training.model_trainers.patchtst_pretrain import train_patchtst_pretrain
 from modeling_module.training.model_trainers.patchtst_train import train_patchtst
 from modeling_module.training.model_trainers.titan_train import train_titan
 from modeling_module.utils.exogenous_utils import compose_exo_calendar_cb
@@ -58,6 +60,7 @@ def save_model(model: torch.nn.Module, cfg, path: str) -> None:
             else:
                 state["config"] = cfg
     torch.save(state, path)
+    print(f'{model} save success! {path}')
 
 
 def _make_ckpt_path(
@@ -78,21 +81,37 @@ def _build_common_train_configs(
         device: str,
         lookback: int,
         horizon: int,
-        freq: str = 'weekly'
+        freq: str = 'weekly',
+        warmup_epochs: Optional[int] = None,
+        spike_epochs: Optional[int] = None,
+        base_lr: Optional[float] = None,
 ) -> Tuple[TrainingConfig, TrainingConfig, SpikeLossConfig, Tuple[StageConfig, StageConfig]]:
+
+
     # 주기별 학습률/에폭 튜닝
-    if freq == 'hourly':
-        base_lr = 1e-4
-        warmup_epochs = 20
-        spike_epochs = 50
-    elif freq == 'daily':
-        base_lr = 2e-4
-        warmup_epochs = 30
-        spike_epochs = 70
-    else:  # weekly, monthly
-        base_lr = 3e-4
-        warmup_epochs = 1
-        spike_epochs = 1
+    if warmup_epochs is None:
+        if freq == 'hourly':
+            warmup_epochs = 20
+        elif freq == 'daily':
+            warmup_epochs = 30
+        else:
+            warmup_epochs = 10
+
+    if spike_epochs is None:
+        if freq == 'hourly':
+            spike_epochs = 50
+        elif freq == 'daily':
+            spike_epochs = 70
+        else:
+            spike_epochs = 10
+
+    if base_lr is None:
+        if freq == 'hourly':
+            base_lr = 1e-4
+        elif freq == 'daily':
+            base_lr = 2e-4
+        else:
+            base_lr = 3e-4
 
     # 1) 2-stage 학습 스케줄
     stg_warmup = StageConfig(
@@ -278,6 +297,7 @@ def _run_patchtst(
         )
 
     if save_root:
+        print('save_root:: ', save_root)
         ckpt_path = _make_ckpt_path(save_root, freq, "PatchTSTBase", lookback, horizon)
         save_model(pt_base, pt_base_cfg, ckpt_path)
         best_pt_base["ckpt_path"] = str(ckpt_path)
@@ -505,6 +525,9 @@ def _run_total_train_generic(
     save_dir: Optional[str],
     *,
     models_to_run: Optional[Iterable[str]] = None,
+    warmup_epochs: Optional[int] = None,
+    spike_epochs: Optional[int] = None,
+    base_lr: Optional[float] = None,
 
 
     # PatchTST 전용 Property
@@ -517,7 +540,8 @@ def _run_total_train_generic(
     save_root = Path(save_dir) if save_dir is not None else None
 
     point_train_cfg, quantile_train_cfg, spike_cfg, stages = _build_common_train_configs(
-        device=device, lookback=lookback, horizon=horizon, freq=freq
+        device=device, lookback=lookback, horizon=horizon, freq=freq,
+        warmup_epochs= warmup_epochs, spike_epochs = spike_epochs, base_lr = base_lr
     )
 
     date_type_map = {"weekly": "W", "monthly": "M", "daily": "D", "hourly": "H"}
@@ -592,6 +616,10 @@ def run_total_train_weekly(
         *,
         lookback,
         horizon,
+        warmup_epochs = None,
+        spike_epochs = None,
+        base_lr = None,
+
         save_dir=None,
         models_to_run=None,
         use_ssl_pretrain: bool = False,
@@ -608,6 +636,9 @@ def run_total_train_weekly(
         horizon,
         'weekly',
         save_dir,
+        warmup_epochs= warmup_epochs,
+        spike_epochs = spike_epochs,
+        base_lr = base_lr,
         models_to_run=models_to_run,
         use_ssl_pretrain=use_ssl_pretrain,
         ssl_pretrain_epochs=ssl_pretrain_epochs,
@@ -624,6 +655,9 @@ def run_total_train_monthly(
         *,
         lookback,
         horizon,
+        warmup_epochs = None,
+        spike_epochs = None,
+        base_lr = None,
         save_dir=None,
         models_to_run=None,
         use_ssl_pretrain: bool = False,
@@ -640,6 +674,9 @@ def run_total_train_monthly(
         horizon,
         'monthly',
         save_dir,
+        warmup_epochs= warmup_epochs,
+        spike_epochs = spike_epochs,
+        base_lr = base_lr,
         models_to_run=models_to_run,
         use_ssl_pretrain=use_ssl_pretrain,
         ssl_pretrain_epochs=ssl_pretrain_epochs,
@@ -656,6 +693,9 @@ def run_total_train_daily(
         *,
         lookback,
         horizon,
+        warmup_epochs = None,
+        spike_epochs = None,
+        base_lr = None,
         save_dir=None,
         models_to_run=None,
         use_ssl_pretrain: bool = False,
@@ -672,6 +712,9 @@ def run_total_train_daily(
         horizon,
         'daily',
         save_dir,
+        warmup_epochs= warmup_epochs,
+        spike_epochs = spike_epochs,
+        base_lr = base_lr,
         models_to_run=models_to_run,
         use_ssl_pretrain=use_ssl_pretrain,
         ssl_pretrain_epochs=ssl_pretrain_epochs,
@@ -686,7 +729,11 @@ def run_total_train_hourly(
         val_loader,
         device='cuda' if torch.cuda.is_available() else 'cpu',
         *,
-        lookback,horizon,
+        lookback,
+        horizon,
+        warmup_epochs = None,
+        spike_epochs = None,
+        base_lr = None,
         save_dir=None,
         models_to_run=None,
         use_ssl_pretrain: bool = False,
@@ -703,6 +750,9 @@ def run_total_train_hourly(
         horizon,
         'hourly',
         save_dir,
+        warmup_epochs= warmup_epochs,
+        spike_epochs = spike_epochs,
+        base_lr = base_lr,
         models_to_run=models_to_run,
         use_ssl_pretrain=use_ssl_pretrain,
         ssl_pretrain_epochs=ssl_pretrain_epochs,

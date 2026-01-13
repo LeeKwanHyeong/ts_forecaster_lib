@@ -10,16 +10,55 @@ import torch
 from torch.utils.data import DataLoader
 
 from modeling_module.training.config import TrainingConfig, StageConfig, apply_stage
+def _json_safe(obj):
+    # torch.device
+    try:
+        import torch
+        if isinstance(obj, torch.device):
+            return str(obj)
+    except Exception:
+        pass
+
+    # numpy / torch scalar
+    try:
+        import numpy as np
+        if isinstance(obj, (np.integer, np.floating)):
+            return obj.item()
+    except Exception:
+        pass
+
+    if hasattr(obj, "item") and callable(getattr(obj, "item")):
+        try:
+            return obj.item()
+        except Exception:
+            pass
+
+    # pathlib.Path 등
+    try:
+        import os
+        if isinstance(obj, os.PathLike):
+            return str(obj)
+    except Exception:
+        pass
+
+    # set/tuple
+    if isinstance(obj, (set, tuple)):
+        return list(obj)
+
+    # fallback
+    return str(obj)
 
 
-def _dump_cfg(cfg, save_dir: Optional[str], name: str) -> None:
-    if save_dir is None:
-        return
+def _dump_cfg(cfg, save_dir: str, name: str) -> None:
+    import json, os
+    from dataclasses import asdict, is_dataclass
+
     os.makedirs(save_dir, exist_ok=True)
     path = os.path.join(save_dir, name)
+
     payload = asdict(cfg) if is_dataclass(cfg) else dict(cfg.__dict__)
     with open(path, "w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False, indent=2)
+        json.dump(payload, f, ensure_ascii=False, indent=2, default=_json_safe)
 
 
 def _getattr(cfg, key: str, default):

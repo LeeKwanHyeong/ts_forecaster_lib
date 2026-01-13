@@ -8,6 +8,21 @@ import torch
 
 from modeling_module.training.config import TrainingConfig, StageConfig
 from modeling_module.training.model_trainers.patchtst_train import train_patchtst
+def _drop_revin_stats(state: dict) -> dict:
+    # state: model state_dict
+    drop_keys = [
+        "revin_layer.mean",
+        "revin_layer.std",
+        # 구현에 따라 아래처럼 prefix가 다를 수 있어 함께 제거
+        "revin.mean",
+        "revin.std",
+        "revin_layer.running_mean",
+        "revin_layer.running_std",
+    ]
+    for k in drop_keys:
+        if k in state:
+            state.pop(k, None)
+    return state
 
 
 def _load_pretrain_state(ckpt_path: str) -> Dict[str, torch.Tensor]:
@@ -80,6 +95,7 @@ def train_patchtst_finetune(
             raise FileNotFoundError(pretrain_ckpt_path)
 
         state = _load_pretrain_state(pretrain_ckpt_path)
+        state = _drop_revin_stats(state)
         missing, unexpected = model.load_state_dict(state, strict=load_strict)
 
         print("[Finetune] loaded pretrain ckpt:", pretrain_ckpt_path)
