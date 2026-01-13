@@ -26,6 +26,7 @@ from modeling_module.models.model_builder import (
 from modeling_module.training.config import SpikeLossConfig, TrainingConfig, StageConfig
 from modeling_module.training.metrics import quantile_metrics
 from modeling_module.training.model_trainers.patchmixer_train import train_patchmixer
+from modeling_module.training.model_trainers.patchtst_finetune import train_patchtst_finetune
 from modeling_module.training.model_trainers.patchtst_train import train_patchtst
 from modeling_module.training.model_trainers.titan_train import train_titan
 from modeling_module.utils.exogenous_utils import compose_exo_calendar_cb
@@ -199,10 +200,13 @@ def _run_patchtst(
         point_train_cfg, quantile_train_cfg,
         stages,
         device: str,
+
+    use_ssl_pretrain: bool = False,
+    ssl_pretrain_epochs: int = 10,
+    ssl_mask_ratio: float = 0.3,
+    ssl_loss_type: str = "mse",
+    ssl_freeze_encoder_before_ft: bool = False,
 ):
-    # --------------------------------------------------
-    # 3) PatchTST
-    # --------------------------------------------------
     print(f'exogenous dimension:: {exo_dim}')
     pt_kwargs = dict(
         device=device,
@@ -214,38 +218,104 @@ def _run_patchtst(
         patch_len=patch_len,
         stride=stride,
         d_future=exo_dim,
-        use_revin = True
+        use_revin=True
     )
 
+    # ---------------------------
+    # (NEW) 0) self-supervised pretrain (optional)
+    # ---------------------------
+    pretrain_ckpt_path = None
+    if use_ssl_pretrain and save_root is not None:
+        pretrain_dir = Path(save_root) / "pretrain"
+        pretrain_dir.mkdir(parents=True, exist_ok=True)
+        pretrain_ckpt_path = str(pretrain_dir / "patchtst_pretrain_best.pt")
+
+        # pretrain에 쓸 cfg는 PatchTSTConfig 기반으로 동일 backbone 설정을 쓰는 것이 중요
+        pt_pre_cfg = PatchTSTConfig(**pt_kwargs, loss_mode="point",
+                                    point_loss="mse")  # loss_mode는 실질적으로 pretrain에서 크게 중요하지 않음
+        pre_model = PatchTSTPretrainModel(cfg=pt_pre_cfg)
+
+        # pretrain용 TrainingConfig는 point_train_cfg를 재사용해도 되지만,
+        # epochs/lr만 명시적으로 바꾸는 것을 권장
+        pre_train_cfg = point_train_cfg
+        pre_stages = [StageConfig(epochs=ssl_pretrain_epochs, lr=point_train_cfg.lr, spike_enabled=False)]
+
+        print(f"[SSL] PatchTST Pretrain ({freq.capitalize()})")
+        _ = train_patchtst_pretrain(
+            pre_model,
+            train_loader,
+            val_loader,
+            train_cfg=pre_train_cfg,
+            stages=pre_stages,
+            mask_ratio=ssl_mask_ratio,
+            loss_type=ssl_loss_type,
+            save_dir=str(pretrain_dir),
+            ckpt_name="patchtst_pretrain_best.pt",
+        )
+
+    # ---------------------------
+    # 1) PatchTST Base (supervised)  ← 기존 train_patchtst -> finetune로 교체
+    # ---------------------------
     pt_base_cfg = PatchTSTConfig(**pt_kwargs, loss_mode='point', point_loss='huber')
     pt_base = build_patchTST_base(pt_base_cfg)
 
     print(f'PatchTST Base ({freq.capitalize()})')
-    best_pt_base = train_patchtst(
-        pt_base, train_loader, val_loader,
-        train_cfg=point_train_cfg, stages=list(stages),
-        future_exo_cb=future_exo_cb,
-    )
+    if pretrain_ckpt_path is not None:
+        best_pt_base = train_patchtst_finetune(
+            pt_base, train_loader, val_loader,
+            train_cfg=point_train_cfg, stages=list(stages),
+            future_exo_cb=future_exo_cb,
+            exo_is_normalized=True,
+            pretrain_ckpt_path=pretrain_ckpt_path,
+            load_strict=False,
+            freeze_encoder_before_ft=ssl_freeze_encoder_before_ft,
+        )
+    else:
+        best_pt_base = train_patchtst(
+            pt_base, train_loader, val_loader,
+            train_cfg=point_train_cfg, stages=list(stages),
+            future_exo_cb=future_exo_cb,
+        )
+
     if save_root:
         ckpt_path = _make_ckpt_path(save_root, freq, "PatchTSTBase", lookback, horizon)
         save_model(pt_base, pt_base_cfg, ckpt_path)
         best_pt_base["ckpt_path"] = str(ckpt_path)
+        if pretrain_ckpt_path is not None:
+            best_pt_base["pretrain_ckpt_path"] = str(pretrain_ckpt_path)
     results['PatchTST Base'] = best_pt_base
 
+    # ---------------------------
+    # 2) PatchTST Quantile (supervised)  ← 동일하게 finetune로 교체
+    # ---------------------------
     pt_q_cfg = PatchTSTConfig(**pt_kwargs, loss_mode='quantile', quantiles=(0.1, 0.5, 0.9))
     pt_q = build_patchTST_quantile(pt_q_cfg)
 
     print(f'PatchTST Quantile ({freq.capitalize()})')
-    best_pt_q = train_patchtst(
-        pt_q, train_loader, val_loader,
-        train_cfg=quantile_train_cfg, stages=list(stages),
-        future_exo_cb=future_exo_cb,
-        exo_is_normalized=True,
-    )
+    if pretrain_ckpt_path is not None:
+        best_pt_q = train_patchtst_finetune(
+            pt_q, train_loader, val_loader,
+            train_cfg=quantile_train_cfg, stages=list(stages),
+            future_exo_cb=future_exo_cb,
+            exo_is_normalized=True,
+            pretrain_ckpt_path=pretrain_ckpt_path,
+            load_strict=False,
+            freeze_encoder_before_ft=ssl_freeze_encoder_before_ft,
+        )
+    else:
+        best_pt_q = train_patchtst(
+            pt_q, train_loader, val_loader,
+            train_cfg=quantile_train_cfg, stages=list(stages),
+            future_exo_cb=future_exo_cb,
+            exo_is_normalized=True,
+        )
+
     if save_root:
         ckpt_path = _make_ckpt_path(save_root, freq, "PatchTSTQuantile", lookback, horizon)
         save_model(pt_q, pt_q_cfg, ckpt_path)
         best_pt_q["ckpt_path"] = str(ckpt_path)
+        if pretrain_ckpt_path is not None:
+            best_pt_q["pretrain_ckpt_path"] = str(pretrain_ckpt_path)
     results['PatchTST Quantile'] = best_pt_q
 
 def _run_titan(
@@ -434,7 +504,15 @@ def _run_total_train_generic(
     freq: str,
     save_dir: Optional[str],
     *,
-    models_to_run: Optional[Iterable[str]] = None,      # NEW
+    models_to_run: Optional[Iterable[str]] = None,
+
+
+    # PatchTST 전용 Property
+    use_ssl_pretrain: bool = False,
+    ssl_pretrain_epochs: int = 10,
+    ssl_mask_ratio: float = 0.3,
+    ssl_loss_type: str = "mse",
+    ssl_freeze_encoder_before_ft: bool = False
 ):
     save_root = Path(save_dir) if save_dir is not None else None
 
@@ -470,10 +548,10 @@ def _run_total_train_generic(
 
     results: Dict[str, Dict] = {}
 
-    # NEW: 선택된 모델만 실행
+    # 선택된 모델만 실행
     for m in selected:
         print(f"\n[total_train] === RUN: {m} ({freq}) ===")
-        MODEL_REGISTRY[m](
+        kwargs = dict(
             results=results,
             freq=freq,
             train_loader=train_loader,
@@ -491,29 +569,147 @@ def _run_total_train_generic(
             device=device,
         )
 
+        if m == "patchtst":
+            kwargs.update(dict(
+                use_ssl_pretrain=use_ssl_pretrain,
+                ssl_pretrain_epochs=ssl_pretrain_epochs,
+                ssl_mask_ratio=ssl_mask_ratio,
+                ssl_loss_type=ssl_loss_type,
+                ssl_freeze_encoder_before_ft=ssl_freeze_encoder_before_ft,
+            ))
+
+        MODEL_REGISTRY[m](**kwargs)
+
     return results
 
 
 # ===================== EXPORTED FUNCTIONS =====================
 
-def run_total_train_weekly(train_loader, val_loader, device='cuda' if torch.cuda.is_available() else 'cpu', *, lookback,
-                           horizon, save_dir=None, models_to_run=None):
-    return _run_total_train_generic(train_loader, val_loader, device, lookback, horizon, 'weekly', save_dir, models_to_run=models_to_run)
+def run_total_train_weekly(
+        train_loader,
+        val_loader,
+        device='cuda' if torch.cuda.is_available() else 'cpu',
+        *,
+        lookback,
+        horizon,
+        save_dir=None,
+        models_to_run=None,
+        use_ssl_pretrain: bool = False,
+        ssl_pretrain_epochs: int = 10,
+        ssl_mask_ratio: float = 0.3,
+        ssl_loss_type: str = "mse",
+        ssl_freeze_encoder_before_ft: bool = False
+):
+    return _run_total_train_generic(
+        train_loader,
+        val_loader,
+        device,
+        lookback,
+        horizon,
+        'weekly',
+        save_dir,
+        models_to_run=models_to_run,
+        use_ssl_pretrain=use_ssl_pretrain,
+        ssl_pretrain_epochs=ssl_pretrain_epochs,
+        ssl_mask_ratio=ssl_mask_ratio,
+        ssl_loss_type=ssl_loss_type,
+        ssl_freeze_encoder_before_ft=ssl_freeze_encoder_before_ft,
+    )
 
 
-def run_total_train_monthly(train_loader, val_loader, device='cuda' if torch.cuda.is_available() else 'cpu', *,
-                            lookback, horizon, save_dir=None, models_to_run=None):
-    return _run_total_train_generic(train_loader, val_loader, device, lookback, horizon, 'monthly', save_dir, models_to_run=models_to_run)
+def run_total_train_monthly(
+        train_loader,
+        val_loader,
+        device='cuda' if torch.cuda.is_available() else 'cpu',
+        *,
+        lookback,
+        horizon,
+        save_dir=None,
+        models_to_run=None,
+        use_ssl_pretrain: bool = False,
+        ssl_pretrain_epochs: int = 10,
+        ssl_mask_ratio: float = 0.3,
+        ssl_loss_type: str = "mse",
+        ssl_freeze_encoder_before_ft: bool = False
+):
+    return _run_total_train_generic(
+        train_loader,
+        val_loader,
+        device,
+        lookback,
+        horizon,
+        'monthly',
+        save_dir,
+        models_to_run=models_to_run,
+        use_ssl_pretrain=use_ssl_pretrain,
+        ssl_pretrain_epochs=ssl_pretrain_epochs,
+        ssl_mask_ratio=ssl_mask_ratio,
+        ssl_loss_type=ssl_loss_type,
+        ssl_freeze_encoder_before_ft=ssl_freeze_encoder_before_ft,
+    )
 
 
-def run_total_train_daily(train_loader, val_loader, device='cuda' if torch.cuda.is_available() else 'cpu', *, lookback,
-                          horizon, save_dir=None, models_to_run=None):
-    return _run_total_train_generic(train_loader, val_loader, device, lookback, horizon, 'daily', save_dir, models_to_run=models_to_run)
+def run_total_train_daily(
+        train_loader,
+        val_loader,
+        device='cuda' if torch.cuda.is_available() else 'cpu',
+        *,
+        lookback,
+        horizon,
+        save_dir=None,
+        models_to_run=None,
+        use_ssl_pretrain: bool = False,
+        ssl_pretrain_epochs: int = 10,
+        ssl_mask_ratio: float = 0.3,
+        ssl_loss_type: str = "mse",
+        ssl_freeze_encoder_before_ft: bool = False
+):
+    return _run_total_train_generic(
+        train_loader,
+        val_loader,
+        device,
+        lookback,
+        horizon,
+        'daily',
+        save_dir,
+        models_to_run=models_to_run,
+        use_ssl_pretrain=use_ssl_pretrain,
+        ssl_pretrain_epochs=ssl_pretrain_epochs,
+        ssl_mask_ratio=ssl_mask_ratio,
+        ssl_loss_type=ssl_loss_type,
+        ssl_freeze_encoder_before_ft=ssl_freeze_encoder_before_ft,
+    )
 
 
-def run_total_train_hourly(train_loader, val_loader, device='cuda' if torch.cuda.is_available() else 'cpu', *, lookback,
-                           horizon, save_dir=None, models_to_run=None):
-    return _run_total_train_generic(train_loader, val_loader, device, lookback, horizon, 'hourly', save_dir, models_to_run=models_to_run)
+def run_total_train_hourly(
+        train_loader,
+        val_loader,
+        device='cuda' if torch.cuda.is_available() else 'cpu',
+        *,
+        lookback,horizon,
+        save_dir=None,
+        models_to_run=None,
+        use_ssl_pretrain: bool = False,
+        ssl_pretrain_epochs: int = 10,
+        ssl_mask_ratio: float = 0.3,
+        ssl_loss_type: str = "mse",
+        ssl_freeze_encoder_before_ft: bool = False
+):
+    return _run_total_train_generic(
+        train_loader,
+        val_loader,
+        device,
+        lookback,
+        horizon,
+        'hourly',
+        save_dir,
+        models_to_run=models_to_run,
+        use_ssl_pretrain=use_ssl_pretrain,
+        ssl_pretrain_epochs=ssl_pretrain_epochs,
+        ssl_mask_ratio=ssl_mask_ratio,
+        ssl_loss_type=ssl_loss_type,
+        ssl_freeze_encoder_before_ft=ssl_freeze_encoder_before_ft,
+    )
 
 
 def summarize_metrics(results: Dict[str, Dict[str, np.ndarray]]) -> Dict[str, Dict[str, float]]:
