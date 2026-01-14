@@ -136,9 +136,9 @@ def _build_common_train_configs(
         strategy='mix',
         huber_delta=0.6,
         asym_up_weight=1.0,
-        asym_down_weight=8.0,
+        asym_down_weight=2.0,
         mad_k=1.5,
-        w_spike=32.0,
+        w_spike=4.0,
         w_norm=1.0,
         alpha_huber=0.6,
         beta_asym=0.4,
@@ -219,12 +219,12 @@ def _run_patchtst(
         point_train_cfg, quantile_train_cfg,
         stages,
         device: str,
-
-    use_ssl_pretrain: bool = False,
-    ssl_pretrain_epochs: int = 10,
-    ssl_mask_ratio: float = 0.3,
-    ssl_loss_type: str = "mse",
-    ssl_freeze_encoder_before_ft: bool = False,
+        use_exogenous_mode: bool = True,
+        use_ssl_pretrain: bool = False,
+        ssl_pretrain_epochs: int = 10,
+        ssl_mask_ratio: float = 0.3,
+        ssl_loss_type: str = "mse",
+        ssl_freeze_encoder_before_ft: bool = False,
 ):
     print(f'exogenous dimension:: {exo_dim}')
     pt_kwargs = dict(
@@ -237,7 +237,7 @@ def _run_patchtst(
         patch_len=patch_len,
         stride=stride,
         d_future=exo_dim,
-        use_revin=True
+        use_revin=True,
     )
 
     # ---------------------------
@@ -294,6 +294,7 @@ def _run_patchtst(
             pt_base, train_loader, val_loader,
             train_cfg=point_train_cfg, stages=list(stages),
             future_exo_cb=future_exo_cb,
+            use_exogenous_mode = use_exogenous_mode
         )
 
     if save_root:
@@ -328,6 +329,7 @@ def _run_patchtst(
             train_cfg=quantile_train_cfg, stages=list(stages),
             future_exo_cb=future_exo_cb,
             exo_is_normalized=True,
+            use_exogenous_mode=use_exogenous_mode
         )
 
     if save_root:
@@ -524,6 +526,7 @@ def _run_total_train_generic(
     freq: str,
     save_dir: Optional[str],
     *,
+    use_exogenous_mode: Optional[bool] = False,
     models_to_run: Optional[Iterable[str]] = None,
     warmup_epochs: Optional[int] = None,
     spike_epochs: Optional[int] = None,
@@ -546,9 +549,12 @@ def _run_total_train_generic(
 
     date_type_map = {"weekly": "W", "monthly": "M", "daily": "D", "hourly": "H"}
     dt_char = date_type_map.get(freq, "W")
-    future_exo_cb = compose_exo_calendar_cb(date_type=dt_char)
-
-    exo_dim = 4 if freq in ("daily", "hourly") else 2
+    if use_exogenous_mode:
+        future_exo_cb = compose_exo_calendar_cb(date_type=dt_char)
+        exo_dim = 4 if freq in ("daily", "hourly") else 2
+    else:
+        future_exo_cb = None
+        exo_dim = 0
 
     # freq별 patch_len/stride/season_period
     if freq == "hourly":
@@ -591,6 +597,7 @@ def _run_total_train_generic(
             quantile_train_cfg=quantile_train_cfg,
             stages=stages,
             device=device,
+            use_exogenous_mode = use_exogenous_mode,
         )
 
         if m == "patchtst":
@@ -619,8 +626,8 @@ def run_total_train_weekly(
         warmup_epochs = None,
         spike_epochs = None,
         base_lr = None,
-
         save_dir=None,
+        use_exogenous_mode: bool = False,
         models_to_run=None,
         use_ssl_pretrain: bool = False,
         ssl_pretrain_epochs: int = 10,
@@ -636,6 +643,7 @@ def run_total_train_weekly(
         horizon,
         'weekly',
         save_dir,
+        use_exogenous_mode=use_exogenous_mode,
         warmup_epochs= warmup_epochs,
         spike_epochs = spike_epochs,
         base_lr = base_lr,

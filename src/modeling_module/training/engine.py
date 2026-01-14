@@ -31,6 +31,7 @@ class CommonTrainer:
         future_exo_cb=None,
         autocast_input=None,
         extra_loss_fn=None,
+        use_exogenous_mode = False
     ):
         self.cfg = cfg
         self.adapter: DefaultAdapter = adapter
@@ -41,6 +42,7 @@ class CommonTrainer:
         self.amp_enabled = (self.cfg.amp_device == "cuda" and torch.cuda.is_available())
         self.autocast_input = autocast_input or {}
         self.extra_loss_fn = extra_loss_fn
+        self.use_exogenous_mode = use_exogenous_mode
 
         # autocast 설정
         self.amp_device = self.autocast_input.get("device_type", self.cfg.amp_device)
@@ -223,7 +225,10 @@ class CommonTrainer:
                     self.opt.zero_grad(set_to_none=True)
 
                 # future_exo 결정 (배치 > cb)
-                future_exo = self._resolve_future_exo(fe_cont, x, y, device=device)
+                if self.use_exogenous_mode:
+                    future_exo = self._resolve_future_exo(fe_cont, x, y, device=device)
+                else:
+                    future_exo = None
                 # if future_exo is None:
                 #     print("[DEBUG] future_exo is None")
                 # else:
@@ -303,7 +308,12 @@ class CommonTrainer:
                 for batch in val_loader:
                     x, y, part_ids, fe_cont, pe_cont, pe_cat = self._unpack_batch(batch)
                     x_val, y_val = x.to(device), y.to(device)
-                    future_exo = self._resolve_future_exo(fe_cont, x_val, y_val, device=device)
+
+                    if self.use_exogenous_mode:
+                        future_exo = self._resolve_future_exo(fe_cont, x_val, y_val, device=device)
+                    else:
+                        future_exo = None
+
 
                     if tta_steps > 0 and self.adapter.uses_tta():
                         loss = self.adapter.tta_adapt(model, x_val, y_val, steps=tta_steps)

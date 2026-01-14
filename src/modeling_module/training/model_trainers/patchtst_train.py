@@ -129,6 +129,7 @@ def train_patchtst(
     train_cfg: Optional[TrainingConfig] = None,
     future_exo_cb: Optional[Callable] = None,
     exo_is_normalized: bool = True,
+    use_exogenous_mode: bool = True
 ):
     assert train_cfg is not None, "train_cfg는 필수입니다."
 
@@ -145,7 +146,9 @@ def train_patchtst(
 
     # 실제 학습 입력 기준으로 head를 맞추는 것이 안전
     E = E_loader if E_loader > 0 else E_cb
-    model = _ensure_patchtst_future_head(model, E)
+
+    if use_exogenous_mode:
+        model = _ensure_patchtst_future_head(model, E)
 
     # loader가 fe_cont를 주는 경우, 자동 CB는 끄는 쪽이 안전 (중복/불일치 방지)
     if E_loader > 0 and future_exo_cb is not None:
@@ -190,6 +193,7 @@ def train_patchtst(
             logger=print,
             autocast_input=autocast_input,
             extra_loss_fn=None,
+            use_exogenous_mode = use_exogenous_mode
         )
         model = trainer.fit(model, tl_i, val_loader, tta_steps=0)
         best = {"model": model, "cfg": cfg_i}

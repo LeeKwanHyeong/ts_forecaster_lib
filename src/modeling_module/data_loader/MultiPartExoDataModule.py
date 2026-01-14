@@ -1,3 +1,4 @@
+import time
 
 import polars as pl
 import torch
@@ -20,7 +21,8 @@ def _to_numpy(x):
     if isinstance(x, pl.Series):
         return x.to_numpy()
     return np.asarray(x)
-
+def identity_date_indexer(x: int) -> int:
+    return int(x)
 
 # 날짜 계산 헬퍼 함수 (Daily/Hourly 지원)
 def _add_time(dt_int: int, amount: int, freq: str) -> int:
@@ -155,7 +157,7 @@ class MultiPartExoTrainingDataset(Dataset):
         self.past_exo_cat_cols = list(past_exo_cat_cols) if past_exo_cat_cols else []
 
         self.future_exo_cb = future_exo_cb
-        self.date_indexer = date_indexer or (lambda x: x)
+        self.date_indexer = date_indexer or identity_date_indexer
         self.cat_indexers = cat_indexers or {}
 
         # id별 raw arrays 저장
@@ -234,30 +236,61 @@ class MultiPartExoTrainingDataset(Dataset):
         L = self.lookback
         H = self.horizon
 
-        x_win = y_all[i:i + L]                 # [L]
-        y_win = y_all[i + L:i + L + H]         # [H]
+        x_win = y_all[i:i + L]  # [L]
+        y_win = y_all[i + L:i + L + H]  # [H]
 
         pe_cont = exo_cont[i:i + L, :] if exo_cont.shape[1] > 0 else np.zeros((L, 0), dtype=np.float32)
         pe_cat = exo_cat[i:i + L, :] if exo_cat.shape[1] > 0 else np.zeros((L, 0), dtype=np.int64)
 
-        # Future Exo
+        # Future Exo: 여기서는 start_idx만 만들고 반환
         last_dt = int(d_all[i + L - 1])
-        start_idx = int(self.date_indexer(last_dt)) + 1
+        start_idx = int(self.date_indexer(last_dt)) + 1  # "미래" 첫 시점 인덱스
 
-        fe = np.zeros((H, 0), dtype=np.float32)
-        if self.future_exo_cb is not None:
-            res = self.future_exo_cb(start_idx, H, device="cpu")
-            fe = res.detach().cpu().numpy() if isinstance(res, torch.Tensor) else np.asarray(res, dtype=np.float32)
-            if fe.shape[0] != H:
-                raise ValueError(f"future_exo_cb must return (H, E), got {fe.shape}")
+        # torch 변환은 최소화 (여기서는 가볍게 유지)
+        x = torch.from_numpy(x_win).to(torch.float32).unsqueeze(-1)  # [L,1]
+        y = torch.from_numpy(y_win).to(torch.float32)  # [H]
+        pe_cont_t = torch.from_numpy(pe_cont).to(torch.float32)  # [L,E_cont]
+        pe_cat_t = torch.from_numpy(pe_cat).to(torch.long)  # [L,E_cat]
 
-        x = torch.tensor(x_win, dtype=torch.float32).unsqueeze(-1)  # [L,1]
-        y = torch.tensor(y_win, dtype=torch.float32)                # [H]
-        pe_cont_t = torch.tensor(pe_cont, dtype=torch.float32)      # [L,E_cont]
-        pe_cat_t = torch.tensor(pe_cat, dtype=torch.long)           # [L,E_cat]
-        fe_t = torch.tensor(fe, dtype=torch.float32)                # [H,E_fut]
+        # fe_t는 만들지 않음. start_idx만 반환
+        return x, y, uid, start_idx, pe_cont_t, pe_cat_t
 
-        return x, y, uid, fe_t, pe_cont_t, pe_cat_t
+    # def __getitem__(self, idx: int):
+    #     uid, i = self.index_map[idx]
+    #     pack = self.series[uid]
+    #
+    #     y_all = pack["y"]
+    #     d_all = pack["d"]
+    #     exo_cont = pack["exo_cont"]
+    #     exo_cat = pack["exo_cat"]
+    #
+    #     L = self.lookback
+    #     H = self.horizon
+    #
+    #     x_win = y_all[i:i + L]                 # [L]
+    #     y_win = y_all[i + L:i + L + H]         # [H]
+    #
+    #     pe_cont = exo_cont[i:i + L, :] if exo_cont.shape[1] > 0 else np.zeros((L, 0), dtype=np.float32)
+    #     pe_cat = exo_cat[i:i + L, :] if exo_cat.shape[1] > 0 else np.zeros((L, 0), dtype=np.int64)
+    #
+    #     # Future Exo
+    #     last_dt = int(d_all[i + L - 1])
+    #     start_idx = int(self.date_indexer(last_dt)) + 1
+    #
+    #     fe = np.zeros((H, 0), dtype=np.float32)
+    #     if self.future_exo_cb is not None:
+    #         res = self.future_exo_cb(start_idx, H, device="cpu")
+    #         fe = res.detach().cpu().numpy() if isinstance(res, torch.Tensor) else np.asarray(res, dtype=np.float32)
+    #         if fe.shape[0] != H:
+    #             raise ValueError(f"future_exo_cb must return (H, E), got {fe.shape}")
+    #
+    #     x = torch.tensor(x_win, dtype=torch.float32).unsqueeze(-1)  # [L,1]
+    #     y = torch.tensor(y_win, dtype=torch.float32)                # [H]
+    #     pe_cont_t = torch.tensor(pe_cont, dtype=torch.float32)      # [L,E_cont]
+    #     pe_cat_t = torch.tensor(pe_cat, dtype=torch.long)           # [L,E_cat]
+    #     fe_t = torch.tensor(fe, dtype=torch.float32)                # [H,E_fut]
+    #
+    #     return x, y, uid, fe_t, pe_cont_t, pe_cat_t
 
 
 # ============================================================
@@ -303,7 +336,7 @@ class MultiPartExoAnchoredInferenceDataset(Dataset):
         self.fill_missing = fill_missing
         self.target_back_steps = int(target_back_steps)
         self.future_exo_cb = future_exo_cb
-        self.date_indexer = date_indexer or (lambda x: x)
+        self.date_indexer = date_indexer or identity_date_indexer
         self.cat_indexers = cat_indexers or {}
 
         self.inputs, self.ids = [], []
@@ -478,7 +511,7 @@ class MultiPartExoDataModule:
             horizon: int,
             *,
             freq: str = 'weekly',
-            batch_size: int = 32,
+            batch_size: int = 512,
             val_ratio: float = 0.2,
             shuffle: bool = True,          # 기본 True 권장 (동일 id 배치 문제 완화)
             seed: int = 42,
@@ -523,7 +556,7 @@ class MultiPartExoDataModule:
         self.fill_missing = fill_missing
         self.target_back_steps = int(target_back_steps)
         self.future_exo_cb = future_exo_cb
-        self.date_indexer = date_indexer or (lambda x: x)
+        self.date_indexer = date_indexer or identity_date_indexer
 
         self.cat_indexers: Dict[str, CategoryIndexer] = {}
 
@@ -627,25 +660,94 @@ class MultiPartExoDataModule:
         self.train_dataset = Subset(full_dataset, train_indices)
         self.val_dataset = Subset(full_dataset, val_indices)
 
-    def get_train_loader(self):
-        if self.train_dataset is None:
+    def get_train_loader(
+            self,
+            batch_size: Optional[int] = None,
+            shuffle: Optional[bool] = None,
+            drop_last: bool = True,
+            num_workers: int = 0,
+            pin_memory: bool = True,
+            persistent_workers: bool = True,
+            prefetch_factor: int = 2,
+    ):
+        if batch_size is None:
+            batch_size = self.batch_size
+        if shuffle is None:
+            shuffle = self.shuffle
+
+        # 1) setup 보장
+        if getattr(self, "train_dataset", None) is None:
             self.setup()
-        return DataLoader(
-            self.train_dataset,
-            batch_size=self.batch_size,
-            shuffle=self.shuffle,
-            drop_last=True
+
+        # 2) setup 이후에도 None이면 setup 로직이 dataset을 못 만들고 빠진 것
+        if getattr(self, "train_dataset", None) is None:
+            raise RuntimeError(
+                "[get_train_loader] train_dataset is None even after setup(). "
+                "Check setup(): full_dataset 생성 및 train/val split 경로에서 train_dataset 할당이 보장되는지 확인하세요."
+            )
+
+        # 3) batch 단위 future_exo 생성 collate_fn
+        collate_fn = build_train_collate_fn(
+            horizon=self.horizon,
+            future_exo_cb=self.future_exo_cb,
+            cache_size=4096,
         )
 
-    def get_val_loader(self):
+        # 4) DataLoader 옵션: Windows에서는 num_workers==0일 때 prefetch_factor/persistent_workers 넣으면 문제나는 경우가 있어 조건 처리
+        loader_kwargs = dict(
+            dataset=self.train_dataset,
+            batch_size=batch_size,
+            shuffle=shuffle,
+            drop_last=drop_last,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+            collate_fn=collate_fn,
+        )
+
+        if num_workers > 0:
+            loader_kwargs["persistent_workers"] = persistent_workers
+            loader_kwargs["prefetch_factor"] = prefetch_factor
+        else:
+            loader_kwargs["persistent_workers"] = False  # 명시적으로 off
+
+        return DataLoader(**loader_kwargs)
+
+    def get_val_loader(
+            self,
+            batch_size: Optional[int] = None,
+            drop_last: bool = False,
+            num_workers: int = 0,
+            pin_memory: bool = True,
+            persistent_workers: bool = True,
+            prefetch_factor: int = 2,
+    ):
         if self.val_dataset is None:
             self.setup()
-        return DataLoader(
-            self.val_dataset,
-            batch_size=self.batch_size,
-            shuffle=False,
-            drop_last=False
+
+        # train과 동일한 collate_fn 적용 (future_exo 생성 + 캐시)
+        collate_fn = build_train_collate_fn(
+            horizon=self.horizon,
+            future_exo_cb=self.future_exo_cb,
+            cache_size=4096,
         )
+
+        loader_kwargs = dict(
+            dataset=self.val_dataset,
+            batch_size=(batch_size or self.batch_size),
+            shuffle=False,
+            drop_last=drop_last,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+            collate_fn=collate_fn,
+        )
+
+        if num_workers > 0:
+            loader_kwargs["persistent_workers"] = persistent_workers
+            loader_kwargs["prefetch_factor"] = prefetch_factor
+        else:
+            loader_kwargs["persistent_workers"] = False
+
+        return DataLoader(**loader_kwargs)
 
     def get_inference_loader_at_plan(self, plan_dt: int):
         """
@@ -669,3 +771,113 @@ class MultiPartExoDataModule:
             cat_indexers=self.cat_indexers,
         )
         return DataLoader(ds, batch_size=self.batch_size, shuffle=False)
+
+
+
+from dataclasses import dataclass, field
+from typing import Optional, Callable, Dict, List, Tuple
+import numpy as np
+import torch
+
+@dataclass
+class TrainCollateWithFutureExo:
+    horizon: int
+    future_exo_cb: Optional[Callable] = None
+    cache_size: int = 4096
+    cache: Dict[int, np.ndarray] = field(default_factory=dict)
+    cache_keys: List[int] = field(default_factory=list)
+
+    def _cache_get(self, k: int):
+        return self.cache.get(k, None)
+
+    def _cache_put(self, k: int, v: np.ndarray):
+        if self.cache_size <= 0:
+            return
+        if k in self.cache:
+            return
+        self.cache[k] = v
+        self.cache_keys.append(k)
+        if len(self.cache_keys) > self.cache_size:
+            old = self.cache_keys.pop(0)
+            self.cache.pop(old, None)
+
+    def __call__(self, batch):
+        # batch items: (x, y, uid, start_idx, pe_cont, pe_cat)
+        xs, ys, uids, start_idxs, pe_conts, pe_cats = zip(*batch)
+
+        x = torch.stack(xs, dim=0)           # [B,L,1]
+        y = torch.stack(ys, dim=0)           # [B,H]
+        pe_cont = torch.stack(pe_conts, 0)   # [B,L,E_cont]
+        pe_cat = torch.stack(pe_cats, 0)     # [B,L,E_cat]
+        uid_list = list(uids)
+
+        B = len(start_idxs)
+        H = int(self.horizon)
+
+        # future exo 생성
+        if self.future_exo_cb is None:
+            fe = torch.zeros((B, H, 0), dtype=torch.float32)
+            return x, y, uid_list, fe, pe_cont, pe_cat
+
+        # 1) 캐시 조회
+        fe_list: List[Optional[np.ndarray]] = []
+        miss: List[int] = []
+        miss_pos: List[int] = []
+        for bi, s in enumerate(start_idxs):
+            s = int(s)
+            cached = self._cache_get(s)
+            if cached is None:
+                miss.append(s)
+                miss_pos.append(bi)
+                fe_list.append(None)
+            else:
+                fe_list.append(cached)
+
+        # 2) miss batch 호출
+        if miss:
+            try:
+                t0 = time.time()
+                res = self.future_exo_cb(miss, H, device="cpu")
+                t1 = time.time()
+                print(f"[future_exo_cb] batch call OK | miss={len(miss)} | time={t1 - t0:.3f}s")
+                res = self.future_exo_cb(miss, H, device="cpu")
+                if isinstance(res, torch.Tensor):
+                    res = res.detach().cpu().numpy()
+                res = np.asarray(res, dtype=np.float32)
+
+                if res.ndim != 3 or res.shape[0] != len(miss) or res.shape[1] != H:
+                    raise ValueError(f"batch future_exo_cb must return (B,H,E). got={res.shape}")
+
+                for k, bi in enumerate(miss_pos):
+                    fe_arr = res[k]
+                    fe_list[bi] = fe_arr
+                    self._cache_put(int(miss[k]), fe_arr)
+
+            except Exception as e:
+                # batch 미지원 fallback
+                print(f"[future_exo_cb] batch call FAILED -> fallback | miss={len(miss)} | err={repr(e)}")
+
+                for s, bi in zip(miss, miss_pos):
+                    res = self.future_exo_cb(int(s), H, device="cpu")
+                    if isinstance(res, torch.Tensor):
+                        res = res.detach().cpu().numpy()
+                    fe_arr = np.asarray(res, dtype=np.float32)
+                    if fe_arr.shape[0] != H:
+                        raise ValueError(f"future_exo_cb must return (H,E). got={fe_arr.shape}")
+                    fe_list[bi] = fe_arr
+                    self._cache_put(int(s), fe_arr)
+
+        # 3) stack -> torch
+        fe_np = np.stack(fe_list, axis=0).astype(np.float32)  # [B,H,E]
+        fe = torch.from_numpy(fe_np).to(torch.float32)
+        return x, y, uid_list, fe, pe_cont, pe_cat
+
+
+def build_train_collate_fn(
+    *,
+    horizon: int,
+    future_exo_cb: Optional[Callable] = None,
+    cache_size: int = 4096,
+):
+    # 주의: future_exo_cb도 반드시 pickle 가능한 “top-level 함수/클래스”여야 합니다.
+    return TrainCollateWithFutureExo(horizon=int(horizon), future_exo_cb=future_exo_cb, cache_size=int(cache_size))

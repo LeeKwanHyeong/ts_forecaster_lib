@@ -1,6 +1,8 @@
 import torch
 import torch.nn as nn
 from typing import Literal, Optional, Callable, List
+from typing import Callable, Union, Sequence
+import numpy as np
 
 
 def calendar_sin_cos(t: torch.Tensor, period: float) -> torch.Tensor:
@@ -12,61 +14,106 @@ def calendar_sin_cos(t: torch.Tensor, period: float) -> torch.Tensor:
         torch.cos(2 * torch.pi * t / period)
     ], dim=-1)
 
-
-def compose_exo_calendar_cb(date_type: str = "W", *, sincos: bool = True) -> Callable:
+def compose_exo_calendar_cb(date_type: str = "weekly", *, sincos: bool = True) -> Callable:
     """
-    date_type에 따른 주기적 외생변수 생성 콜백 반환.
-
-    지원 date_type:
-      - 'M' (Monthly): 12개월 주기
-      - 'W' (Weekly) : 52주 주기
-      - 'D' (Daily)  : 7일(요일) + 365.25일(연간) 주기 (E=4 if sincos)
-      - 'H' (Hourly) : 24시간(일간) + 168시간(주간) 주기 (E=4 if sincos)
-
     Returns:
-        cb(start_idx, H, device) -> Tensor shape [H, E]
+        cb(start_idx, H, device) ->
+          - start_idx scalar: (H, E)
+          - start_idx batch : (B, H, E)
     """
-    date_type = date_type.upper()
-
-    # 주기 설정 (List of periods)
-    # 딥러닝 모델은 절대적인 날짜보다 '반복되는 주기성'을 학습하는 것이 중요.
-    if date_type == 'M':
+    dt = date_type.lower()
+    if dt == "monthly":
         periods = [12.0]
-    elif date_type == 'W':
+    elif dt == "weekly":
         periods = [52.0]
-    elif date_type == 'D':
-        # Day of Week (7), Day of Year (365.25)
+    elif dt == "daily":
         periods = [7.0, 365.25]
-    elif date_type == 'H':
-        # Hour of Day (24), Hour of Week (24*7=168)
+    elif dt == "hourly":
         periods = [24.0, 168.0]
     else:
-        # 기본값 (주간 가정)
         periods = [52.0]
 
-    def cb(start_idx: int, H: int, device='cuda' if torch.cuda.is_available() else 'mps'):
-        # t: [start_idx, ..., start_idx + H - 1]
-        t = torch.arange(start_idx, start_idx + H, device=device, dtype=torch.float32)
+    def cb(start_idx: Union[int, Sequence[int], np.ndarray], H: int, device: str = "cpu"):
+        H = int(H)
+        dev = torch.device(device)
+
+        is_scalar = isinstance(start_idx, (int, np.integer))
+        if is_scalar:
+            s = torch.tensor([int(start_idx)], device=dev, dtype=torch.float32)  # (1,)
+        else:
+            s = torch.as_tensor(np.asarray(start_idx, dtype=np.int64).reshape(-1), device=dev).to(torch.float32)  # (B,)
+
+        offs = torch.arange(0, H, device=dev, dtype=torch.float32)  # (H,)
+        t = s[:, None] + offs[None, :]                               # (B, H)
 
         feats = []
         if sincos:
             for p in periods:
-                # 각 주기별 sin, cos 쌍 추가 -> (H, 2)
-                feats.append(calendar_sin_cos(t, p))
-
-            # (H, 2 * len(periods))
-            exo = torch.cat(feats, dim=-1)
+                feats.append(calendar_sin_cos(t, p))                 # (B,H,2)
+            exo = torch.cat(feats, dim=-1)                           # (B,H,2*len(periods))
         else:
-            # Normalized linear ramp [0, 1) for each period
             for p in periods:
-                # (t % p) / p -> (H, 1)
-                feat = ((t % p) / p).unsqueeze(-1)
-                feats.append(feat)
-            exo = torch.cat(feats, dim=-1)
+                feats.append(((t % float(p)) / float(p)).unsqueeze(-1))  # (B,H,1)
+            exo = torch.cat(feats, dim=-1)                           # (B,H,len(periods))
 
-        return exo  # [H, E]
+        return exo[0] if is_scalar else exo
 
     return cb
+
+# def compose_exo_calendar_cb(date_type: str = "weekly", *, sincos: bool = True) -> Callable:
+#     """
+#     date_type에 따른 주기적 외생변수 생성 콜백 반환.
+#
+#     지원 date_type:
+#       - 'monthly' (Monthly): 12개월 주기
+#       - 'weekly' (Weekly) : 52주 주기
+#       - 'daily' (Daily)  : 7일(요일) + 365.25일(연간) 주기 (E=4 if sincos)
+#       - 'hourly' (Hourly) : 24시간(일간) + 168시간(주간) 주기 (E=4 if sincos)
+#
+#     Returns:
+#         cb(start_idx, H, device) -> Tensor shape [H, E]
+#     """
+#     date_type = date_type.upper()
+#
+#     # 주기 설정 (List of periods)
+#     # 딥러닝 모델은 절대적인 날짜보다 '반복되는 주기성'을 학습하는 것이 중요.
+#     if date_type == 'M':
+#         periods = [12.0]
+#     elif date_type == 'W':
+#         periods = [52.0]
+#     elif date_type == 'D':
+#         # Day of Week (7), Day of Year (365.25)
+#         periods = [7.0, 365.25]
+#     elif date_type == 'H':
+#         # Hour of Day (24), Hour of Week (24*7=168)
+#         periods = [24.0, 168.0]
+#     else:
+#         # 기본값 (주간 가정)
+#         periods = [52.0]
+#
+#     def cb(start_idx: int, H: int, device='cuda' if torch.cuda.is_available() else 'mps'):
+#         # t: [start_idx, ..., start_idx + H - 1]
+#         t = torch.arange(start_idx, start_idx + H, device=device, dtype=torch.float32)
+#
+#         feats = []
+#         if sincos:
+#             for p in periods:
+#                 # 각 주기별 sin, cos 쌍 추가 -> (H, 2)
+#                 feats.append(calendar_sin_cos(t, p))
+#
+#             # (H, 2 * len(periods))
+#             exo = torch.cat(feats, dim=-1)
+#         else:
+#             # Normalized linear ramp [0, 1) for each period
+#             for p in periods:
+#                 # (t % p) / p -> (H, 1)
+#                 feat = ((t % p) / p).unsqueeze(-1)
+#                 feats.append(feat)
+#             exo = torch.cat(feats, dim=-1)
+#
+#         return exo  # [H, E]
+#
+#     return cb
 
 
 # ===== 공용 유틸 =====

@@ -286,3 +286,18 @@ class DateUtil:
         dt = datetime.strptime(s, "%Y%m%d%H")
         new_dt = dt + timedelta(hours=hours)
         return int(new_dt.strftime("%Y%m%d%H"))
+
+    @staticmethod
+    def yyyyww_to_monday(yyyyww: int) -> date:
+        y = yyyyww // 100
+        w = yyyyww % 100
+        return date.fromisocalendar(y, w, 1)
+
+    @staticmethod
+    def monday_to_yyyyww(d: date) -> int:
+        iso_y, iso_w, _ = d.isocalendar()
+        return iso_y * 100 + iso_w
+
+    @staticmethod
+    def add_week(yyyyww: int, add: int) -> int:
+        return DateUtil.monday_to_yyyyww(DateUtil.yyyyww_to_monday(yyyyww) + timedelta(weeks=add))
