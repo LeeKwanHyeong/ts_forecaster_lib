@@ -226,7 +226,6 @@ def _run_patchtst(
         ssl_loss_type: str = "mse",
         ssl_freeze_encoder_before_ft: bool = False,
 ):
-    print(f'exogenous dimension:: {exo_dim}')
     pt_kwargs = dict(
         device=device,
         lookback=lookback,
@@ -236,9 +235,45 @@ def _run_patchtst(
         n_layers=3,
         patch_len=patch_len,
         stride=stride,
-        d_future=exo_dim,
+        d_future=exo_dim,     # future exo dim (A0=0, A1=2, A2=3 ...)
         use_revin=True,
     )
+
+    # >>> PATCH START: infer past_exo dims from loader batch and inject into pt_kwargs
+    # 목적: backbone init 시점에 d_past_cont/d_past_cat가 0으로 고정되는 문제 해결
+    # 전제: loader batch tuple = (x, y, uid, fe, pe_cont, pe_cat)
+    d_past_cont = 0
+    d_past_cat = 0
+    try:
+        b = next(iter(train_loader))
+        if isinstance(b, (list, tuple)) and len(b) >= 6:
+            # x, y, uid, fe, pe_cont, pe_cat
+            pe_cont = b[4]
+            pe_cat = b[5]
+
+            if pe_cont is not None and hasattr(pe_cont, "ndim") and pe_cont.ndim == 3:
+                d_past_cont = int(pe_cont.shape[-1])
+            if pe_cat is not None and hasattr(pe_cat, "ndim") and pe_cat.ndim == 3:
+                d_past_cat = int(pe_cat.shape[-1])
+        else:
+            print(f"[DBG-pt_kwargs] unexpected batch format: type={type(b)} len={len(b) if hasattr(b,'__len__') else 'NA'}")
+    except Exception as e:
+        print(f"[DBG-pt_kwargs] failed to infer past_exo dims: {repr(e)}")
+        d_past_cont, d_past_cat = 0, 0
+
+    # 안전: use_exogenous_mode=False면 future exo 차원도 강제로 0으로
+    if not use_exogenous_mode:
+        pt_kwargs["d_future"] = 0
+
+    pt_kwargs["d_past_cont"] = d_past_cont
+    pt_kwargs["d_past_cat"] = d_past_cat
+
+    print(
+        f"[DBG-pt_kwargs] use_exogenous_mode={use_exogenous_mode} | "
+        f"d_future={pt_kwargs['d_future']} | d_past_cont={d_past_cont} | d_past_cat={d_past_cat}"
+    )
+    # <<< PATCH END
+
 
     # ---------------------------
     # (NEW) 0) self-supervised pretrain (optional)
@@ -249,13 +284,9 @@ def _run_patchtst(
         pretrain_dir.mkdir(parents=True, exist_ok=True)
         pretrain_ckpt_path = str(pretrain_dir / "patchtst_pretrain_best.pt")
 
-        # pretrain에 쓸 cfg는 PatchTSTConfig 기반으로 동일 backbone 설정을 쓰는 것이 중요
-        pt_pre_cfg = PatchTSTConfig(**pt_kwargs, loss_mode="point",
-                                    point_loss="mse")  # loss_mode는 실질적으로 pretrain에서 크게 중요하지 않음
+        pt_pre_cfg = PatchTSTConfig(**pt_kwargs, loss_mode="point", point_loss="mse")
         pre_model = PatchTSTPretrainModel(cfg=pt_pre_cfg)
 
-        # pretrain용 TrainingConfig는 point_train_cfg를 재사용해도 되지만,
-        # epochs/lr만 명시적으로 바꾸는 것을 권장
         pre_train_cfg = point_train_cfg
         pre_stages = [StageConfig(epochs=ssl_pretrain_epochs, lr=point_train_cfg.lr, spike_enabled=False)]
 
@@ -273,7 +304,7 @@ def _run_patchtst(
         )
 
     # ---------------------------
-    # 1) PatchTST Base (supervised)  ← 기존 train_patchtst -> finetune로 교체
+    # 1) PatchTST Base (supervised)
     # ---------------------------
     pt_base_cfg = PatchTSTConfig(**pt_kwargs, loss_mode='point', point_loss='huber')
     pt_base = build_patchTST_base(pt_base_cfg)
@@ -294,7 +325,7 @@ def _run_patchtst(
             pt_base, train_loader, val_loader,
             train_cfg=point_train_cfg, stages=list(stages),
             future_exo_cb=future_exo_cb,
-            use_exogenous_mode = use_exogenous_mode
+            use_exogenous_mode=use_exogenous_mode
         )
 
     if save_root:
@@ -307,7 +338,7 @@ def _run_patchtst(
     results['PatchTST Base'] = best_pt_base
 
     # ---------------------------
-    # 2) PatchTST Quantile (supervised)  ← 동일하게 finetune로 교체
+    # 2) PatchTST Quantile (supervised)
     # ---------------------------
     pt_q_cfg = PatchTSTConfig(**pt_kwargs, loss_mode='quantile', quantiles=(0.1, 0.5, 0.9))
     pt_q = build_patchTST_quantile(pt_q_cfg)

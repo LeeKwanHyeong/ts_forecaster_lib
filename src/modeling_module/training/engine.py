@@ -31,7 +31,7 @@ class CommonTrainer:
         future_exo_cb=None,
         autocast_input=None,
         extra_loss_fn=None,
-        use_exogenous_mode = False
+        use_exogenous_mode = False,
     ):
         self.cfg = cfg
         self.adapter: DefaultAdapter = adapter
@@ -49,6 +49,10 @@ class CommonTrainer:
         self.enabled = self.autocast_input.get("enabled", self.amp_enabled)
         self.dtype = self.autocast_input.get("dtype", None)
 
+        self._dbg_spike_seen = 0
+        self._dbg_loss_comp_base = None  # spike OFF LossComputer
+        self._dbg_max_print = 3          # first N batches only
+
         def _dump(obj, title):
             data = asdict(obj) if is_dataclass(obj) else obj.__dict__
             self.logger(f"[CommonTrainer] {title}")
@@ -57,6 +61,68 @@ class CommonTrainer:
         _dump(self.cfg, "TrainingConfig (final)")
         if hasattr(self.adapter, "cfg"):
             _dump(self.adapter.cfg, "Adapter Config")
+
+    def _get_spike_enabled(self) -> bool:
+        sl = self.cfg.get("spike_loss") if isinstance(self.cfg, dict) else getattr(self.cfg, "spike_loss", None)
+        if sl is None:
+            return False
+        if isinstance(sl, dict):
+            return bool(sl.get("enabled", False))
+        return bool(getattr(sl, "enabled", False))
+
+    def _clone_cfg_disable_spike(self):
+        cfg2 = copy.deepcopy(self.cfg)
+        if isinstance(cfg2, dict):
+            cfg2.setdefault("spike_loss", {})
+            cfg2["spike_loss"]["enabled"] = False
+        else:
+            if hasattr(cfg2, "spike_loss"):
+                if isinstance(cfg2.spike_loss, dict):
+                    cfg2.spike_loss["enabled"] = False
+                else:
+                    cfg2.spike_loss.enabled = False
+        return cfg2
+
+    def _debug_spike_breakdown(self, pred, y, *, is_val: bool, tag: str):
+        """
+        같은 (pred, y)로:
+          - spike ON loss (현재 self.loss_comp)
+          - spike OFF loss (임시 LossComputer)
+        를 비교해서 spike component가 폭증 원인인지 즉시 확인.
+        """
+        # 1) 스케일/유효성 로그
+        with torch.no_grad():
+            y_f = y.detach()
+            # pred가 dict/tuple일 수 있으므로 LossComputer에 맡기되,
+            # 스케일 체크는 가능한 범위에서만 수행
+            y_abs_max = float(y_f.abs().max().item())
+            y_mean = float(y_f.mean().item())
+            y_zero_ratio = float((y_f == 0).float().mean().item())
+
+        # 2) spike OFF LossComputer 준비
+        if self._dbg_loss_comp_base is None:
+            cfg_no_spike = self._clone_cfg_disable_spike()
+            self._dbg_loss_comp_base = LossComputer(cfg_no_spike)
+
+        # 3) loss 비교
+        loss_on = self.loss_comp.compute(pred, y, is_val=is_val)
+        loss_off = self._dbg_loss_comp_base.compute(pred, y, is_val=is_val)
+
+        # 4) scalar로 변환
+        def _scalar(v):
+            if torch.is_tensor(v):
+                return float(v.detach().float().mean().item()) if v.numel() > 1 else float(v.detach().item())
+            return float(v)
+
+        lon = _scalar(loss_on)
+        loff = _scalar(loss_off)
+        delta = lon - loff
+
+        self.logger(
+            f"[DBG-{tag}] spike_enabled=True | loss_on={lon:.6e} | loss_off={loff:.6e} | delta={delta:.6e} | "
+            f"y_mean={y_mean:.3e} y_abs_max={y_abs_max:.3e} y_zero_ratio={y_zero_ratio:.3f}"
+        )
+
 
     # ----------------- 내부 유틸 -----------------
     @staticmethod
@@ -221,6 +287,7 @@ class CommonTrainer:
                 if pe_cont is not None: self._nan_stat("past_exo_cont", pe_cont)
                 if pe_cat  is not None: self._nan_stat("past_exo_cat",  pe_cat)
 
+
                 if train:
                     self.opt.zero_grad(set_to_none=True)
 
@@ -252,6 +319,13 @@ class CommonTrainer:
                     self._nan_stat("pred", pred)
 
                     loss = self.loss_comp.compute(pred, y, is_val=(not train))
+                    # ---- DEBUG: spike-loss breakdown (first few batches only) ----
+                    if self._get_spike_enabled():
+                        self._dbg_spike_seen += 1
+                        if self._dbg_spike_seen <= self._dbg_max_print:
+                            self._debug_spike_breakdown(pred, y, is_val=(not train), tag=("train" if train else "eval"))
+
+
                     if self.extra_loss_fn is not None:
                         loss = loss + self.extra_loss_fn(x, pred, self.cfg)
 
@@ -353,6 +427,12 @@ class CommonTrainer:
                                 mode="eval",
                             )
                             vloss = self.loss_comp.compute(pred, y_val, is_val=True)
+                            if self._get_spike_enabled():
+                                # val에서도 처음 몇 번만 찍고 싶으면 별도 카운터를 쓰거나
+                                # train 카운터를 재활용해도 됩니다.
+                                if self._dbg_spike_seen <= self._dbg_max_print:
+                                    self._debug_spike_breakdown(pred, y_val, is_val=True, tag="val")
+
                             if self.extra_loss_fn is not None:
                                 vloss = vloss + self.extra_loss_fn(x_val, pred, self.cfg)
                             val_total += float(vloss.detach())

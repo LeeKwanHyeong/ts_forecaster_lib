@@ -690,7 +690,7 @@ class MultiPartExoDataModule:
         collate_fn = build_train_collate_fn(
             horizon=self.horizon,
             future_exo_cb=self.future_exo_cb,
-            cache_size=4096,
+            cache_size=15000,
         )
 
         # 4) DataLoader 옵션: Windows에서는 num_workers==0일 때 prefetch_factor/persistent_workers 넣으면 문제나는 경우가 있어 조건 처리
@@ -728,7 +728,7 @@ class MultiPartExoDataModule:
         collate_fn = build_train_collate_fn(
             horizon=self.horizon,
             future_exo_cb=self.future_exo_cb,
-            cache_size=4096,
+            cache_size=15000,
         )
 
         loader_kwargs = dict(
@@ -783,7 +783,7 @@ import torch
 class TrainCollateWithFutureExo:
     horizon: int
     future_exo_cb: Optional[Callable] = None
-    cache_size: int = 4096
+    cache_size: int = 15000
     cache: Dict[int, np.ndarray] = field(default_factory=dict)
     cache_keys: List[int] = field(default_factory=list)
 
@@ -805,16 +805,16 @@ class TrainCollateWithFutureExo:
         # batch items: (x, y, uid, start_idx, pe_cont, pe_cat)
         xs, ys, uids, start_idxs, pe_conts, pe_cats = zip(*batch)
 
-        x = torch.stack(xs, dim=0)           # [B,L,1]
-        y = torch.stack(ys, dim=0)           # [B,H]
-        pe_cont = torch.stack(pe_conts, 0)   # [B,L,E_cont]
-        pe_cat = torch.stack(pe_cats, 0)     # [B,L,E_cat]
+        x = torch.stack(xs, dim=0)  # [B,L,1]
+        y = torch.stack(ys, dim=0)  # [B,H]
+        pe_cont = torch.stack(pe_conts, 0)  # [B,L,E_cont]
+        pe_cat = torch.stack(pe_cats, 0)  # [B,L,E_cat]
         uid_list = list(uids)
 
         B = len(start_idxs)
         H = int(self.horizon)
 
-        # future exo 생성
+        # future exo가 없으면 바로 리턴
         if self.future_exo_cb is None:
             fe = torch.zeros((B, H, 0), dtype=torch.float32)
             return x, y, uid_list, fe, pe_cont, pe_cat
@@ -823,54 +823,120 @@ class TrainCollateWithFutureExo:
         fe_list: List[Optional[np.ndarray]] = []
         miss: List[int] = []
         miss_pos: List[int] = []
+
+        # 최적화: start_idxs는 tensor나 numpy가 아닐 수 있으므로 int 변환을 한 번만 수행
         for bi, s in enumerate(start_idxs):
-            s = int(s)
-            cached = self._cache_get(s)
+            s_int = int(s)
+            cached = self._cache_get(s_int)
             if cached is None:
-                miss.append(s)
+                miss.append(s_int)
                 miss_pos.append(bi)
                 fe_list.append(None)
             else:
                 fe_list.append(cached)
 
-        # 2) miss batch 호출
+        # 2) miss batch 처리 (병목 지점)
         if miss:
             try:
-                t0 = time.time()
+                # --- [수정됨] 불필요한 시간 측정 및 print 제거, 중복 호출 제거 ---
+                # 배치 처리가 가능한지 시도
                 res = self.future_exo_cb(miss, H, device="cpu")
-                t1 = time.time()
-                print(f"[future_exo_cb] batch call OK | miss={len(miss)} | time={t1 - t0:.3f}s")
-                res = self.future_exo_cb(miss, H, device="cpu")
+
                 if isinstance(res, torch.Tensor):
                     res = res.detach().cpu().numpy()
                 res = np.asarray(res, dtype=np.float32)
 
                 if res.ndim != 3 or res.shape[0] != len(miss) or res.shape[1] != H:
-                    raise ValueError(f"batch future_exo_cb must return (B,H,E). got={res.shape}")
+                    raise ValueError(f"Batch shape mismatch. got={res.shape}, expected=({len(miss)}, {H}, E)")
 
                 for k, bi in enumerate(miss_pos):
                     fe_arr = res[k]
                     fe_list[bi] = fe_arr
-                    self._cache_put(int(miss[k]), fe_arr)
+                    self._cache_put(miss[k], fe_arr)
 
-            except Exception as e:
-                # batch 미지원 fallback
-                print(f"[future_exo_cb] batch call FAILED -> fallback | miss={len(miss)} | err={repr(e)}")
-
-                for s, bi in zip(miss, miss_pos):
-                    res = self.future_exo_cb(int(s), H, device="cpu")
+            except Exception:
+                # 배치 처리가 실패하면 개별 루프로 Fallback
+                # (여기도 print 제거 혹은 logging 모듈 사용 권장)
+                for s_val, bi in zip(miss, miss_pos):
+                    res = self.future_exo_cb(s_val, H, device="cpu")
                     if isinstance(res, torch.Tensor):
                         res = res.detach().cpu().numpy()
                     fe_arr = np.asarray(res, dtype=np.float32)
-                    if fe_arr.shape[0] != H:
-                        raise ValueError(f"future_exo_cb must return (H,E). got={fe_arr.shape}")
                     fe_list[bi] = fe_arr
-                    self._cache_put(int(s), fe_arr)
+                    self._cache_put(s_val, fe_arr)
 
         # 3) stack -> torch
         fe_np = np.stack(fe_list, axis=0).astype(np.float32)  # [B,H,E]
         fe = torch.from_numpy(fe_np).to(torch.float32)
+
         return x, y, uid_list, fe, pe_cont, pe_cat
+
+    # def __call__(self, batch):
+    #     # batch items: (x, y, uid, start_idx, pe_cont, pe_cat)
+    #     xs, ys, uids, start_idxs, pe_conts, pe_cats = zip(*batch)
+    #
+    #     x = torch.stack(xs, dim=0)           # [B,L,1]
+    #     y = torch.stack(ys, dim=0)           # [B,H]
+    #     pe_cont = torch.stack(pe_conts, 0)   # [B,L,E_cont]
+    #     pe_cat = torch.stack(pe_cats, 0)     # [B,L,E_cat]
+    #     uid_list = list(uids)
+    #
+    #     B = len(start_idxs)
+    #     H = int(self.horizon)
+    #
+    #     # future exo 생성
+    #     if self.future_exo_cb is None:
+    #         fe = torch.zeros((B, H, 0), dtype=torch.float32)
+    #         return x, y, uid_list, fe, pe_cont, pe_cat
+    #
+    #     # 1) 캐시 조회
+    #     fe_list: List[Optional[np.ndarray]] = []
+    #     miss: List[int] = []
+    #     miss_pos: List[int] = []
+    #     for bi, s in enumerate(start_idxs):
+    #         s = int(s)
+    #         cached = self._cache_get(s)
+    #         if cached is None:
+    #             miss.append(s)
+    #             miss_pos.append(bi)
+    #             fe_list.append(None)
+    #         else:
+    #             fe_list.append(cached)
+    #
+    #     # 2) miss batch 호출
+    #     if miss:
+    #         try:
+    #             res = self.future_exo_cb(miss, H, device="cpu")
+    #             if isinstance(res, torch.Tensor):
+    #                 res = res.detach().cpu().numpy()
+    #             res = np.asarray(res, dtype=np.float32)
+    #
+    #             if res.ndim != 3 or res.shape[0] != len(miss) or res.shape[1] != H:
+    #                 raise ValueError(f"batch future_exo_cb must return (B,H,E). got={res.shape}")
+    #
+    #             for k, bi in enumerate(miss_pos):
+    #                 fe_arr = res[k]
+    #                 fe_list[bi] = fe_arr
+    #                 self._cache_put(int(miss[k]), fe_arr)
+    #
+    #         except Exception as e:
+    #             # batch 미지원 fallback
+    #             print(f"[future_exo_cb] batch call FAILED -> fallback | miss={len(miss)} | err={repr(e)}")
+    #
+    #             for s, bi in zip(miss, miss_pos):
+    #                 res = self.future_exo_cb(int(s), H, device="cpu")
+    #                 if isinstance(res, torch.Tensor):
+    #                     res = res.detach().cpu().numpy()
+    #                 fe_arr = np.asarray(res, dtype=np.float32)
+    #                 if fe_arr.shape[0] != H:
+    #                     raise ValueError(f"future_exo_cb must return (H,E). got={fe_arr.shape}")
+    #                 fe_list[bi] = fe_arr
+    #                 self._cache_put(int(s), fe_arr)
+    #
+    #     # 3) stack -> torch
+    #     fe_np = np.stack(fe_list, axis=0).astype(np.float32)  # [B,H,E]
+    #     fe = torch.from_numpy(fe_np).to(torch.float32)
+    #     return x, y, uid_list, fe, pe_cont, pe_cat
 
 
 def build_train_collate_fn(

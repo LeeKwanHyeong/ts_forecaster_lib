@@ -31,6 +31,7 @@ class PatchBackboneBase(nn.Module):
         self.d_past_cont = getattr(cfg, 'd_past_cont', 0)
         self.cont_input_dim = self.patch_len * self.d_past_cont
 
+
         # C. Past Categorical Exo Dimension
         self.d_past_cat = getattr(cfg, 'd_past_cat', 0)
         self.cat_cardinalities = getattr(cfg, 'cat_cardinalities', [])
@@ -51,6 +52,9 @@ class PatchBackboneBase(nn.Module):
 
         # D. Total Input Dimension per Patch
         self.total_input_dim = self.target_input_dim + self.cont_input_dim + self.cat_input_dim
+
+        print(f"[DBG-backbone-init] d_past_cont={self.d_past_cont} cont_input_dim={self.cont_input_dim} "
+              f"target_input_dim={self.target_input_dim} total_input_dim={self.total_input_dim}")
 
         # E. Projection Layer (All -> d_model)
         # 기존 Conv1d 대신 Linear Projection 사용 (유연성을 위해)

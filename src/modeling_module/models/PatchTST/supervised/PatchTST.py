@@ -180,6 +180,9 @@ class PatchTSTPointModel(nn.Module):
         use_revin = getattr(self.cfg, "use_revin", True)
         x_n = self.revin_layer(x, "norm") if use_revin else x
 
+        # print("[DBG-model] p_cont:", None if p_cont is None else p_cont.shape)
+        # print("[DBG-model] p_cat :", None if p_cat is None else p_cat.shape)
+
         # 2) Backbone Forward (Past Exo)
         z = self.backbone(x_n, p_cont=p_cont, p_cat=p_cat)  # [B, N, d_model]
 
