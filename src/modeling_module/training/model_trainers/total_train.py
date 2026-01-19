@@ -527,6 +527,7 @@ def _run_titan(
         best_ti_s2s["ckpt_path"] = str(ckpt_path)
     results['Titan Seq2Seq'] = best_ti_s2s
 
+
 def _run_patchmixer(
         *,
         results: Dict[str, Dict],
@@ -576,14 +577,44 @@ def _run_patchmixer(
         part_embed_dim=16,
         final_nonneg=True,
         use_eol_prior=False,
-        exo_is_normalized_default=(freq != 'monthly'),  # 월간만 False 권장
+        # exo_is_normalized_default=(freq != 'monthly'),  # 월간만 False 권장
+        exo_is_normalized_default=False,  # 월간만 False 권장
         expander_season_period=season_period,
         expander_n_harmonics=min(season_period // 2, 16),
     )
 
+    d_past_cont = 0
+    d_past_cat = 0
+    try:
+        b = next(iter(train_loader))
+        if isinstance(b, (list, tuple)) and len(b) >= 6:
+            # x, y, uid, fe, pe_cont, pe_cat
+            pe_cont = b[4]
+            pe_cat = b[5]
+
+            if pe_cont is not None and hasattr(pe_cont, "ndim") and pe_cont.ndim == 3:
+                d_past_cont = int(pe_cont.shape[-1])
+            if pe_cat is not None and hasattr(pe_cat, "ndim") and pe_cat.ndim == 3:
+                d_past_cat = int(pe_cat.shape[-1])
+        else:
+            print(
+                f"[DBG-pt_kwargs] unexpected batch format: type={type(b)} len={len(b) if hasattr(b, '__len__') else 'NA'}")
+    except Exception as e:
+        print(f"[DBG-pt_kwargs] failed to infer past_exo dims: {repr(e)}")
+        d_past_cont, d_past_cat = 0, 0
+
     # Base
     pm_base_cfg = PatchMixerConfig(**pm_kwargs, loss_mode='point', point_loss='huber', head_dropout=0.05)
+    pm_base_cfg.learn_output_scale = False  # 초기 스케일 안정화
+    pm_base_cfg.learn_dw_gain = False  # 초기 스케일 안정화
+    pm_base_cfg.exo_is_normalized_default = False  # future_exo를 표준화했다는 전제
+    pm_base_cfg.past_exo_mode = "z_gate"
+    pm_base_cfg.past_exo_cont_dim = d_past_cont
+    pm_base_cfg.past_exo_cat_dim = d_past_cat
+    pm_base_cfg.past_exo_cat_vocab_sizes = (512, 128)  # K개
+    pm_base_cfg.past_exo_cat_embed_dims = (16, 16)  # K개
     pm_base_model = build_patch_mixer_base(pm_base_cfg)
+
 
     print(f'PatchMixer Base ({freq.capitalize()})')
     best_pm_base = train_patchmixer(
@@ -600,6 +631,14 @@ def _run_patchmixer(
 
     # Quantile
     pm_q_cfg = PatchMixerConfig(**pm_kwargs, loss_mode='quantile', quantiles=(0.1, 0.5, 0.9), head_dropout=0.02)
+    pm_q_cfg.learn_output_scale = False
+    pm_q_cfg.learn_dw_gain = False
+    pm_q_cfg.exo_is_normalized_default = False
+    pm_base_cfg.past_exo_mode = "z_gate"
+    pm_base_cfg.past_exo_cont_dim = d_past_cont
+    pm_base_cfg.past_exo_cat_dim = d_past_cat
+    pm_base_cfg.past_exo_cat_vocab_sizes = (512, 128)  # K개
+    pm_base_cfg.past_exo_cat_embed_dims = (16, 16)  # K개
     pm_q_model = build_patch_mixer_quantile(pm_q_cfg)
 
     print(f'PatchMixer Quantile ({freq.capitalize()})')

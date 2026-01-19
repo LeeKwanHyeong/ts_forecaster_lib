@@ -46,7 +46,7 @@ class PatchMixerConfig(TrainingConfig):
 
     # ---------- 외생 ----------
     exo_dim: int = 0
-    exo_is_normalized_default: bool = True
+    exo_is_normalized_default: bool = False
 
     # ---------- 파트 임베딩 ----------
     use_part_embedding: bool = False
@@ -74,6 +74,19 @@ class PatchMixerConfig(TrainingConfig):
 
     # RevIN 등에서 필요할 수 있어 유지
     decomp: DecompositionConfig = field(default_factory=DecompositionConfig)
+
+    # ---------- (과거) 외생 ----------
+    # NOTE: 반드시 타입 어노테이션이 있어야 dataclass 필드로 직렬화/저장됩니다.
+    #       (기존 코드처럼 class-var로 두면 ckpt 저장/로드 시 반영되지 않아 mismatch가 자주 발생)
+    past_exo_mode: str = "none"                 # 'none' | 'z_gate'
+    past_exo_cont_dim: int = 0                  # past_exo_cont: (B, L, E_p)
+    past_exo_cat_dim: int = 0                   # past_exo_cat:  (B, L, K)
+    past_exo_cat_vocab_sizes: Tuple[int, ...] = ()  # K개 vocab size
+    past_exo_cat_embed_dims: Tuple[int, ...] = ()   # K개 embed dim
+
+    # ---------- 출력 스케일 안정화 옵션 ----------
+    learn_output_scale: bool = True
+    learn_dw_gain: bool = True
 
 
 # =========================

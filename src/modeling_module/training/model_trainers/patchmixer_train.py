@@ -1,4 +1,12 @@
-# patchmixer_train.py
+# patchmixer_train_fixed.py
+#
+# Fixes:
+# 1) Do NOT delete/rebuild model.exo_head when future exogenous comes from the DataLoader (future_exo_cb=None).
+#    The loader-based mode is controlled by PatchMixerConfig(exo_dim=E) and the model should be constructed
+#    with that E so that optimizer captures exo_head parameters.
+# 2) Only infer exo_dim and (re)build exo_head in the callback-based mode (future_exo_cb is not None).
+# 3) _ensure_model_exo_head(exo_dim<=0) no longer deletes exo_head (avoids accidental removal).
+
 from __future__ import annotations
 
 import json
@@ -6,14 +14,13 @@ from dataclasses import asdict, is_dataclass
 from typing import Optional, Callable
 
 import torch
-import torch.nn as nn  # NEW: exo_head 재구성을 위해
+import torch.nn as nn
 
 from torch.utils.data import DataLoader, WeightedRandomSampler
 
 from modeling_module.training.adapters import PatchMixerAdapter, DefaultAdapter
 from modeling_module.training.config import TrainingConfig, StageConfig, apply_stage
 from modeling_module.training.engine import CommonTrainer
-from modeling_module.training.losses import make_pspa_fn
 
 
 def _dump_cfg(cfg):
@@ -21,43 +28,44 @@ def _dump_cfg(cfg):
     print("[train_patchmixer] Effective TrainingConfig:")
     print(json.dumps(data, indent=2, ensure_ascii=False, default=str))
 
+
 def _infer_exo_dim_from_cb(future_exo_cb, horizon: int, device: str = "cpu") -> int:
+    """Infer E from callback output. Expected shape: (H, E) tensor-like."""
     if future_exo_cb is None:
         return 0
-    fe = future_exo_cb(0, horizon, device=device)  # (H,E) 가정
+    fe = future_exo_cb(0, horizon, device=device)  # (H,E) expected
     if isinstance(fe, torch.Tensor):
         return int(fe.size(-1))
     try:
-        # numpy/리스트 등
         return int(fe.shape[-1])
     except Exception:
         return 0
 
+
 def _ensure_model_exo_head(model, exo_dim: int):
+    """(Re)build model.exo_head only when we are in callback-based exo mode.
+
+    IMPORTANT:
+      - If exo_dim <= 0: do nothing (do NOT delete exo_head).
+        Disabling exogenous should be done via model/config construction (exo_dim=0).
     """
-    model.exo_dim 과 exo_dim(E)가 다르면 exo_head를 재구성.
-    """
-    # 모델이 exo_head를 제공하지 않는다면 스킵
     if not hasattr(model, "exo_dim"):
         return model
 
-    current = int(getattr(model, "exo_dim", 0))
     if exo_dim <= 0:
-        # 외생 안 쓰는 경우: exo_head 제거
-        if getattr(model, "exo_head", None) is not None:
-            model.exo_head = None
-        model.exo_dim = 0
+        # Do not touch model (prevents accidental removal when loader provides future_exo).
         return model
 
-    # 이미 일치하면 패스
-    if current == exo_dim and getattr(model, "exo_head", None) is not None:
+    current = int(getattr(model, "exo_dim", 0))
+    has_head = getattr(model, "exo_head", None) is not None
+
+    if current == exo_dim and has_head:
         return model
 
-    # (재)구성
     model.exo_head = nn.Sequential(
         nn.Linear(exo_dim, 64),
         nn.GELU(),
-        nn.Linear(64, 1)
+        nn.Linear(64, 1),
     )
     model.exo_dim = int(exo_dim)
     print(f"[train_patchmixer] exo_head rebuilt with exo_dim={exo_dim}")
@@ -65,16 +73,14 @@ def _ensure_model_exo_head(model, exo_dim: int):
 
 
 def _maybe_make_spike_loader(train_loader: DataLoader, enable: bool) -> DataLoader:
-    """
-    2단계에서만 스파이크 샘플을 더 자주 보게 하는 간단 오버샘플러.
-    Dataset에 `sample_is_spike` (bool array-like)가 있으면 가중 샘플러 적용.
-    """
+    """Simple spike oversampling for stage-2 if dataset exposes `sample_is_spike`."""
     if (not enable) or (not hasattr(train_loader.dataset, "sample_is_spike")):
         return train_loader
 
     import numpy as np
+
     m = np.asarray(train_loader.dataset.sample_is_spike, dtype=bool)
-    w = np.where(m, 3.0, 1.0).astype("float32")  # spike:others = 3:1
+    w = np.where(m, 3.0, 1.0).astype("float32")
     sampler = WeightedRandomSampler(weights=w, num_samples=len(w), replacement=True)
 
     return DataLoader(
@@ -95,25 +101,40 @@ def train_patchmixer(
     *,
     stages: list[StageConfig] | None = None,
     train_cfg: Optional[TrainingConfig] = None,
-    # 외생변수
+    # exogenous
     future_exo_cb: Optional[Callable[[int, int], "torch.Tensor"]] = None,
-    exo_is_normalized: bool = True,
+    exo_is_normalized: bool = False,
 ):
-    """
-    Titan과 동일한 사용성:
-      - stages 가 없으면 기존처럼 train_cfg 한 번만 학습
-      - stages 가 있으면 각 StageConfig로 train_cfg를 덮어써서 연속 학습
+    """PatchMixer trainer entry.
+
+    Modes:
+      1) Callback-based future exo: future_exo_cb != None
+         - Infer E from callback and ensure model.exo_head is built BEFORE optimizer creation.
+      2) Loader-based future exo: future_exo_cb == None
+         - DataLoader must provide future_exo (e.g., fe_cont) and model must be constructed with configs.exo_dim=E.
+         - We DO NOT touch exo_head here.
     """
     assert train_cfg is not None, "train_cfg는 필수입니다."
 
-    # (A) 여기서 exo_dim(E) 자동 추론 후, 모델의 exo_head를 미리 세팅
-    horizon = getattr(model, "horizon", None) or getattr(train_cfg, "horizon", None)
-    if horizon is None:
-        raise ValueError("horizon을 model 또는 train_cfg에서 찾을 수 없습니다.")
-    E = _infer_exo_dim_from_cb(future_exo_cb, horizon, device="cpu")
-    model = _ensure_model_exo_head(model, E)
-    print(
-        f"[EXO-setup] inferred E={E}, model.exo_dim={getattr(model, 'exo_dim', None)}, has_head={model.exo_head is not None}")
+    # (A) exo_head 사전 세팅은 'callback 모드'에서만 수행
+    if future_exo_cb is not None:
+        horizon = getattr(model, "horizon", None) or getattr(train_cfg, "horizon", None)
+        if horizon is None:
+            raise ValueError("horizon을 model 또는 train_cfg에서 찾을 수 없습니다.")
+
+        E = _infer_exo_dim_from_cb(future_exo_cb, int(horizon), device="cpu")
+        model = _ensure_model_exo_head(model, E)
+        print(
+            "[EXO-setup] (callback) "
+            f"inferred E={E}, model.exo_dim={getattr(model, 'exo_dim', None)}, "
+            f"has_head={getattr(model, 'exo_head', None) is not None}"
+        )
+    else:
+        print(
+            "[EXO-setup] (loader) future_exo_cb=None → skip exo_head setup. "
+            f"model.exo_dim={getattr(model, 'exo_dim', None)}, "
+            f"has_head={getattr(model, 'exo_head', None) is not None}"
+        )
 
     # AMP 설정(bf16 기본)
     amp_device = getattr(train_cfg, "amp_device", "cuda")
@@ -133,10 +154,10 @@ def train_patchmixer(
             amp_dtype = torch.bfloat16
     autocast_input = dict(device_type=amp_device, enabled=amp_enabled, dtype=amp_dtype)
 
-    # Adapter (PatchMixer 전용이 있으면 사용)
+    # Adapter
     adapter = PatchMixerAdapter() if PatchMixerAdapter else DefaultAdapter()
 
-    # 스테이지 목록 구성 (없으면 단일 스테이지)
+    # stages
     if not stages or len(stages) == 0:
         stages = [StageConfig(epochs=train_cfg.epochs, spike_enabled=train_cfg.spike_loss.enabled)]
 
@@ -148,7 +169,6 @@ def train_patchmixer(
         print(f"  - epochs: {cfg_i.epochs} | lr={cfg_i.lr} | horizon_decay={cfg_i.use_horizon_decay}")
         _dump_cfg(cfg_i)
 
-        # (선택) 2단계에서만 오버샘플링 적용
         tl_i = _maybe_make_spike_loader(train_loader, enable=cfg_i.spike_loss.enabled)
 
         trainer = CommonTrainer(
@@ -156,9 +176,8 @@ def train_patchmixer(
             adapter=adapter,
             logger=print,
             metrics_fn=None,
-            future_exo_cb=future_exo_cb,   # (B,H,E) 외생변수 콜백
+            future_exo_cb=future_exo_cb,
             autocast_input=autocast_input,
-            # extra_loss_fn=make_pspa_fn()
             extra_loss_fn=None,
         )
         model = trainer.fit(model, tl_i, val_loader, tta_steps=0)
