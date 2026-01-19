@@ -1,3 +1,25 @@
+"""forecater.py
+
+Unified forecaster wrapper used by training/inference notebooks.
+
+What this file guarantees
+-------------------------
+1) Device consistency
+   - All auxiliary tensors (past/future exogenous, part_ids) are moved to the same device as the model
+     to prevent CPU/CUDA mixing errors during torch.cat and projections.
+
+2) Future exogenous contract
+   - If the model expects d_future==0, we never pass future_exo (avoid shape [B,H,0]).
+   - If the model expects d_future>0, we require either:
+       - future_exo_batch: (H,E) or (B,H,E)
+       - future_exo_cb(t0,h,device): returns (H,E) or (B,H,E)
+     and we validate E==d_future early (fail-fast).
+
+3) Signature robustness
+   - _safe_forward filters kwargs by model.forward signature, and we provide alias names
+     (future_exo / fe_cont, past_exo_cont / pe_cont, etc.) so multiple model families can work.
+"""
+
 import os
 import inspect
 from typing import Any, Dict, List, Sequence, Optional, Callable, Tuple, Union
@@ -13,19 +35,76 @@ DEBUG_FCAST = True
 
 
 # -------------------------------------------------------------------------
-# Standalone Helpers (Stateless)
+# Device helpers
 # -------------------------------------------------------------------------
 
-def _to_device_any(v, device: torch.device):
-    if v is None:
+def _to_device_any(obj: Any, device: torch.device) -> Any:
+    """Recursively move tensors (and tensor containers) to the target device.
+
+    This is a defensive utility to prevent CPU/CUDA mixing errors such as:
+        RuntimeError: Expected all tensors to be on the same device ...
+    """
+    if obj is None:
         return None
-    if torch.is_tensor(v):
-        return v.to(device)
-    if isinstance(v, (list, tuple)):
-        return type(v)(_to_device_any(x, device) for x in v)
-    if isinstance(v, dict):
-        return {k: _to_device_any(x, device) for k, x in v.items()}
-    return v
+    if torch.is_tensor(obj):
+        return obj.to(device)
+    if isinstance(obj, (list, tuple)):
+        return type(obj)(_to_device_any(x, device) for x in obj)
+    if isinstance(obj, dict):
+        return {k: _to_device_any(v, device) for k, v in obj.items()}
+    return obj
+
+
+def _infer_d_future_expected(model: torch.nn.Module) -> Optional[int]:
+    """Best-effort inference of the expected future exogenous dimension.
+
+    We support multiple model styles (PatchTST / PatchMixer / Titan). Depending on
+    implementation, the dimension may be stored in:
+      - model.d_future
+      - model.cfg.d_future or model.cfg.exo_dim
+      - model.head.d_future
+
+    Returns
+    -------
+    Optional[int]
+        - int >= 0 when the dim can be inferred
+        - None when we cannot infer (then we do not hard-enforce)
+    """
+    for attr in ('d_future', 'exo_dim'):
+        if hasattr(model, attr):
+            try:
+                v = int(getattr(model, attr))
+                if v >= 0:
+                    return v
+            except Exception:
+                pass
+
+    cfg = getattr(model, 'cfg', None)
+    if cfg is not None:
+        for attr in ('d_future', 'exo_dim'):
+            if hasattr(cfg, attr):
+                try:
+                    v = int(getattr(cfg, attr))
+                    if v >= 0:
+                        return v
+                except Exception:
+                    pass
+
+    head = getattr(model, 'head', None)
+    if head is not None and hasattr(head, 'd_future'):
+        try:
+            v = int(getattr(head, 'd_future'))
+            if v >= 0:
+                return v
+        except Exception:
+            pass
+
+    return None
+
+
+# -------------------------------------------------------------------------
+# Standalone Helpers (Stateless)
+# -------------------------------------------------------------------------
 
 def _safe_forward(model: torch.nn.Module, x: torch.Tensor, **kwargs):
     """model.forward 시그니처를 기반으로 kwargs를 필터링하여 호출."""
@@ -200,57 +279,149 @@ class DMSForecaster:
         """
         device = torch.device(device or next(self.model.parameters()).device)
         self.model.to(device).eval()
+
+        # Move all auxiliary tensors to the same device as the model.
+        # This avoids CPU/CUDA mixing during torch.cat / projections.
         part_ids = _to_device_any(part_ids, device)
         past_exo_cont = _to_device_any(past_exo_cont, device)
         past_exo_cat = _to_device_any(past_exo_cat, device)
         future_exo_batch = _to_device_any(future_exo_batch, device)
+
         x_raw = x_init.to(device).float().clone()
         if x_raw.dim() == 2:
             x_raw = x_raw.unsqueeze(-1)
         B = x_raw.size(0)
 
-        # 1. Prepare Future Exo Callback
+        # --------------------------------------------------------------
+        # 1) Future exogenous feature source selection
+        # --------------------------------------------------------------
+        # Policy
+        # - If model expects d_future == 0: NEVER pass future_exo (avoid [B,H,0])
+        # - If model expects d_future > 0: require a valid source (batch or cb)
+        #   and validate last-dim matches d_future.
+        d_future_expected = _infer_d_future_expected(self.model)
+
         cb_final = future_exo_cb
+
+        # If user passed a precomputed future_exo tensor, wrap it as a callback.
+        # Supported shapes:
+        #   (H, E)     : common exo profile
+        #   (B, H, E)  : per-sample exo profile
         if torch.is_tensor(future_exo_batch):
             exb = future_exo_batch
-            if exb.dim() == 3: exb = exb[0]  # Handle B=1 case if passed as (B,H,E) but logic assumes common profile
+
             if exb.dim() == 2:
+                # (H, E) common profile
                 def _cb_from_batch(t0: int, h_req: int, dev: torch.device):
-                    # Simple slicing wrapper
                     s, e = int(t0), int(t0) + int(h_req)
                     Htot = exb.size(0)
-                    if Htot >= e: return exb[s:e, :].detach().to(dev)
-                    if Htot <= s: return exb[-1:, :].expand(h_req, -1).detach().to(dev)
+                    if Htot >= e:
+                        return exb[s:e, :].detach().to(dev)
+                    if Htot <= s:
+                        return exb[-1:, :].expand(h_req, -1).detach().to(dev)
                     tail = exb[s:, :]
                     pad = exb[-1:, :].expand(e - Htot, -1)
                     return torch.cat([tail, pad], dim=0).detach().to(dev)
 
                 cb_final = _cb_from_batch
 
-        # Wrapper to match DMS signature (t0, H) -> Tensor
+            elif exb.dim() == 3:
+                # (B, H, E) per-sample profile (or B==1 common-ish)
+                if exb.size(0) not in (1, B):
+                    raise RuntimeError(
+                        f"future_exo_batch has incompatible batch dim: got {exb.size(0)}, expected 1 or {B}."
+                    )
+
+                def _cb_from_batch_b(t0: int, h_req: int, dev: torch.device):
+                    s, e = int(t0), int(t0) + int(h_req)
+                    Htot = exb.size(1)
+                    if Htot >= e:
+                        out = exb[:, s:e, :]
+                    elif Htot <= s:
+                        out = exb[:, -1:, :].expand(exb.size(0), h_req, -1)
+                    else:
+                        tail = exb[:, s:, :]
+                        pad = exb[:, -1:, :].expand(exb.size(0), e - Htot, -1)
+                        out = torch.cat([tail, pad], dim=1)
+
+                    # If exb was (1, H, E), expand to (B, h_req, E)
+                    if out.size(0) == 1 and B > 1:
+                        out = out.expand(B, -1, -1)
+                    return out.detach().to(dev)
+
+                cb_final = _cb_from_batch_b
+
+        # Final wrapper to match internal signature: (t0, H) -> Tensor
         self.future_exo_cb = None
         if cb_final is not None:
             self.future_exo_cb = lambda t, h: cb_final(t, h, device)
 
+        # Enforce the d_future contract (fail-fast with clear message).
+        if d_future_expected is not None:
+            if d_future_expected <= 0:
+                # Model does not use future exo -> force disable
+                self.future_exo_cb = None
+            else:
+                if self.future_exo_cb is None:
+                    raise RuntimeError(
+                        f"Model expects future_exo dim d_future={d_future_expected}, "
+                        f"but neither future_exo_batch nor future_exo_cb was provided."
+                    )
+
         # 2. Forward Kwargs Preparation
         fwd_kwargs = {}
-        if part_ids is not None: fwd_kwargs["part_ids"] = part_ids
-        if past_exo_cont is not None: fwd_kwargs["past_exo_cont"] = past_exo_cont
-        if past_exo_cat is not None: fwd_kwargs["past_exo_cat"] = past_exo_cat
-        if mode is not None: fwd_kwargs["mode"] = mode
+        # IDs (some models use part_ids, others may use uid-like fields)
+        if part_ids is not None:
+            fwd_kwargs["part_ids"] = part_ids
+
+        # Past exogenous features (aliases are safe because _safe_forward filters by signature)
+        if past_exo_cont is not None:
+            fwd_kwargs["past_exo_cont"] = past_exo_cont
+            fwd_kwargs["pe_cont"] = past_exo_cont
+        if past_exo_cat is not None:
+            fwd_kwargs["past_exo_cat"] = past_exo_cat
+            fwd_kwargs["pe_cat"] = past_exo_cat
+
+        if mode is not None:
+            fwd_kwargs["mode"] = mode
 
         # 3. Probe Model & Detect Output Type/Horizon
         H_hint = int(getattr(self.model, "horizon", getattr(self.model, "output_horizon", 0)) or 0)
-        probe_H = int(horizon if H_hint == 0 else max(1, H_hint))
-
-        # Probe용 Exo
+        probe_H = int(horizon if H_hint == 0 else max(1, H_hint))        # Probe용 Exo
         exo_probe = None
         if self.future_exo_cb is not None:
-            ex = self.future_exo_cb(0, probe_H).to(device)
-            exo_probe = ex.unsqueeze(0).expand(B, -1, -1)
+            ex = self.future_exo_cb(0, probe_H)
+
+            # Validate future_exo dimension contract (fail-fast, user-friendly)
+            if d_future_expected is not None and d_future_expected > 0:
+                if ex is None:
+                    raise RuntimeError(f"future_exo_cb returned None, but d_future={d_future_expected} is required")
+                if ex.ndim not in (2, 3):
+                    raise RuntimeError(
+                        f"future_exo_cb must return (H,E) or (B,H,E); got shape={tuple(ex.shape)}"
+                    )
+                if int(ex.shape[-1]) != int(d_future_expected):
+                    raise RuntimeError(
+                        f"future_exo dim mismatch: got E={int(ex.shape[-1])}, expected d_future={int(d_future_expected)}"
+                    )
+
+            # Normalize to (B, H, E)
+            if ex.ndim == 2:
+                # (H, E) -> (B, H, E)
+                exo_probe = ex.to(device).unsqueeze(0).expand(B, -1, -1)
+            else:
+                # (B, H, E) already
+                exo_probe = ex.to(device)
 
         with torch.no_grad():
-            out0 = _safe_forward(self.model, x_raw, future_exo=exo_probe, **fwd_kwargs)
+            # Provide alias keys as well; _safe_forward will keep only what's needed.
+            out0 = _safe_forward(
+                self.model,
+                x_raw,
+                future_exo=exo_probe,
+                fe_cont=exo_probe,
+                **fwd_kwargs,
+            )
 
         # 4. Determine Strategy (Quantile vs Point) & Execution
         is_quantile = False
@@ -336,9 +507,19 @@ class DMSForecaster:
             if self.future_exo_cb is not None:
                 t0 = self.global_t0 + step_offset
                 ex = self.future_exo_cb(t0, need_h).to(xr.device)
-                exo = ex.unsqueeze(0).expand(B, -1, -1)
+                if ex.ndim == 2:
+                    exo = ex.unsqueeze(0).expand(B, -1, -1)
+                elif ex.ndim == 3:
+                    if ex.size(0) == 1 and B > 1:
+                        exo = ex.expand(B, -1, -1)
+                    elif ex.size(0) == B:
+                        exo = ex
+                    else:
+                        raise RuntimeError(f"future_exo batch dim mismatch: got {ex.size(0)}, expected 1 or {B}")
+                else:
+                    raise RuntimeError(f"future_exo must be (H,E) or (B,H,E), got shape={tuple(ex.shape)}")
 
-            out = _safe_forward(self.model, xr, future_exo=exo, **fwd_kwargs)
+            out = _safe_forward(self.model, xr, future_exo=exo, fe_cont=exo, **fwd_kwargs)
             return _normalize_point_to_BH(out, B, H_hint=need_h)
 
         # 1. Initial Block (DMS) - Call with EXACT model horizon
@@ -389,9 +570,19 @@ class DMSForecaster:
             if self.future_exo_cb is not None:
                 # Use passed Hm to request correct exo length
                 ex = self.future_exo_cb(step_offset, Hm).to(xr.device)
-                exo = ex.unsqueeze(0).expand(B, -1, -1)
+                if ex.ndim == 2:
+                    exo = ex.unsqueeze(0).expand(B, -1, -1)
+                elif ex.ndim == 3:
+                    if ex.size(0) == 1 and B > 1:
+                        exo = ex.expand(B, -1, -1)
+                    elif ex.size(0) == B:
+                        exo = ex
+                    else:
+                        raise RuntimeError(f"future_exo batch dim mismatch: got {ex.size(0)}, expected 1 or {B}")
+                else:
+                    raise RuntimeError(f"future_exo must be (H,E) or (B,H,E), got shape={tuple(ex.shape)}")
 
-            out = _safe_forward(self.model, xr, future_exo=exo, **fwd_kwargs)
+            out = _safe_forward(self.model, xr, future_exo=exo, fe_cont=exo, **fwd_kwargs)
             return _extract_quantile_block(out)
 
         # Initial Block

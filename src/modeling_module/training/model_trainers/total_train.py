@@ -1,3 +1,36 @@
+"""total_train.py
+
+High-level training runner for the LTB forecasting engine.
+
+This module orchestrates training for multiple model families (PatchTST, Titan, PatchMixer)
+across different frequencies (hourly/daily/weekly/monthly).
+
+Key design points
+-----------------
+1) Exogenous feature wiring
+   - Two supported sources for *future* exogenous features:
+     (A) Loader-provided: batch[3] == fe_cont with shape (B, H, E)
+     (B) Callback-provided: future_exo_cb(t0, H) -> (H, E)
+   - When use_exogenous_mode=True:
+     * If loader provides fe_cont, we prefer (A) and disable the callback to avoid dim mismatch.
+     * If loader does not provide fe_cont, we fall back to the calendar callback.
+   - When use_exogenous_mode=False: exogenous path is disabled for all models.
+
+2) Fail-fast validation
+   - If the loader provides fe_cont but E==0 while exogenous mode is enabled, we raise an error
+     because models configured with d_future>0 will fail in forward.
+
+3) Save layout
+   - Checkpoints are stored under save_dir/<freq>/... with model-specific prefixes.
+
+Operational guidance
+-------------------
+- If you see an error like:
+    "future_exo last-dim(D)=0 != d_future=2"
+  then your model was built with exo_dim=2, but the inference/train batch provides fe_cont with E=0
+  (or you did not provide a future_exo callback/batch). Fix by aligning exo_dim with actual future exo.
+"""
+
 from typing import Dict, Tuple, Optional, Iterable, List, Callable
 from pathlib import Path
 from dataclasses import asdict, is_dataclass, replace
@@ -44,6 +77,42 @@ def _get_part_vocab_size_from_loader(loader) -> int:
         return 0
 
 
+
+
+def _infer_future_exo_spec_from_loader(loader) -> tuple[bool, int]:
+    """Infer whether the loader provides future exogenous features (fe_cont).
+
+    Expected batch format (MultiPartExoDataModule convention):
+        (x, y, uid, fe_cont, pe_cont, pe_cat)
+
+    Returns
+    -------
+    has_fe: bool
+        True if the batch includes a non-None fe_cont tensor.
+    fe_dim: int
+        The last-dimension of fe_cont if present, otherwise 0.
+
+    Notes
+    -----
+    - has_fe=False means "loader does not provide future exo" (we may rely on future_exo_cb).
+    - has_fe=True & fe_dim==0 means "loader provides fe_cont but its feature dimension is 0",
+      which is almost always a configuration error when exogenous mode is enabled.
+    """
+    try:
+        b = next(iter(loader))
+        if not isinstance(b, (list, tuple)) or len(b) < 4:
+            return (False, 0)
+        fe = b[3]
+        if fe is None:
+            return (False, 0)
+        if hasattr(fe, 'ndim') and fe.ndim == 3:
+            return (True, int(fe.shape[-1]))
+        if hasattr(fe, 'ndim') and fe.ndim == 2:
+            # (H, E) 형태로 제공되는 경우도 방어
+            return (True, int(fe.shape[-1]))
+        return (True, 0)
+    except Exception:
+        return (False, 0)
 def save_model(model: torch.nn.Module, cfg, path: str) -> None:
     path = str(path)
     state = {
@@ -378,6 +447,7 @@ def _run_titan(
         train_loader, val_loader,
         save_root,
         lookback: int, horizon: int,
+        use_exogenous_mode: bool,
         future_exo_cb,
         exo_dim: int,
         patch_len: int, stride: int,
@@ -399,8 +469,11 @@ def _run_titan(
         dropout=0.1,
         contextual_mem_size=256,
         persistent_mem_size=64,
-        use_exogenous=True,
-        exo_dim=exo_dim,
+        # Exogenous handling
+        # - use_exogenous_mode=True  -> model expects future exo with dimension exo_dim
+        # - use_exogenous_mode=False -> exo path disabled (exo_dim forced to 0)
+        use_exogenous=bool(use_exogenous_mode),
+        exo_dim=(int(exo_dim) if use_exogenous_mode else 0),
         final_clamp_nonneg=True,
         use_revin=True,
         revin_use_std=True,
@@ -417,7 +490,7 @@ def _run_titan(
     best_ti_base = train_titan(
         ti_base, train_loader, val_loader,
         train_cfg=point_train_cfg, stages=list(stages),
-        future_exo_cb=future_exo_cb,
+        future_exo_cb=(future_exo_cb if use_exogenous_mode else None),
     )
     if save_root:
         ckpt_path = _make_ckpt_path(save_root, freq, "TitanBase", lookback, horizon)
@@ -432,7 +505,7 @@ def _run_titan(
     best_ti_lmm = train_titan(
         ti_lmm, train_loader, val_loader,
         train_cfg=point_train_cfg, stages=list(stages),
-        future_exo_cb=future_exo_cb,
+        future_exo_cb=(future_exo_cb if use_exogenous_mode else None),
     )
     if save_root:
         ckpt_path = _make_ckpt_path(save_root, freq, "TitanLMM", lookback, horizon)
@@ -446,7 +519,7 @@ def _run_titan(
     best_ti_s2s = train_titan(
         ti_seq2seq, train_loader, val_loader,
         train_cfg=point_train_cfg, stages=list(stages),
-        future_exo_cb=future_exo_cb,
+        future_exo_cb=(future_exo_cb if use_exogenous_mode else None),
     )
     if save_root:
         ckpt_path = _make_ckpt_path(save_root, freq, "TitanSeq2Seq", lookback, horizon)
@@ -464,6 +537,7 @@ def _run_patchmixer(
         future_exo_cb,
         exo_dim: int,
         patch_len: int, stride: int,
+        use_exogenous_mode: bool,
         point_train_cfg, quantile_train_cfg,
         stages,
         device: str,
@@ -515,7 +589,7 @@ def _run_patchmixer(
     best_pm_base = train_patchmixer(
         pm_base_model, train_loader, val_loader,
         train_cfg=point_train_cfg, stages=list(stages),
-        future_exo_cb=future_exo_cb,
+        future_exo_cb=(future_exo_cb if use_exogenous_mode else None),
         exo_is_normalized=pm_base_cfg.exo_is_normalized_default,
     )
     if save_root:
@@ -532,7 +606,7 @@ def _run_patchmixer(
     best_pm_q = train_patchmixer(
         pm_q_model, train_loader, val_loader,
         train_cfg=quantile_train_cfg, stages=list(stages),
-        future_exo_cb=future_exo_cb,
+        future_exo_cb=(future_exo_cb if use_exogenous_mode else None),
         exo_is_normalized=pm_q_cfg.exo_is_normalized_default,
     )
     if save_root:
@@ -580,12 +654,46 @@ def _run_total_train_generic(
 
     date_type_map = {"weekly": "W", "monthly": "M", "daily": "D", "hourly": "H"}
     dt_char = date_type_map.get(freq, "W")
+
+    # --------------------------------------------------------------
+    # Exogenous feature policy (TRAIN)
+    # --------------------------------------------------------------
+    # We support two ways of supplying "future exogenous" features:
+    #   (A) Loader-provided: batch[3] == fe_cont with shape (B, H, E)
+    #   (B) Callback-provided: future_exo_cb(t0, H) -> (H, E)
+    #
+    # IMPORTANT:
+    # - If loader provides fe_cont, we prefer (A) and set future_exo_cb=None
+    #   to avoid inconsistent dim between loader and calendar callback.
+    # - If loader does NOT provide fe_cont, we use (B) when use_exogenous_mode=True.
+    # - If loader provides fe_cont but E==0, that is treated as a configuration error.
+    has_fe, fe_dim = _infer_future_exo_spec_from_loader(train_loader)
+
     if use_exogenous_mode:
-        future_exo_cb = compose_exo_calendar_cb(date_type=dt_char)
-        exo_dim = 4 if freq in ("daily", "hourly") else 2
+        if has_fe:
+            if fe_dim <= 0:
+                raise RuntimeError(
+                    f"[total_train] use_exogenous_mode=True but loader fe_cont dim is {fe_dim}. "
+                    f"Check feature selection / exogenous datamodule wiring."
+                )
+            # Prefer loader-provided exo
+            future_exo_cb = None
+            exo_dim = int(fe_dim)
+            print(f"[total_train] future exo from loader: fe_dim={exo_dim} (freq={freq})")
+        else:
+            # Loader does not provide fe_cont -> use calendar callback
+            future_exo_cb = compose_exo_calendar_cb(date_type=dt_char)
+            exo_dim = 4 if freq in ("daily", "hourly") else 2
+            print(f"[total_train] future exo from callback: exo_dim={exo_dim} (freq={freq}, dt={dt_char})")
     else:
+        # Exogenous disabled
         future_exo_cb = None
         exo_dim = 0
+        if has_fe and fe_dim > 0:
+            print(
+                f"[total_train][WARN] use_exogenous_mode=False but loader provides fe_cont dim={fe_dim}. "
+                f"Ignoring future exo."
+            )
 
     # freq별 patch_len/stride/season_period
     if freq == "hourly":
@@ -620,7 +728,7 @@ def _run_total_train_generic(
             save_root=save_root,
             lookback=lookback,
             horizon=horizon,
-            future_exo_cb=future_exo_cb,
+            future_exo_cb=(future_exo_cb if use_exogenous_mode else None),
             exo_dim=exo_dim,
             patch_len=patch_len,
             stride=stride,
