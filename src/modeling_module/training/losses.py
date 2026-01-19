@@ -1,446 +1,797 @@
+# loss_module_refactored.py
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
+
 import torch
 import torch.nn.functional as F
-from typing import Optional
 
-try:
-    from modeling_module.training.config import TrainingConfig
-except Exception:
-    TrainingConfig = object
 
-try:
-    from modeling_module.utils.custom_loss_utils import (
-        intermittent_weights_balanced,
-        intermittent_point_loss,
-        newsvendor_q_star,
-        pinball_plain,
-        pinball_loss_weighted_masked
+Tensor = torch.Tensor
+Pred = Union[Tensor, Dict[str, Any]]
+
+
+# =============================================================================
+# 0) Core numerical utilities
+# =============================================================================
+def safe_div(numer: Tensor, denom: Tensor, eps: float = 1e-12) -> Tensor:
+    """
+    numer / denom with NaN/Inf safety.
+    - denom is clamped by eps to avoid divide-by-zero.
+    - NaN/Inf are replaced with 0.
+    """
+    denom = denom.clamp_min(eps)
+    out = numer / denom
+    return torch.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0)
+
+
+def ensure_2d(y: Tensor) -> Tensor:
+    """
+    Normalize y to [B, H].
+    Accepts:
+      - [B, H]
+      - [B, 1, H]  -> squeeze dim=1
+      - [B, H, 1]  -> squeeze dim=-1
+    """
+    if y.dim() == 3 and y.size(1) == 1:     # [B,1,H]
+        return y.squeeze(1)
+    if y.dim() == 3 and y.size(-1) == 1:    # [B,H,1]
+        return y.squeeze(-1)
+    if y.dim() != 2:
+        raise ValueError(f"Expected y as [B,H] (or [B,1,H]/[B,H,1]), got {tuple(y.shape)}")
+    return y
+
+
+def ensure_3d_quantile(pred_q: Tensor) -> Tensor:
+    """
+    Normalize quantile prediction to [B, Q, H].
+    Accepts:
+      - [B, Q, H]
+      - [B, Q, H, C] is NOT handled here (caller must select channel)
+    """
+    if pred_q.dim() != 3:
+        raise ValueError(f"Expected quantile pred as [B,Q,H], got {tuple(pred_q.shape)}")
+    return pred_q
+
+
+def maybe_mask_like(x: Tensor, mask: Optional[Tensor]) -> Tensor:
+    """
+    Returns mask broadcastable to x. If mask is None -> ones_like(x).
+    """
+    if mask is None:
+        return torch.ones_like(x)
+    return mask
+
+
+# =============================================================================
+# 1) Classic point losses (mask-aware)
+# =============================================================================
+def mae_loss(y: Tensor, y_hat: Tensor, mask: Optional[Tensor] = None) -> Tensor:
+    y = ensure_2d(y); y_hat = ensure_2d(y_hat)
+    m = maybe_mask_like(y_hat, mask)
+    return (torch.abs(y - y_hat) * m).mean()
+
+
+def mse_loss(y: Tensor, y_hat: Tensor, mask: Optional[Tensor] = None) -> Tensor:
+    y = ensure_2d(y); y_hat = ensure_2d(y_hat)
+    m = maybe_mask_like(y_hat, mask)
+    return (((y - y_hat) ** 2) * m).mean()
+
+
+def rmse_loss(y: Tensor, y_hat: Tensor, mask: Optional[Tensor] = None) -> Tensor:
+    y = ensure_2d(y); y_hat = ensure_2d(y_hat)
+    m = maybe_mask_like(y_hat, mask)
+    return torch.sqrt((((y - y_hat) ** 2) * m).mean())
+
+
+def mape_loss(y: Tensor, y_hat: Tensor, mask: Optional[Tensor] = None, eps: float = 1e-12) -> Tensor:
+    """
+    Mean Absolute Percentage Error with safe division.
+    """
+    y = ensure_2d(y); y_hat = ensure_2d(y_hat)
+    m = maybe_mask_like(y_hat, mask)
+    scale = torch.abs(y).clamp_min(eps)
+    ape = torch.abs(y - y_hat) / scale
+    return (ape * m).mean()
+
+
+def smape_loss(y: Tensor, y_hat: Tensor, mask: Optional[Tensor] = None, eps: float = 1e-12) -> Tensor:
+    """
+    Symmetric MAPE (bounded in [0,2] if scaled as 2*mean(...)).
+    """
+    y = ensure_2d(y); y_hat = ensure_2d(y_hat)
+    m = maybe_mask_like(y_hat, mask)
+    delta = torch.abs(y - y_hat)
+    scale = (torch.abs(y) + torch.abs(y_hat)).clamp_min(eps)
+    frac = delta / scale
+    return 2.0 * (frac * m).mean()
+
+
+def mase_loss(
+    y: Tensor,
+    y_hat: Tensor,
+    y_insample: Tensor,
+    seasonality: int,
+    mask: Optional[Tensor] = None,
+    eps: float = 1e-12,
+) -> Tensor:
+    """
+    MASE = MAE(y,yhat) / MAE(seasonal_naive)
+    y_insample: [B, L]
+    """
+    y = ensure_2d(y); y_hat = ensure_2d(y_hat)
+    y_insample = ensure_2d(y_insample)
+    m = maybe_mask_like(y_hat, mask)
+
+    delta = torch.abs(y - y_hat)
+
+    if seasonality <= 0 or y_insample.size(1) <= seasonality:
+        # fallback: scale=1 to avoid crash, but you may want to raise.
+        scale = torch.ones((y.size(0),), device=y.device, dtype=y.dtype)
+    else:
+        naive_err = torch.abs(y_insample[:, seasonality:] - y_insample[:, :-seasonality])
+        scale = naive_err.mean(dim=1).clamp_min(eps)
+
+    return (safe_div(delta, scale[:, None], eps=eps) * m).mean()
+
+
+# =============================================================================
+# 2) Quantile losses
+# =============================================================================
+def pinball_loss(
+    y: Tensor,
+    y_hat: Tensor,
+    tau: float,
+    mask: Optional[Tensor] = None,
+) -> Tensor:
+    """
+    Pinball loss for a single quantile.
+    y, y_hat: [B,H]
+    """
+    y = ensure_2d(y); y_hat = ensure_2d(y_hat)
+    m = maybe_mask_like(y_hat, mask)
+    diff = y - y_hat
+    loss = torch.maximum(tau * diff, (tau - 1.0) * diff)
+    return (loss * m).mean()
+
+
+def multi_quantile_loss(
+    y: Tensor,
+    y_hat_q: Tensor,
+    quantiles: Sequence[float],
+    mask: Optional[Tensor] = None,
+) -> Tensor:
+    """
+    Average multi-quantile pinball loss.
+    y: [B,H]
+    y_hat_q: [B,Q,H]
+    mask: broadcastable to [B,Q,H] (optional)
+    """
+    y = ensure_2d(y)
+    y_hat_q = ensure_3d_quantile(y_hat_q)
+
+    q = torch.as_tensor(quantiles, device=y_hat_q.device, dtype=y_hat_q.dtype)  # [Q]
+    if q.numel() < 2:
+        raise ValueError(f"quantiles length must be >=2, got {q.numel()}")
+
+    # error: [B,Q,H]
+    err = y_hat_q - y.unsqueeze(1)
+
+    # pinball per q: max(q*(y-yhat), (q-1)*(y-yhat)) but with err = yhat - y
+    # -> (q * max(-err,0) + (1-q)*max(err,0))
+    sq = torch.clamp(-err, min=0.0)
+    s1 = torch.clamp(err, min=0.0)
+    loss = q.view(1, -1, 1) * sq + (1.0 - q.view(1, -1, 1)) * s1
+
+    if mask is not None:
+        loss = loss * mask
+
+    return loss.mean()
+
+
+# =============================================================================
+# 3) Spike & asym losses (point)
+# =============================================================================
+def huber_piecewise(err: Tensor, delta: float) -> Tensor:
+    abs_e = err.abs()
+    return torch.where(abs_e <= delta, 0.5 * err * err, delta * (abs_e - 0.5 * delta))
+
+
+def huber_asymmetric(
+    pred: Tensor,
+    y: Tensor,
+    *,
+    delta: float = 2.0,
+    up_w: float = 2.0,
+    down_w: float = 1.0,
+    weight: Optional[Tensor] = None,
+) -> Tensor:
+    """
+    Asymmetric Huber on (pred - y).
+    - Over-prediction (err>0) weighted by up_w; under by down_w.
+    - Optional multiplicative weight [B,H].
+    """
+    pred = ensure_2d(pred); y = ensure_2d(y)
+    err = pred - y
+    hub = huber_piecewise(err, delta=delta)
+    asym = torch.where(err > 0, torch.full_like(hub, up_w), torch.full_like(hub, down_w))
+    loss = asym * hub
+    if weight is not None:
+        loss = loss * weight
+    return loss.mean()
+
+
+def asymmetric_mse(
+    pred: Tensor,
+    y: Tensor,
+    *,
+    up_w: float = 2.0,
+    down_w: float = 1.0,
+    weight: Optional[Tensor] = None,
+) -> Tensor:
+    """
+    Asymmetric MSE on (pred - y).
+    """
+    pred = ensure_2d(pred); y = ensure_2d(y)
+    err = pred - y
+    w_asym = torch.where(err > 0, torch.full_like(err, up_w), torch.full_like(err, down_w))
+    loss = w_asym * (err ** 2)
+    if weight is not None:
+        loss = loss * weight
+    return loss.mean()
+
+
+def mad_spike_weights(
+    y_ref: Tensor,
+    *,
+    k: float = 3.5,
+    w_spike: float = 6.0,
+    w_norm: float = 1.0,
+    eps: float = 1e-6,
+) -> Tensor:
+    """
+    MAD-based spike weight computed from reference series y_ref ([B,H] or [B,1,H]).
+    Returns [B,H] weights.
+    """
+    y_ref = ensure_2d(y_ref)
+    med = torch.median(y_ref, dim=1, keepdim=True).values
+    mad = torch.median(torch.abs(y_ref - med), dim=1, keepdim=True).values + eps
+    z = (y_ref - med) / mad
+    spike = (z > k).float()
+    return torch.where(spike > 0, torch.full_like(y_ref, w_spike), torch.full_like(y_ref, w_norm))
+
+
+def horizon_decay_weights(y: Tensor, *, tau_h: float = 1.0) -> Tensor:
+    """
+    Horizon weights: tau_h**t for t=0..H-1, then normalized to mean=1.
+    y: [B,H] or compatible
+    Returns: [B,H]
+    """
+    y = ensure_2d(y)
+    H = y.size(1)
+    hw = (tau_h ** torch.arange(H, device=y.device, dtype=y.dtype))
+    hw = hw / (hw.mean() + 1e-12)
+    return hw.unsqueeze(0).expand(y.size(0), H)
+
+
+# =============================================================================
+# 4) Output adapters (pred dict -> tensor)
+# =============================================================================
+def extract_point_pred(pred: Pred, *, q50_index: Optional[int] = None) -> Tensor:
+    """
+    Normalize model output to point prediction [B,H].
+    Supported:
+      - Tensor: [B,H] | [B,H,1] | [B,1,H]
+      - Dict: {"point": ...} or {"y_pred": ...} or {"q": [B,Q,H] or [B,Q,H,C]}
+            if q: choose q50 if possible else middle index
+    """
+    if torch.is_tensor(pred):
+        return ensure_2d(pred)
+
+    if not isinstance(pred, dict):
+        raise ValueError(f"Unsupported pred type: {type(pred)}")
+
+    if "point" in pred:
+        return ensure_2d(pred["point"])
+
+    if "y_pred" in pred:
+        return ensure_2d(pred["y_pred"])
+
+    if "q" in pred:
+        q = pred["q"]
+        if not torch.is_tensor(q):
+            raise ValueError("pred['q'] must be a Tensor")
+
+        # q: [B,Q,H] or [B,Q,H,C]
+        if q.dim() == 4:
+            # choose channel 0 by default (caller should pre-select if needed)
+            q = q[..., 0]  # -> [B,Q,H]
+        if q.dim() != 3:
+            raise ValueError(f"Unsupported q shape: {tuple(q.shape)}")
+
+        B, Q, H = q.shape
+        idx = q50_index
+        if idx is None:
+            idx = Q // 2  # middle
+        idx = int(max(0, min(idx, Q - 1)))
+        return ensure_2d(q[:, idx, :])
+
+    # fallback: first tensor value
+    for v in pred.values():
+        if torch.is_tensor(v):
+            return ensure_2d(v)
+
+    raise ValueError("No tensor found in pred dict.")
+
+
+def extract_quantile_pred(pred: Pred, *, target_channel: int = 0) -> Tensor:
+    """
+    Normalize model output to quantile prediction [B,Q,H].
+    Supported:
+      - Tensor [B,Q,H]
+      - Dict {"q": [B,Q,H] or [B,Q,H,C]}  -> selects target_channel if C exists.
+    """
+    if torch.is_tensor(pred):
+        return ensure_3d_quantile(pred)
+
+    if not isinstance(pred, dict) or "q" not in pred:
+        raise ValueError("Quantile mode requires pred Tensor [B,Q,H] or dict with key 'q'.")
+
+    q = pred["q"]
+    if q.dim() == 4:
+        C = q.size(-1)
+        ch = int(max(0, min(target_channel, C - 1)))
+        q = q[..., ch]  # [B,Q,H]
+    return ensure_3d_quantile(q)
+
+
+# =============================================================================
+# 5) Configs (minimal, 독립적으로 동작하도록 dataclass 제공)
+# =============================================================================
+@dataclass
+class SpikeLossConfig:
+    enabled: bool = False
+    strategy: str = "mix"  # "mix" | "direct"
+    mad_k: float = 3.5
+    w_spike: float = 6.0
+    w_norm: float = 1.0
+    w_cap: float = 12.0
+
+    huber_delta: float = 2.0
+    asym_up_weight: float = 1.0
+    asym_down_weight: float = 1.0
+
+    alpha_huber: float = 0.7
+    beta_asym: float = 0.3
+
+    mix_with_baseline: bool = False
+    gamma_baseline: float = 0.0
+
+
+@dataclass
+class TrainingConfigLite:
+    # mode
+    loss_mode: str = "auto"  # "auto" | "point" | "quantile"
+    point_loss: str = "mae"  # "mae" | "mse" | "huber" | "pinball" | "huber_asym"
+    huber_delta: float = 5.0
+
+    # quantile
+    quantiles: Tuple[float, ...] = (0.1, 0.5, 0.9)
+    q_star: float = 0.5
+    use_cost_q_star: bool = False
+    Cu: float = 1.0
+    Co: float = 1.0
+
+    # validation
+    val_use_weights: bool = True
+
+    # intermittent (외부 util이 있으면 연결해서 쓰되, 여기서는 인터페이스만)
+    use_intermittent: bool = False
+    alpha_zero: float = 1.0
+    alpha_pos: float = 1.0
+    gamma_run: float = 0.0
+    cap: Optional[float] = None
+
+    # horizon decay
+    use_horizon_decay: bool = False
+    tau_h: float = 1.0
+
+    # spike
+    spike_loss: SpikeLossConfig = field(default_factory=SpikeLossConfig)
+
+
+# =============================================================================
+# 6) Optional hooks: 프로젝트 내부 util이 있으면 여기로 연결
+# =============================================================================
+def default_newsvendor_q_star(Cu: float, Co: float) -> float:
+    Cu = float(Cu); Co = float(Co)
+    return Cu / (Cu + Co + 1e-12)
+
+
+def default_intermittent_weights_balanced(
+    y: Tensor,
+    alpha_zero: float,
+    alpha_pos: float,
+    gamma_run: float,
+    clip_run: float = 0.5,
+) -> Tensor:
+    """
+    프로젝트 내부 intermittent weighting이 없다면 최소 동작.
+    """
+    y = ensure_2d(y)
+    is_zero = (y <= 0)
+    return torch.where(
+        is_zero,
+        torch.full_like(y, float(alpha_zero)),
+        torch.full_like(y, float(alpha_pos)),
     )
-except Exception:
-    # --- 최소 폴백 ---
-    def newsvendor_q_star(Cu: float, Co: float) -> float:
-        Cu = float(Cu); Co = float(Co)
-        return Cu / (Cu + Co + 1e-12)
-
-    def pinball_plain(pred, y, quantiles):
-        if y.dim() == 3:  # [B,1,H]
-            y = y.squeeze(1)
-        B, Q, H = pred.shape
-        loss = 0.0
-        for i, q in enumerate(quantiles):
-            diff = y - pred[:, i, :]
-            loss_q = torch.maximum(q * diff, (q - 1.0) * diff).mean()
-            loss += loss_q
-        return loss / len(quantiles)
-
-    def pinball_loss_weighted_masked(pred, y, quantiles, weights=None):
-        if y.dim() == 3: y = y.squeeze(1)
-        B, Q, H = pred.shape
-        total = 0.0
-        for i, q in enumerate(quantiles):
-            diff = y - pred[:, i, :]
-            loss_q = torch.maximum(q * diff, (q - 1.0) * diff)
-            if weights is not None:
-                loss_q = loss_q * weights
-            total += loss_q.mean()
-        return total / len(quantiles)
-
-    def intermittent_point_loss(pred, y, *, mode, tau, delta, **_):
-        if mode == "mae":   return (pred - y).abs().mean()
-        if mode == "mse":   return F.mse_loss(pred, y)
-        if mode == "huber": return F.huber_loss(pred, y, delta=delta)
-        if mode == "pinball":
-            diff = y - pred
-            return torch.maximum(tau * diff, (tau - 1.0) * diff).mean()
-        return (pred - y).abs().mean()
-
-    def intermittent_weights_balanced(y, alpha_zero, alpha_pos, gamma_run, clip_run=0.5):
-        is_zero = (y <= 0)
-        return torch.where(is_zero, torch.full_like(y, alpha_zero), torch.full_like(y, alpha_pos))
 
 
+# =============================================================================
+# 7) LossComputer (single entry point)
+# =============================================================================
 class LossComputer:
     """
-    단일 엔트리 포인트 compute()로 모든 손실 모드를 처리:
-      - Quantile: pinball (가중/마스크 가능)
-      - Point   : mae / mse / huber / pinball(q*) / huber_asym(비대칭 Huber)
-      - Spike   : cfg.spike_loss.enabled=True 일 때
-                  - strategy='mix'    → Weighted-Huber(스파이크 가중 + horizon 가중) + AsymMSE 블렌딩
-                  - strategy='direct' → point_loss='huber_asym' 단독 사용
+    단일 엔트리포인트 compute()로 손실을 산출.
 
-    차이:
-      - 'mix'    : 피크 민감도(Weighted-Huber) + 과대예측 벌점(AsymMSE)을 동시에 반영(블렌딩)
-      - 'direct' : 전체 구간에 일관된 비대칭 비용(단일 huber_asym), 단순/안정
+    - Quantile:
+        multi-quantile pinball (optional intermittent weights)
+    - Point:
+        mae/mse/huber/pinball(q*)/huber_asym
+    - Spike:
+        cfg.spike_loss.enabled일 때:
+          - strategy="mix": MAD spike weight + horizon weight + (Huber + AsymMSE) blend
+          - strategy="direct": huber_asymmetric(단일)
     """
-    def __init__(self, cfg: TrainingConfig):
+
+    def __init__(
+        self,
+        cfg: TrainingConfigLite,
+        *,
+        newsvendor_q_star_fn=default_newsvendor_q_star,
+        intermittent_weights_fn=default_intermittent_weights_balanced,
+    ):
         self.cfg = cfg
-
-    # ---------- helpers ----------
-    @staticmethod
-    def _unwrap_point(pred):
-        """dict/quantile를 포인트 텐서 [B,H]로 정규화"""
-        p = pred
-        if isinstance(p, dict):
-            if "point" in p:
-                p = p["point"]
-            elif "q" in p:
-                q = p["q"]
-                if q.dim() == 3 and q.size(-1) >= 3:
-                    p = q[..., 1]  # q50
-                else:
-                    p = q[..., 0]
-            else:
-                p = next(iter(p.values()))
-        if p.dim() == 3 and p.size(-1) == 1:
-            p = p.squeeze(-1)
-        return p
-
-    @staticmethod
-    def _as_tensor(x, like: torch.Tensor):
-        if x is None:
-            return None
-        if torch.is_tensor(x):
-            return x
-        return torch.as_tensor(x, dtype=like.dtype, device=like.device)
+        self._newsvendor_q_star_fn = newsvendor_q_star_fn
+        self._intermittent_weights_fn = intermittent_weights_fn
 
     def _q_star(self) -> float:
-        if getattr(self.cfg, "use_cost_q_star", False) and self.cfg.point_loss == 'pinball':
-            return float(newsvendor_q_star(self.cfg.Cu, self.cfg.Co))
-        return float(getattr(self.cfg, "q_star", 0.5))
+        if self.cfg.use_cost_q_star and self.cfg.point_loss == "pinball":
+            return float(self._newsvendor_q_star_fn(self.cfg.Cu, self.cfg.Co))
+        return float(self.cfg.q_star)
 
-    # ---------- spike weights & primitive losses ----------
-    @staticmethod
-    def make_spike_weight(y_hist: torch.Tensor, k: float = 3.5,
-                          w_spike: float = 6.0, w_norm: float = 1.0) -> torch.Tensor:
-        if y_hist.dim() == 3 and y_hist.size(1) == 1:
-            y_hist = y_hist.squeeze(1)
-        med = torch.median(y_hist, dim=1, keepdim=True).values
-        mad = torch.median(torch.abs(y_hist - med), dim=1, keepdim=True).values + 1e-6
-        z = (y_hist - med) / mad
-        spike = (z > k).float()
-        return torch.where(spike > 0, torch.full_like(y_hist, w_spike), torch.full_like(y_hist, w_norm))
+    def _maybe_intermittent_weights(self, y: Tensor) -> Optional[Tensor]:
+        if not self.cfg.use_intermittent:
+            return None
+        return self._intermittent_weights_fn(
+            ensure_2d(y),
+            alpha_zero=self.cfg.alpha_zero,
+            alpha_pos=self.cfg.alpha_pos,
+            gamma_run=self.cfg.gamma_run,
+            clip_run=0.5,
+        )
 
-    @staticmethod
-    def weighted_huber(y_hat: torch.Tensor, y_true: torch.Tensor,
-                       weight: torch.Tensor, delta: float = 2.0) -> torch.Tensor:
-        err = y_hat - y_true
-        abs_e = err.abs()
-        huber = torch.where(abs_e <= delta, 0.5 * err * err, delta * (abs_e - 0.5 * delta))
-        return (weight * huber).mean()
+    def _effective_horizon_weights(self, y: Tensor) -> Tensor:
+        if not self.cfg.use_horizon_decay:
+            y2 = ensure_2d(y)
+            return torch.ones_like(y2)
+        return horizon_decay_weights(y, tau_h=float(self.cfg.tau_h))
 
-    @staticmethod
-    def asymmetric_mse(y_hat: torch.Tensor, y_true: torch.Tensor, up_w: float = 2.0) -> torch.Tensor:
-        e = y_hat - y_true
-        w = torch.where(e < 0, torch.ones_like(e), torch.full_like(e, up_w))
-        return (w * e.pow(2)).mean()
+    def _infer_mode(self, pred: Pred) -> str:
+        if self.cfg.loss_mode != "auto":
+            return self.cfg.loss_mode
 
-    @staticmethod
-    def huber_asymmetric(pred: torch.Tensor, y: torch.Tensor, *,
-                         delta: float = 2.0, up_w: float = 2.0, down_w: float = 1.0,
-                         weight: torch.Tensor | None = None) -> torch.Tensor:
-        err = pred - y
-        abs_e = err.abs()
-        huber = torch.where(abs_e <= delta, 0.5 * err * err, delta * (abs_e - 0.5 * delta))
-        asym = torch.where(err > 0, torch.full_like(huber, up_w), torch.full_like(huber, down_w))
-        loss = asym * huber
-        if weight is not None:
-            loss = loss * weight
-        return loss.mean()
+        # auto detect quantile
+        if torch.is_tensor(pred):
+            if pred.dim() == 3 and pred.size(1) > 1:  # [B,Q,H]
+                return "quantile"
+            return "point"
 
-    # --- NEW: horizon 가중(평균 1로 정규화) ---
-    def _horizon_weights(self, y: torch.Tensor) -> torch.Tensor:
-        """
-        cfg.use_horizon_decay=True 이면 [B,H] 형태의 horizon 가중을 반환.
-        tau_h<1: 근미래 강조, tau_h>1: 후반부 강조. 평균 1로 정규화.
-        """
-        use_hd = bool(getattr(self.cfg, "use_horizon_decay", False))
-        if not use_hd:
-            # 가중 1
-            if y.dim() == 3 and y.size(1) == 1:
-                return torch.ones_like(y.squeeze(1))
-            return torch.ones_like(y)
+        if isinstance(pred, dict) and "q" in pred:
+            return "quantile"
 
-        tau_h = float(getattr(self.cfg, "tau_h", 1.0))
-        if y.dim() == 3 and y.size(1) == 1:
-            H = y.size(-1)
-            base = y.squeeze(1)
-        elif y.dim() == 2:
-            H = y.size(-1)
-            base = y
-        else:
-            # 마지막 축을 horizon으로 가정
-            H = y.size(-1)
-            base = y.view(y.size(0), -1)
+        return "point"
 
-        hw = tau_h ** torch.arange(H, device=base.device, dtype=base.dtype)  # 0..H-1
-        hw = hw / (hw.mean() + 1e-12)  # 평균 1 정규화
-        return hw.unsqueeze(0).expand(base.size(0), H)
-
-    # ---------- single entry ----------
-    def compute(self, pred: torch.Tensor | dict, y: torch.Tensor, *, is_val: bool) -> torch.Tensor:
-        """
-        단일 엔트리. cfg.spike_loss.enabled/strategy에 따라 분기.
-        """
-        sl = getattr(self.cfg, "spike_loss", None)
-        spike_enabled = bool(getattr(sl, "enabled", False)) if sl else False
-        strategy = (getattr(sl, "strategy", "mix") if sl else "off")  # 'mix' | 'direct' | 'off'
-
-        # 0) Quantile 경로 (항상 최우선)
-        mode_cfg = getattr(self.cfg, "loss_mode", "auto")
-        if mode_cfg == "auto":
-            if (torch.is_tensor(pred) and pred.dim() == 3 and pred.size(1) > 1) or (isinstance(pred, dict) and "q" in pred):
-                mode = "quantile"
-            else:
-                mode = "point"
-        else:
-            mode = mode_cfg
+    # -------------------------------------------------------------------------
+    # public
+    # -------------------------------------------------------------------------
+    def compute(self, pred: Pred, y: Tensor, *, is_val: bool) -> Tensor:
+        mode = self._infer_mode(pred)
 
         if mode == "quantile":
-            if is_val and not getattr(self.cfg, "val_use_weights", True):
-                return pinball_plain(pred, y, getattr(self.cfg, "quantiles", [0.1, 0.5, 0.9]))
-            weights: Optional[torch.Tensor] = None
-            if getattr(self.cfg, "use_intermittent", False):
-                weights = intermittent_weights_balanced(
-                    y,
-                    alpha_zero=getattr(self.cfg, "alpha_zero", 1.0),
-                    alpha_pos=getattr(self.cfg, "alpha_pos", 1.0),
-                    gamma_run=getattr(self.cfg, "gamma_run", 0.0),
-                    clip_run=0.5,
-                )
-                if torch.sum(weights) == 0:
-                    weights = torch.ones_like(y) * 1e-6
-            return pinball_loss_weighted_masked(
-                pred, y, getattr(self.cfg, "quantiles", [0.1, 0.5, 0.9]), weights
-            )
+            return self._compute_quantile(pred, y, is_val=is_val)
 
-        # 1) Spike 전략: 'mix' → 블렌딩 (+ horizon 가중 주입)
-        if spike_enabled and strategy == "mix":
-            y_hat = self._unwrap_point(pred)
-            slv = sl
+        # point mode
+        sl = self.cfg.spike_loss
+        if sl.enabled:
+            if sl.strategy == "mix":
+                return self._compute_spike_mix(pred, y, is_val=is_val)
+            if sl.strategy == "direct" and self.cfg.point_loss == "huber_asym":
+                return self._compute_spike_direct(pred, y, is_val=is_val)
 
-            k = float(getattr(slv, "mad_k", 3.5))
-            w_spike = float(getattr(slv, "w_spike", 6.0))
-            w_norm = float(getattr(slv, "w_norm", 1.0))
-            delta = float(getattr(slv, "huber_delta", getattr(self.cfg, "huber_delta", 2.0)))
-
-            # NEW: asym up/down 둘 다 사용
-            up_w = float(getattr(slv, "asym_up_weight", 1.0))
-            down_w = float(getattr(slv, "asym_down_weight", 1.0))
-
-            a = float(getattr(slv, "alpha_huber", 0.7))
-            b = float(getattr(slv, "beta_asym", 0.3))
-            mix_with_baseline = bool(getattr(slv, "mix_with_baseline", False))
-            gamma = float(getattr(slv, "gamma_baseline", 0.0))
-
-            # 1) 스파이크 가중
-            w_sp = self.make_spike_weight(y, k=k, w_spike=w_spike, w_norm=w_norm)  # [B,H]
-            # 2) 호라이즌 가중(평균 1로 정규화)
-            hw = self._horizon_weights(y)  # [B,H]
-
-            # 검증에서 가중 끄고 싶으면 cfg.val_use_weights=False
-            if is_val and not getattr(self.cfg, "val_use_weights", True):
-                w_eff = torch.ones_like(w_sp)
-            else:
-                w_eff = w_sp * hw
-
-            # NEW: 가중 평균 1로 정규화 (스케일 바이어스 방지)
-            w_eff = w_eff / (w_eff.mean() + 1e-12)
-
-            # (옵션) 상한으로 과도한 샘플 폭주 방지
-            w_cap = float(getattr(slv, "w_cap", 12.0))
-            if w_cap > 0:
-                w_eff = torch.clamp(w_eff, max=w_cap)
-
-            # Weighted Huber
-            err = y_hat - y
-            abs_e = err.abs()
-            huber = torch.where(abs_e <= delta, 0.5 * err * err, delta * (abs_e - 0.5 * delta))
-            loss_huber = (w_eff * huber).mean()
-
-            # NEW: 비대칭 제곱오차 (언더/오버 모두 가중)
-            mse = err.pow(2)
-            w_asym = torch.where(err > 0, torch.full_like(mse, up_w), torch.full_like(mse, down_w))
-            loss_asym = (w_eff * w_asym * mse).mean()
-
-            loss = a * loss_huber + b * loss_asym
-
-            if mix_with_baseline:
-                base = self._compute_point_base(pred, y, is_val=is_val)
-                loss = loss + gamma * base
-            return loss
-
-        # 2) Spike 전략: 'direct' → point_loss='huber_asym' 경로
-        if spike_enabled and strategy == "direct" and getattr(self.cfg, "point_loss", "mae") == "huber_asym":
-            y_hat = self._unwrap_point(pred)
-            w = None
-            if not (is_val and not getattr(self.cfg, "val_use_weights", True)):
-                if getattr(self.cfg, "use_intermittent", False):
-                    w = intermittent_weights_balanced(
-                        y,
-                        alpha_zero=getattr(self.cfg, "alpha_zero", 1.0),
-                        alpha_pos=getattr(self.cfg, "alpha_pos", 1.0),
-                        gamma_run=getattr(self.cfg, "gamma_run", 0.0),
-                        clip_run=0.5,
-                    )
-            return self.huber_asymmetric(
-                y_hat, y,
-                delta=getattr(sl, "huber_delta", getattr(self.cfg, "huber_delta", 5.0)),
-                up_w=getattr(sl, "asym_up_weight", 2.0),
-                down_w=getattr(sl, "asym_down_weight", 1.0),
-                weight=w,
-            )
-
-        # 3) 일반 point 경로
         return self._compute_point_base(pred, y, is_val=is_val)
 
-    # --- 내부: 기본 point 손실 ---
-    def _compute_point_base(self, pred, y, *, is_val: bool) -> torch.Tensor:
-        y_hat = self._unwrap_point(pred)
-        pl = getattr(self.cfg, "point_loss", "mae")
+    # -------------------------------------------------------------------------
+    # quantile
+    # -------------------------------------------------------------------------
+    def _compute_quantile(self, pred: Tensor, y: Tensor, is_val: bool) -> Tensor:
+        y2 = ensure_2d(y)
+        q_pred = extract_quantile_pred(pred)  # expected [B,Q,H], but may come as [B,H,Q]
 
-        # 검증에서 가중 끄기
-        if is_val and not getattr(self.cfg, "val_use_weights", True):
-            if pl == 'mae':   return (y_hat - y).abs().mean()
-            if pl == 'mse':   return F.mse_loss(y_hat, y)
-            if pl == 'huber': return F.huber_loss(y_hat, y, delta=getattr(self.cfg, "huber_delta", 5.0))
-            if pl == 'pinball':
-                q = self._q_star()
-                diff = y - y_hat
-                return torch.maximum(q * diff, (q - 1.0) * diff).mean()
+        # ---------------------------
+        # FIX: enforce [B, Q, H]
+        # ---------------------------
+        q = len(self.cfg.quantiles)
+        if q_pred.dim() != 3:
+            raise RuntimeError(f"[LossComputer] q_pred must be 3D, got {q_pred.shape}")
 
-        # 가중/마스크 있는 간헐수요 포인트 손실
-        return intermittent_point_loss(
-            y_hat, y,
-            mode=pl,
-            tau=self._q_star(),
-            delta=getattr(self.cfg, "huber_delta", 5.0),
-            alpha_zero=getattr(self.cfg, "alpha_zero", 0.0) if getattr(self.cfg, "use_intermittent", False) else 0.0,
-            gamma_run=getattr(self.cfg, "gamma_run", 0.0),
-            cap=getattr(self.cfg, "cap", None),
-            use_horizon_decay=getattr(self.cfg, "use_horizon_decay", False),
-            tau_h=getattr(self.cfg, "tau_h", 1.0),
+        # Case A: already [B,Q,H]
+        if q_pred.shape[1] == q:
+            pass
+        # Case B: [B,H,Q] -> transpose to [B,Q,H]
+        elif q_pred.shape[2] == q:
+            q_pred = q_pred.permute(0, 2, 1).contiguous()
+        else:
+            raise RuntimeError(
+                f"[LossComputer] cannot infer quantile axis. "
+                f"q_pred shape={tuple(q_pred.shape)} vs q_len={q}"
+            )
+
+        # weights
+        weights = self._maybe_intermittent_weights(y2)  # <-- 사용자 코드에 존재하는 메서드
+        if (is_val is True) and (self.cfg.val_use_weights is False):
+            weights = torch.ones_like(weights)
+
+        # expand weights to [B,Q,H]
+        w = weights.unsqueeze(1).expand(-1, q_pred.size(1), -1)
+        return multi_quantile_loss(y2, q_pred, self.cfg.quantiles, mask=w)
+
+    # -------------------------------------------------------------------------
+    # point base
+    # -------------------------------------------------------------------------
+    def _compute_point_base(self, pred: Pred, y: Tensor, *, is_val: bool) -> Tensor:
+        y2 = ensure_2d(y)
+        y_hat = extract_point_pred(pred)  # [B,H]
+
+        pl = self.cfg.point_loss.lower()
+
+        # val에서 가중치 끄기 (intermittent/horizon/spike 모두 off)
+        if is_val and not self.cfg.val_use_weights:
+            return self._point_loss_plain(y_hat, y2, pl)
+
+        # intermittent 가중치는 외부 intermittent_point_loss가 없으므로 "가중 평균"으로 구현(최소동작)
+        w = self._maybe_intermittent_weights(y2)  # [B,H] or None
+        if w is None:
+            return self._point_loss_plain(y_hat, y2, pl)
+
+        # weighted reduction
+        loss_map = self._point_loss_elementwise(y_hat, y2, pl)
+        # 평균 스케일 안정화를 위해 w 평균으로 정규화
+        w_eff = w / (w.mean() + 1e-12)
+        return (w_eff * loss_map).mean()
+
+    def _point_loss_plain(self, y_hat: Tensor, y: Tensor, pl: str) -> Tensor:
+        if pl == "mae":
+            return mae_loss(y, y_hat)
+        if pl == "mse":
+            return mse_loss(y, y_hat)
+        if pl == "huber":
+            return F.huber_loss(y_hat, y, delta=float(self.cfg.huber_delta))
+        if pl == "pinball":
+            return pinball_loss(y, y_hat, tau=float(self._q_star()))
+        if pl == "huber_asym":
+            sl = self.cfg.spike_loss
+            return huber_asymmetric(
+                y_hat, y,
+                delta=float(getattr(sl, "huber_delta", self.cfg.huber_delta)),
+                up_w=float(getattr(sl, "asym_up_weight", 2.0)),
+                down_w=float(getattr(sl, "asym_down_weight", 1.0)),
+                weight=None,
+            )
+        # default
+        return mae_loss(y, y_hat)
+
+    def _point_loss_elementwise(self, y_hat: Tensor, y: Tensor, pl: str) -> Tensor:
+        """
+        elementwise loss map [B,H] for weighting.
+        """
+        if pl == "mae":
+            return (y_hat - y).abs()
+        if pl == "mse":
+            return (y_hat - y) ** 2
+        if pl == "huber":
+            err = y_hat - y
+            return huber_piecewise(err, delta=float(self.cfg.huber_delta))
+        if pl == "pinball":
+            tau = float(self._q_star())
+            diff = y - y_hat
+            return torch.maximum(tau * diff, (tau - 1.0) * diff)
+        if pl == "huber_asym":
+            sl = self.cfg.spike_loss
+            err = y_hat - y
+            hub = huber_piecewise(err, delta=float(getattr(sl, "huber_delta", self.cfg.huber_delta)))
+            asym = torch.where(
+                err > 0,
+                torch.full_like(hub, float(getattr(sl, "asym_up_weight", 2.0))),
+                torch.full_like(hub, float(getattr(sl, "asym_down_weight", 1.0))),
+            )
+            return asym * hub
+        return (y_hat - y).abs()
+
+    # -------------------------------------------------------------------------
+    # spike mix/direct
+    # -------------------------------------------------------------------------
+    def _compute_spike_mix(self, pred: Pred, y: Tensor, *, is_val: bool) -> Tensor:
+        y2 = ensure_2d(y)
+        y_hat = extract_point_pred(pred)  # [B,H]
+        sl = self.cfg.spike_loss
+
+        # val에서 가중치 끄기
+        if is_val and not self.cfg.val_use_weights:
+            # spike 로직을 비활성화한 plain point로 fallback
+            return self._compute_point_base(pred, y2, is_val=True)
+
+        # spike weights (MAD) & horizon weights
+        w_sp = mad_spike_weights(
+            y2, k=float(sl.mad_k), w_spike=float(sl.w_spike), w_norm=float(sl.w_norm)
+        )  # [B,H]
+        w_hz = self._effective_horizon_weights(y2)  # [B,H]
+
+        w_eff = w_sp * w_hz
+
+        # intermittent weights까지 곱하고 싶으면 여기에 확장 가능(현재는 point base에서만)
+        # 스케일 안정화
+        w_eff = w_eff / (w_eff.mean() + 1e-12)
+
+        # cap to avoid exploding gradients
+        if float(sl.w_cap) > 0:
+            w_eff = torch.clamp(w_eff, max=float(sl.w_cap))
+
+        # Huber component
+        err = y_hat - y2
+        hub = huber_piecewise(err, delta=float(sl.huber_delta))
+        loss_huber = (w_eff * hub).mean()
+
+        # Asym MSE component
+        loss_asym = asymmetric_mse(
+            y_hat, y2,
+            up_w=float(sl.asym_up_weight),
+            down_w=float(sl.asym_down_weight),
+            weight=w_eff,
+        )
+
+        loss = float(sl.alpha_huber) * loss_huber + float(sl.beta_asym) * loss_asym
+
+        if sl.mix_with_baseline:
+            base = self._compute_point_base(pred, y2, is_val=is_val)
+            loss = loss + float(sl.gamma_baseline) * base
+
+        return loss
+
+    def _compute_spike_direct(self, pred: Pred, y: Tensor, *, is_val: bool) -> Tensor:
+        y2 = ensure_2d(y)
+        y_hat = extract_point_pred(pred)
+        sl = self.cfg.spike_loss
+
+        if is_val and not self.cfg.val_use_weights:
+            # direct도 가중 off
+            return huber_asymmetric(
+                y_hat, y2,
+                delta=float(sl.huber_delta),
+                up_w=float(sl.asym_up_weight),
+                down_w=float(sl.asym_down_weight),
+                weight=None,
+            )
+
+        # optional intermittent weight
+        w = self._maybe_intermittent_weights(y2)
+        if w is not None:
+            w = w / (w.mean() + 1e-12)
+
+        return huber_asymmetric(
+            y_hat, y2,
+            delta=float(sl.huber_delta),
+            up_w=float(sl.asym_up_weight),
+            down_w=float(sl.asym_down_weight),
+            weight=w,
         )
 
 
-# --- 이하 유틸(기존 유지) ---
-def huber_loss(x: torch.Tensor, y: torch.Tensor, delta: float = 1.0) -> torch.Tensor:
-    return F.huber_loss(x, y, delta=delta)
-
-def pinball_loss(yhat: torch.Tensor, y: torch.Tensor, q: float) -> torch.Tensor:
-    diff = y - yhat
-    return torch.maximum(q * diff, (q - 1) * diff).mean()
-
-def asymmetric_mse(yhat: torch.Tensor, y: torch.Tensor, up_w: float = 2.0, down_w: float = 1.0) -> torch.Tensor:
-    diff = yhat - y
-    w = torch.where(diff >= 0, torch.as_tensor(up_w, device=diff.device), torch.as_tensor(down_w, device=diff.device))
-    return (w * diff.pow(2)).mean()
-
-def detect_spikes(y: torch.Tensor, k: float = 3.5) -> torch.Tensor:
-    # MAD-based spike mask on last dim
-    med = y.median(dim=-2, keepdim=True).values if y.dim() >= 2 else y.median()
-    mad = (y - med).abs().median(dim=-2, keepdim=True).values + 1e-8
-    z = (y - med).abs() / mad
-    return (z >= k).float()
-
-def spike_friendly_loss(yhat: torch.Tensor, y: torch.Tensor, cfg: TrainingConfig) -> torch.Tensor:
-    sc = cfg.spike_loss
-    if not sc.enabled:
-        return huber_loss(yhat, y, delta=cfg.huber_delta)
-
-    if sc.strategy == 'direct':
-        return F.huber_loss(yhat, y, delta=sc.huber_delta) * 0.7 + asymmetric_mse(yhat, y, sc.asym_up_weight, sc.asym_down_weight) * 0.3
-
-    # mix: spike 가중치
-    mask = detect_spikes(y, k=sc.mad_k)
-    w = mask * sc.w_spike + (1 - mask) * sc.w_norm
-    loss_h = F.huber_loss(yhat, y, delta=sc.huber_delta, reduction='none')
-    loss_a = (yhat - y).pow(2)
-    # 비대칭 가중
-    loss_a = torch.where(yhat >= y, loss_a * sc.asym_up_weight, loss_a * sc.asym_down_weight)
-    loss = sc.alpha_huber * (w * loss_h).mean() + sc.beta_asym * (w * loss_a).mean()
-
-    if sc.mix_with_baseline:
-        loss = (1 - sc.gamma_baseline) * loss + sc.gamma_baseline * huber_loss(yhat, y, delta=cfg.huber_delta)
-    return loss
-
-def make_pspa_fn(lambda_pattern: float = 0.20, lambda_scale: float = 0.10,
-                 target_channel: int = 0):
+# =============================================================================
+# 8) PSPA (Past Scale & Pattern Anchoring) - cleaned
+# =============================================================================
+def make_pspa_fn(
+    lambda_pattern: float = 0.20,
+    lambda_scale: float = 0.10,
+    target_channel: int = 0,
+):
     """
     PSPA: Past Scale & Pattern Anchoring
+    - Pattern: cosine distance between recent diffs of history and predicted diffs
+    - Scale  : ratio of abs-mean scale between history segment and prediction segment
     """
 
-    import torch
-    import torch.nn.functional as F
     eps = 1e-8
 
-    def _to_pred_tensor(out):
+    def _to_pred_bhc(out: Pred) -> Tensor:
         """
-        out: Tensor | {"y_pred": Tensor} | {"q": [B,Q,H] or [B,Q,H,C]}
-        반환: [B,H,1]  (항상 단일 채널로 정규화)
+        Normalize output to [B,H,1] for a single target channel.
+        Supported:
+          - Tensor [B,H] or [B,H,C]
+          - Dict {"y_pred": ...} or {"q": [B,Q,H] or [B,Q,H,C]} (uses median quantile index)
         """
-        if isinstance(out, torch.Tensor):
-            y = out  # [B,H] or [B,H,C]
+        if torch.is_tensor(out):
+            y = out
         elif isinstance(out, dict):
             if "y_pred" in out:
-                y = out["y_pred"]          # [B,H] or [B,H,C]
+                y = out["y_pred"]
             elif "q" in out:
-                q = out["q"]               # [B,Q,H] or [B,Q,H,C]
-                # 중앙(0.5) 선택
-                q_idx = q.shape[1] // 2
-                y = q[:, q_idx, ...]       # [B,H] or [B,H,C]
+                q = out["q"]
+                if q.dim() == 4:
+                    # [B,Q,H,C] -> select channel
+                    C = q.size(-1)
+                    ch = int(max(0, min(target_channel, C - 1)))
+                    q = q[..., ch]  # [B,Q,H]
+                if q.dim() != 3:
+                    raise ValueError(f"Unsupported q shape: {tuple(q.shape)}")
+                q_idx = q.size(1) // 2
+                y = q[:, q_idx, :]  # [B,H]
             else:
-                raise ValueError("Unsupported pred dict keys.")
+                raise ValueError("Unsupported pred dict keys (need 'y_pred' or 'q').")
         else:
-            raise ValueError("Unsupported pred type.")
+            raise ValueError(f"Unsupported out type: {type(out)}")
 
-        # 차원 정리 -> [B,H,1]
-        if y.dim() == 2:                   # [B,H] -> [B,H,1]
+        # [B,H] -> [B,H,1]
+        if y.dim() == 2:
             y = y.unsqueeze(-1)
-        elif y.dim() == 3:                 # [B,H,C] -> [B,H,1] (target_channel만 쓰기)
+        # [B,H,C] -> select channel -> [B,H,1]
+        elif y.dim() == 3:
             C = y.size(-1)
-            ch = min(max(target_channel, 0), C - 1)
-            y = y[..., ch:ch+1]
+            ch = int(max(0, min(target_channel, C - 1)))
+            y = y[..., ch : ch + 1]
         else:
-            raise ValueError(f"Unsupported pred shape: {y.shape}")
+            raise ValueError(f"Unsupported pred shape: {tuple(y.shape)}")
+
         return y
 
-    def _select_hist_channel(x):
-        # x: [B,L,C] -> [B,L,1]
+    def _select_hist_blc(x: Tensor) -> Tensor:
+        """
+        x: [B,L,C] -> [B,L,1] by selecting target_channel
+        """
         if x.dim() != 3:
-            raise ValueError(f"x must be [B,L,C], got {x.shape}")
+            raise ValueError(f"x must be [B,L,C], got {tuple(x.shape)}")
         C = x.size(-1)
-        ch = min(max(target_channel, 0), C - 1)
-        return x[:, :, ch:ch+1]
+        ch = int(max(0, min(target_channel, C - 1)))
+        return x[:, :, ch : ch + 1]
 
-    def _pspa(x, out, cfg):
-        y = _to_pred_tensor(out)       # [B,H,1]
-        x_ch = _select_hist_channel(x) # [B,L,1]
+    def _pspa(x: Tensor, out: Pred, cfg: Any = None) -> Tensor:
+        y = _to_pred_bhc(out)          # [B,H,1]
+        x_ch = _select_hist_blc(x)     # [B,L,1]
 
-        # 차분
+        # diffs
         diff_hist = x_ch[:, 1:, :] - x_ch[:, :-1, :]   # [B,L-1,1]
         diff_pred = y[:, 1:, :] - y[:, :-1, :]         # [B,H-1,1]
 
-        # 길이 정렬
         T = min(diff_hist.size(1), diff_pred.size(1))
         if T < 1:
             return y.new_tensor(0.0)
 
-        dh = diff_hist[:, -T:, :]   # [B,T,1]
-        dp = diff_pred[:, :T, :]    # [B,T,1]
+        dh = diff_hist[:, -T:, :].reshape(diff_hist.size(0), -1)  # [B,T]
+        dp = diff_pred[:, :T, :].reshape(diff_pred.size(0), -1)   # [B,T]
 
-        # 패턴 앵커(코사인 유사도)
-        v1 = dh.reshape(dh.size(0), -1)  # [B, T]
-        v2 = dp.reshape(dp.size(0), -1)  # [B, T]
-        cos = F.cosine_similarity(v1, v2, dim=1)  # [B]
+        # pattern (cosine distance)
+        cos = F.cosine_similarity(dh, dp, dim=1)  # [B]
         L_pattern = (1.0 - cos).mean()
 
-        # 스케일 앵커
-        hist_seg = x_ch[:, -T:, :]     # [B,T,1]
-        pred_seg = y[:, :T, :]         # [B,T,1]
+        # scale anchoring
+        hist_seg = x_ch[:, -T:, :]   # [B,T,1]
+        pred_seg = y[:, :T, :]       # [B,T,1]
         scale_hist = hist_seg.abs().mean(dim=(1, 2)) + eps
         scale_pred = pred_seg.abs().mean(dim=(1, 2)) + eps
         L_scale = ((scale_pred / scale_hist) - 1.0).abs().mean()
 
-        return lambda_pattern * L_pattern + lambda_scale * L_scale
+        return float(lambda_pattern) * L_pattern + float(lambda_scale) * L_scale
 
     return _pspa
-
+#

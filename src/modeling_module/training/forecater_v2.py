@@ -16,6 +16,17 @@ DEBUG_FCAST = True
 # Standalone Helpers (Stateless)
 # -------------------------------------------------------------------------
 
+def _to_device_any(v, device: torch.device):
+    if v is None:
+        return None
+    if torch.is_tensor(v):
+        return v.to(device)
+    if isinstance(v, (list, tuple)):
+        return type(v)(_to_device_any(x, device) for x in v)
+    if isinstance(v, dict):
+        return {k: _to_device_any(x, device) for k, x in v.items()}
+    return v
+
 def _safe_forward(model: torch.nn.Module, x: torch.Tensor, **kwargs):
     """model.forward 시그니처를 기반으로 kwargs를 필터링하여 호출."""
     try:
@@ -189,7 +200,10 @@ class DMSForecaster:
         """
         device = torch.device(device or next(self.model.parameters()).device)
         self.model.to(device).eval()
-
+        part_ids = _to_device_any(part_ids, device)
+        past_exo_cont = _to_device_any(past_exo_cont, device)
+        past_exo_cat = _to_device_any(past_exo_cat, device)
+        future_exo_batch = _to_device_any(future_exo_batch, device)
         x_raw = x_init.to(device).float().clone()
         if x_raw.dim() == 2:
             x_raw = x_raw.unsqueeze(-1)
