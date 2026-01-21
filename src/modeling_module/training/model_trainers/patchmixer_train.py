@@ -104,6 +104,8 @@ def train_patchmixer(
     # exogenous
     future_exo_cb: Optional[Callable[[int, int], "torch.Tensor"]] = None,
     exo_is_normalized: bool = False,
+    use_exogenous_mode: bool = True
+
 ):
     """PatchMixer trainer entry.
 
@@ -179,6 +181,8 @@ def train_patchmixer(
             future_exo_cb=future_exo_cb,
             autocast_input=autocast_input,
             extra_loss_fn=None,
+            use_exogenous_mode=use_exogenous_mode
+
         )
         model = trainer.fit(model, tl_i, val_loader, tta_steps=0)
         best = {"model": model, "cfg": cfg_i}

@@ -1,6 +1,6 @@
 from __future__ import annotations
 from dataclasses import asdict
-from typing import Optional
+from typing import Optional, Sequence
 
 import torch
 import torch.nn as nn
@@ -37,6 +37,73 @@ def _merge_cfg_kwargs(cfg_obj, **kwargs):
     cfg_dict.update(kwargs)
     return cfg_dict
 
+class _PastExoEmbed(nn.Module):
+    """
+    past_exo_cont: [B, L, Dc]
+    past_exo_cat : [B, L, K] (int/long 권장)
+    -> out        : [B, L, Dc + sum(embed_dims)]
+    """
+    def __init__(
+        self,
+        *,
+        cont_dim: int,
+        cat_vocab_sizes: Sequence[int],
+        cat_embed_dims: Sequence[int],
+    ):
+        super().__init__()
+        self.cont_dim = int(cont_dim)
+        self.cat_vocab_sizes = list(cat_vocab_sizes)
+        self.cat_embed_dims = list(cat_embed_dims)
+
+        assert len(self.cat_vocab_sizes) == len(self.cat_embed_dims), \
+            "past_exo_cat_vocab_sizes and past_exo_cat_embed_dims must have same length"
+
+        self.cat_embs = nn.ModuleList([
+            nn.Embedding(int(vs), int(ed))
+            for vs, ed in zip(self.cat_vocab_sizes, self.cat_embed_dims)
+        ])
+
+        self.out_dim = self.cont_dim + sum(self.cat_embed_dims)
+
+    def forward(
+        self,
+        past_exo_cont: Optional[torch.Tensor],
+        past_exo_cat: Optional[torch.Tensor],
+        *,
+        B: int,
+        L: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        feats = []
+
+        # cont
+        if self.cont_dim > 0:
+            if past_exo_cont is None:
+                feats.append(torch.zeros(B, L, self.cont_dim, device=device, dtype=dtype))
+            else:
+                feats.append(past_exo_cont.to(device=device, dtype=dtype))
+
+        # cat
+        K = len(self.cat_embs)
+        if K > 0:
+            if past_exo_cat is None:
+                # unknown category -> 0으로 처리
+                past_exo_cat = torch.zeros(B, L, K, device=device, dtype=torch.long)
+            else:
+                past_exo_cat = past_exo_cat.to(device=device)
+                if past_exo_cat.dtype != torch.long:
+                    past_exo_cat = past_exo_cat.long()
+
+            for i, emb in enumerate(self.cat_embs):
+                # [B,L] -> [B,L,ed]
+                feats.append(emb(past_exo_cat[:, :, i]))
+
+        if not feats:
+            return torch.zeros(B, L, 0, device=device, dtype=dtype)
+
+        return torch.cat(feats, dim=-1)
+
 
 class _TitanBase(nn.Module):
     """
@@ -68,7 +135,7 @@ class _TitanBase(nn.Module):
         self.persistent_mem_size: int = int(params.get("persistent_mem_size", 64))
 
         # Exogenous
-        self.use_exogenous: bool = bool(params.get("use_exogenous", False))
+        self.use_exogenous_mode: bool = bool(params.get("use_exogenous_mode", False))
         self.exo_dim: int = int(params.get("exo_dim", 0))
         self.use_calendar_exo: bool = bool(params.get("use_calendar_exo", False))
 
@@ -84,6 +151,42 @@ class _TitanBase(nn.Module):
         # 원본 config 보관(트레이너가 참조 가능)
         self.config = config
 
+        self.past_exo_cont_dim = int(params.get("past_exo_cont_dim", 0))
+        self.past_exo_cat_dim = int(params.get("past_exo_cat_dim", 0))
+
+        vocab_sizes = params.get("past_exo_cat_vocab_sizes", ())
+        embed_dims = params.get("past_exo_cat_embed_dims", ())
+
+        # 안전: cat_dim>0인데 tuple이 비어있으면 기본값 채움
+        if self.past_exo_cat_dim > 0 and (not vocab_sizes or not embed_dims):
+            vocab_sizes = tuple([512] * self.past_exo_cat_dim)
+            embed_dims = tuple([16] * self.past_exo_cat_dim)
+
+        self.past_exo_cat_vocab_sizes = tuple(vocab_sizes)
+        self.past_exo_cat_embed_dims = tuple(embed_dims)
+
+        # past embedding helper
+        self.past_exo_embed = _PastExoEmbed(
+            cont_dim=self.past_exo_cont_dim,
+            cat_vocab_sizes=self.past_exo_cat_vocab_sizes,
+            cat_embed_dims=self.past_exo_cat_embed_dims,
+        )
+
+        # Titan encoder는 "타깃 1채널 + past_exo_features"를 입력으로 받도록 고정
+        self.encoder_input_dim = 1 + self.past_exo_embed.out_dim
+
+        self.encoder = MemoryEncoder(
+            self.encoder_input_dim,  # <= 기존 self.input_dim 대신 확장 dim 사용
+            self.d_model,
+            self.n_layers,
+            self.n_heads,
+            self.d_ff,
+            self.contextual_mem_size,
+            self.persistent_mem_size,
+            self.dropout,
+            use_context_update=False,
+        )
+
         self.target_channel = int(params.get("target_channel", 0))
         self.revin = RevIN(
             num_features=1,  # 단일 타깃 채널 기준
@@ -91,6 +194,7 @@ class _TitanBase(nn.Module):
             subtract_last=self.revin_subtract_last,
             use_std=self.revin_use_std
         ) if self.use_revin else None
+
 
         # Encoder
         self.encoder = MemoryEncoder(
@@ -104,6 +208,32 @@ class _TitanBase(nn.Module):
             self.dropout,
             use_context_update=False  # 일단 안전하게 False로 고정하거나 config 옵션 연동
         )
+
+    def _make_encoder_input(
+            self,
+            x: torch.Tensor,
+            past_exo_cont: Optional[torch.Tensor],
+            past_exo_cat: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        """
+        x: [B,L,C]
+        -> encoder_in: [B,L, 1 + past_exo_dim]
+        """
+        # 1) RevIN은 타깃 채널(1개)만 norm
+        x = self._maybe_revin_norm(x)  # 기존 로직 유지
+        tc = int(self.target_channel)
+        x_t = x[:, :, tc:tc + 1]  # [B,L,1]
+
+        B, L, _ = x_t.shape
+        exo = self.past_exo_embed(
+            past_exo_cont,
+            past_exo_cat,
+            B=B, L=L,
+            device=x_t.device,
+            dtype=x_t.dtype,
+        )  # [B,L,past_dim]
+
+        return torch.cat([x_t, exo], dim=-1)
 
     @classmethod
     def from_config(cls, config: "TitanConfig"):
@@ -152,50 +282,23 @@ class TitanBaseModel(_TitanBase):
             d_ff=self.d_ff,
             dropout=self.dropout,
             horizon=self.horizon,
-            exo_dim=(self.exo_dim if self.use_exogenous else 0),
+            exo_dim=(self.exo_dim if self.use_exogenous_mode else 0),
         )
         self.proj = nn.Linear(self.d_model, 1)
 
-    def forward(self, x: torch.Tensor, *, future_exo: torch.Tensor | None = None) -> torch.Tensor:
-        # 1) RevIN norm (입력 전처리) ---------------------
-        x = self._maybe_revin_norm(x)  # [B,L,C]
-
-        # 2) Encoder-Decoder-Head -------------------------
-        memory = self.encoder(x)  # [B,L,D]
-        dec = self.decoder(memory, future_exo)  # [B,H,D]
-        y = self.proj(dec).squeeze(-1)  # [B,H]
-
-        # 폭주 로그 확인용
-        # y_before = y.detach().clone()
-
-
-        # 3) RevIN denorm (출력 복원) ---------------------
-        y = self._maybe_revin_denorm(y)  # [B,H]
-
-
-        # 폭주 로그 확인용
-        # if (self.revin is not None) and (y.dim() == 2):
-        #     with torch.no_grad():
-        #         b0 = 0
-        #         print(f"[TitanDBG] model={getattr(self, 'model_name', self.__class__.__name__)}")
-        #         print(f"  y_before[0,:5]={y_before[b0, :5].tolist()}")
-        #         print(f"  y_after [0,:5]={y[b0, :5].tolist()}")
-        #         # RevIN 내부 통계가 public이라면 찍기 (구현에 맞게 조정)
-        #         if hasattr(self.revin, 'mean'):
-        #             m = getattr(self.revin, 'mean', None)
-        #             s = getattr(self.revin, 'std', None)
-        #             last = getattr(self.revin, 'last', None)
-        #             if m is not None:
-        #                 print(
-        #                     f"  revin.mean[0, :5, 0]={m[b0, :5, 0].detach().cpu().numpy() if m.dim() == 3 else m[b0, :5].detach().cpu().numpy()}")
-        #             if s is not None:
-        #                 print(
-        #                     f"  revin.std [0, :5, 0]={s[b0, :5, 0].detach().cpu().numpy() if s.dim() == 3 else s[b0, :5].detach().cpu().numpy()}")
-        #             if last is not None:
-        #                 print(f"  revin.last[0,0,0]={float(last[b0, 0, 0])}")
-
-        # 4) 최종 제약(비음수 등) -------------------------
-
+    def forward(
+        self,
+        x: torch.Tensor,
+        *,
+        future_exo: Optional[torch.Tensor] = None,
+        past_exo_cont: Optional[torch.Tensor] = None,
+        past_exo_cat: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        encoder_in = self._make_encoder_input(x, past_exo_cont, past_exo_cat)  # [B,L,1+past_dim]
+        memory = self.encoder(encoder_in)                                      # [B,L,D]
+        dec = self.decoder(memory, future_exo)                                 # [B,H,D]
+        y = self.proj(dec).squeeze(-1)                                         # [B,H]
+        y = self._maybe_revin_denorm(y)
         return self._clamp(y)
 
 
@@ -212,20 +315,17 @@ class TitanLMMModel(_TitanBase):
             d_ff=self.d_ff,
             dropout=self.dropout,
             horizon=self.horizon,
-            exo_dim=(self.exo_dim if self.use_exogenous else 0),
+            exo_dim=(self.exo_dim if self.use_exogenous_mode else 0),
         )
         self.proj = nn.Linear(self.d_model, 1)
 
-    def forward(self, x: torch.Tensor, *, future_exo: torch.Tensor | None = None) -> torch.Tensor:
-        # 1) RevIN norm (입력 전처리) ---------------------
-        x = self._maybe_revin_norm(x)  # [B,L,C]
-        memory = self.encoder(x)
+    def forward(self, x, *, future_exo=None, past_exo_cont=None, past_exo_cat=None):
+        encoder_in = self._make_encoder_input(x, past_exo_cont, past_exo_cat)
+        memory = self.encoder(encoder_in)
         dec = self.decoder(memory, future_exo)
         y = self.proj(dec).squeeze(-1)
-        # 3) RevIN denorm (출력 복원) ---------------------
-        y = self._maybe_revin_denorm(y)  # [B,H]
+        y = self._maybe_revin_denorm(y)
         return self._clamp(y)
-
 
 class TitanSeq2SeqModel(_TitanBase):
     """
@@ -240,16 +340,14 @@ class TitanSeq2SeqModel(_TitanBase):
             d_ff=self.dec_d_ff,
             dropout=self.dec_dropout,
             horizon=self.horizon,
-            exo_dim=(self.exo_dim if self.use_exogenous else 0),
+            exo_dim=(self.exo_dim if self.use_exogenous_mode else 0),
         )
         self.proj = nn.Linear(self.d_model, 1)
 
-    def forward(self, x: torch.Tensor, *, future_exo: torch.Tensor | None = None) -> torch.Tensor:
-        # 1) RevIN norm (입력 전처리) ---------------------
-        x = self._maybe_revin_norm(x)  # [B,L,C]
-        memory = self.encoder(x)               # [B, L, D]
-        dec = self.decoder(memory, future_exo) # [B, H, D]
-        y = self.proj(dec).squeeze(-1)         # [B, H]
-        # 3) RevIN denorm (출력 복원) ---------------------
-        y = self._maybe_revin_denorm(y)  # [B,H]
+    def forward(self, x, *, future_exo=None, past_exo_cont=None, past_exo_cat=None):
+        encoder_in = self._make_encoder_input(x, past_exo_cont, past_exo_cat)
+        memory = self.encoder(encoder_in)
+        dec = self.decoder(memory, future_exo)
+        y = self.proj(dec).squeeze(-1)
+        y = self._maybe_revin_denorm(y)
         return self._clamp(y)
