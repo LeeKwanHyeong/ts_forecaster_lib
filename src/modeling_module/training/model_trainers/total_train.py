@@ -309,9 +309,6 @@ def _run_patchtst(
         use_revin=True,
     )
 
-    # >>> PATCH START: infer past_exo dims from loader batch and inject into pt_kwargs
-    # 목적: backbone init 시점에 d_past_cont/d_past_cat가 0으로 고정되는 문제 해결
-    # 전제: loader batch tuple = (x, y, uid, fe, pe_cont, pe_cat)
     d_past_cont = 0
     d_past_cat = 0
     try:
@@ -331,7 +328,6 @@ def _run_patchtst(
         print(f"[DBG-pt_kwargs] failed to infer past_exo dims: {repr(e)}")
         d_past_cont, d_past_cat = 0, 0
 
-    # 안전: use_exogenous_mode=False면 future exo 차원도 강제로 0으로
     if not use_exogenous_mode:
         pt_kwargs["d_future"] = 0
 
@@ -342,11 +338,10 @@ def _run_patchtst(
         f"[DBG-pt_kwargs] use_exogenous_mode={use_exogenous_mode} | "
         f"d_future={pt_kwargs['d_future']} | d_past_cont={d_past_cont} | d_past_cat={d_past_cat}"
     )
-    # <<< PATCH END
 
 
     # ---------------------------
-    # (NEW) 0) self-supervised pretrain (optional)
+    # self-supervised pretrain (optional)
     # ---------------------------
     pretrain_ckpt_path = None
     if use_ssl_pretrain and save_root is not None:
@@ -484,7 +479,7 @@ def _run_titan(
         lookback=lookback,
         horizon=horizon,
 
-        # (중요) Titan encoder input_dim 확장: target(1) + past_exo
+        # 중요 Titan encoder input_dim 확장: target(1) + past_exo
         input_dim=1 + past_dim_total,
 
         d_model=256,
@@ -735,18 +730,6 @@ def _run_total_train_generic(
     date_type_map = {"weekly": "W", "monthly": "M", "daily": "D", "hourly": "H"}
     dt_char = date_type_map.get(freq, "W")
 
-    # --------------------------------------------------------------
-    # Exogenous feature policy (TRAIN)
-    # --------------------------------------------------------------
-    # We support two ways of supplying "future exogenous" features:
-    #   (A) Loader-provided: batch[3] == fe_cont with shape (B, H, E)
-    #   (B) Callback-provided: future_exo_cb(t0, H) -> (H, E)
-    #
-    # IMPORTANT:
-    # - If loader provides fe_cont, we prefer (A) and set future_exo_cb=None
-    #   to avoid inconsistent dim between loader and calendar callback.
-    # - If loader does NOT provide fe_cont, we use (B) when use_exogenous_mode=True.
-    # - If loader provides fe_cont but E==0, that is treated as a configuration error.
     has_fe, fe_dim = _infer_future_exo_spec_from_loader(train_loader)
 
     if use_exogenous_mode:

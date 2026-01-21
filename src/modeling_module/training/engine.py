@@ -250,7 +250,6 @@ class CommonTrainer:
         adapter.forward의 레거시/확장 시그니처를 모두 허용.
         """
         try:
-            # 신 시그니처 (권장)
             return self.adapter.forward(
                 model,
                 x,
@@ -261,7 +260,6 @@ class CommonTrainer:
                 mode=mode,
             )
         except TypeError:
-            # 구 시그니처 (future_exo만 받는 경우)
             return self.adapter.forward(
                 model,
                 x,
@@ -337,13 +335,6 @@ class CommonTrainer:
                         self.logger("[Warn] NaN loss. step skipped.")
                         continue
                     self.scaler.scale(loss_t).backward()
-
-                    # with torch.no_grad():
-                    #     total_norm = 0.0
-                    #     for name, p in model.named_parameters():
-                    #         if p.grad is not None:
-                    #             total_norm += p.grad.abs().mean().item()
-                    #     print(f"[DEBUG] grad mean abs = {total_norm:.6f}")
 
                     self.scaler.unscale_(self.opt)
                     torch.nn.utils.clip_grad_norm_(model.parameters(), self.cfg.max_grad_norm)
