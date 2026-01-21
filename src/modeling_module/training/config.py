@@ -94,6 +94,8 @@ class TrainingConfig:
     exo_dim = 2  # 미래 외생변수 차원(없으면 0)
     nonneg_head = False  # 수요 비음수 보장 (Softplus)
 
+    use_exogenous_mode: bool = False
+
 
     # ------------Spike-friendly Loss-------------- #
     spike_loss: SpikeLossConfig = field(default_factory=SpikeLossConfig)

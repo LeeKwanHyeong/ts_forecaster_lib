@@ -233,7 +233,6 @@ class CommonTrainer:
             x, y = batch
         else:
             raise RuntimeError(f"Unsupported batch tuple length: {len(batch)}")
-
         return x, y, part_ids, future_exo_cont, past_exo_cont, past_exo_cat
 
     def _forward_with_adapter(
@@ -296,10 +295,7 @@ class CommonTrainer:
                     future_exo = self._resolve_future_exo(fe_cont, x, y, device=device)
                 else:
                     future_exo = None
-                # if future_exo is None:
-                #     print("[DEBUG] future_exo is None")
-                # else:
-                #     print("[DEBUG] future_exo shape:", tuple(future_exo.shape))
+
 
 
                 with autocast(
@@ -383,6 +379,8 @@ class CommonTrainer:
                     x, y, part_ids, fe_cont, pe_cont, pe_cat = self._unpack_batch(batch)
                     x_val, y_val = x.to(device), y.to(device)
 
+
+                    # print(f'[use_exogenous_mode]: {self.use_exogenous_mode}')
                     if self.use_exogenous_mode:
                         future_exo = self._resolve_future_exo(fe_cont, x_val, y_val, device=device)
                     else:

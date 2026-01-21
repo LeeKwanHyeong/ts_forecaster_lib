@@ -48,6 +48,7 @@ class TitanDecoderLayer(nn.Module):
         y = self.norm2(x)
         z, _ = self.cross_attn(y, memory, memory)
         x = x + self.dropout(z)
+        z_mean = (z.detach().float().abs().mean()).item()
 
         # 3) ffn
         w = self.norm3(x)
@@ -86,6 +87,12 @@ class TitanDecoder(nn.Module):
 
     def forward(self, memory: torch.Tensor, future_exo: torch.Tensor | None = None) -> torch.Tensor:
         # memory: [B, L, D]
+        # print(
+        #     f"[DBG][exo] future_exo is None? {future_exo is None} | exo_proj is None? {getattr(self, 'exo_proj', None) is None}")
+        # if future_exo is not None:
+        #     print("[DBG][exo] future_exo shape:", tuple(future_exo.shape), "std:",
+        #           float(future_exo.detach().float().std().cpu()))
+
         B, L, D = memory.shape
         H = self.horizon
 
@@ -96,13 +103,12 @@ class TitanDecoder(nn.Module):
         enc_last_emb = self.enc_last_proj(enc_last).expand(B, H, D)
 
         tgt = self.query_embed.expand(B, H, D) + self.pos_embed.expand(B, H, D) + enc_last_emb
-
         if (self.exo_proj is not None) and (future_exo is not None):
             tgt = tgt + self.exo_proj(future_exo)  # [B, H, D]
-
         x = tgt
         for layer in self.layers:
             x = layer(x, memory)
+
         return x
 
 # class TitanDecoder(nn.Module):

@@ -1,3 +1,4 @@
+from dataclasses import fields
 from typing import Union, Any
 
 from modeling_module.models.PatchMixer.common.configs import PatchMixerConfig
@@ -43,13 +44,34 @@ def _ensure_titan_config(cfg: Union[TitanConfig, dict, Any]) -> TitanConfig:
     Titan 구(旧) 체크포인트 호환용:
     - dict 또는 Namespace로 저장된 config를 TitanConfig dataclass로 변환.
     """
+
     if isinstance(cfg, TitanConfig):
         return cfg
+
+    # 1) dict로 만들기
     if isinstance(cfg, dict):
-        return TitanConfig(**cfg)
-    if hasattr(cfg, "__dict__"):
-        return TitanConfig(**cfg.__dict__)
-    raise TypeError(f"Unsupported config type for Titan: {type(cfg)}")
+        d = dict(cfg)
+    elif hasattr(cfg, "__dict__"):
+        d = dict(cfg.__dict__)
+    else:
+        raise TypeError(f"Unsupported cfg type: {type(cfg)}")
+
+    # 2) alias: TrainingConfig/ckpt 키 -> TitanConfig 키로만 변환
+    #    (중요: use_exogenous 같은 "TitanConfig에 없는 키"는 만들지 않음)
+    if "use_exogenous_mode" in d and "use_exogenous" not in d:
+        # TitanConfig가 use_exogenous_mode를 가진다면 그대로 두면 됨.
+        # TitanConfig가 use_exo 같은 이름이면 그쪽으로 옮김.
+        pass
+
+    # 예시: TitanConfig가 future_exo_dim을 쓴다면 여기에 매핑
+    # if "future_exo_dim" not in d and "exo_dim" in d:
+    #     d["future_exo_dim"] = d["exo_dim"]
+
+    # 3) TitanConfig가 아는 필드만 남기기
+    allowed = {f.name for f in fields(TitanConfig)}
+    d = {k: v for k, v in d.items() if k in allowed}
+
+    return TitanConfig(**d)
 
 
 def build_titan_base(cfg):

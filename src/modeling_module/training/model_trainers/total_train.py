@@ -47,6 +47,7 @@ from modeling_module.models.PatchMixer.common.configs import (
 
 from modeling_module.models.PatchTST.common.configs import PatchTSTConfig
 from modeling_module.models.PatchTST.self_supervised.PatchTST import PatchTSTPretrainModel
+from modeling_module.models.Titan import TitanBaseModel
 from modeling_module.models.Titan.common.configs import TitanConfig
 from modeling_module.models.model_builder import (
     build_titan_base,
@@ -458,10 +459,34 @@ def _run_titan(
     # --------------------------------------------------
     # 2) Titan
     # --------------------------------------------------
+    d_past_cont = 0
+    d_past_cat = 0
+    try:
+        b = next(iter(train_loader))
+        if isinstance(b, (list, tuple)) and len(b) >= 6:
+            pe_cont = b[4]  # [B,L,Dc]
+            pe_cat = b[5]  # [B,L,K]
+            if pe_cont is not None and hasattr(pe_cont, "ndim") and pe_cont.ndim == 3:
+                d_past_cont = int(pe_cont.shape[-1])
+            if pe_cat is not None and hasattr(pe_cat, "ndim") and pe_cat.ndim == 3:
+                d_past_cat = int(pe_cat.shape[-1])
+    except Exception as e:
+        print(f"[DBG-ti_kwargs] failed to infer past_exo dims: {repr(e)}")
+        d_past_cont, d_past_cat = 0, 0
+
+    # cat embedding spec (기본값)
+    cat_vocab_sizes = tuple([512] * d_past_cat)
+    cat_embed_dims = tuple([16] * d_past_cat)
+    past_dim_total = d_past_cont + sum(cat_embed_dims)
+
+    # TitanConfig
     ti_config = TitanConfig(
         lookback=lookback,
         horizon=horizon,
-        input_dim=1,
+
+        # (중요) Titan encoder input_dim 확장: target(1) + past_exo
+        input_dim=1 + past_dim_total,
+
         d_model=256,
         n_layers=3,
         n_heads=4,
@@ -469,28 +494,36 @@ def _run_titan(
         dropout=0.1,
         contextual_mem_size=256,
         persistent_mem_size=64,
-        # Exogenous handling
-        # - use_exogenous_mode=True  -> model expects future exo with dimension exo_dim
-        # - use_exogenous_mode=False -> exo path disabled (exo_dim forced to 0)
-        use_exogenous=bool(use_exogenous_mode),
+
+        # Exogenous handling (future)
+        use_exogenous_mode= use_exogenous_mode,
         exo_dim=(int(exo_dim) if use_exogenous_mode else 0),
+
+        # Past exo spec
+        past_exo_cont_dim=d_past_cont,
+        past_exo_cat_dim=d_past_cat,
+        past_exo_cat_vocab_sizes=cat_vocab_sizes,
+        past_exo_cat_embed_dims=cat_embed_dims,
+        past_exo_mode="concat",
+
         final_clamp_nonneg=True,
         use_revin=True,
         revin_use_std=True,
         revin_subtract_last=False,
         revin_affine=True,
-        use_lmm=False
+        use_lmm=False,
     )
     if freq == 'hourly':
         ti_config.contextual_mem_size = 512
 
     # Titan Base
     ti_base = build_titan_base(ti_config)
-    print(f'Titan Base ({freq.capitalize()})')
+
     best_ti_base = train_titan(
         ti_base, train_loader, val_loader,
         train_cfg=point_train_cfg, stages=list(stages),
         future_exo_cb=(future_exo_cb if use_exogenous_mode else None),
+        use_exogenous_mode=use_exogenous_mode,
     )
     if save_root:
         ckpt_path = _make_ckpt_path(save_root, freq, "TitanBase", lookback, horizon)
@@ -506,6 +539,8 @@ def _run_titan(
         ti_lmm, train_loader, val_loader,
         train_cfg=point_train_cfg, stages=list(stages),
         future_exo_cb=(future_exo_cb if use_exogenous_mode else None),
+        use_exogenous_mode=use_exogenous_mode,
+
     )
     if save_root:
         ckpt_path = _make_ckpt_path(save_root, freq, "TitanLMM", lookback, horizon)
@@ -520,6 +555,8 @@ def _run_titan(
         ti_seq2seq, train_loader, val_loader,
         train_cfg=point_train_cfg, stages=list(stages),
         future_exo_cb=(future_exo_cb if use_exogenous_mode else None),
+        use_exogenous_mode=use_exogenous_mode,
+
     )
     if save_root:
         ckpt_path = _make_ckpt_path(save_root, freq, "TitanSeq2Seq", lookback, horizon)
@@ -622,6 +659,8 @@ def _run_patchmixer(
         train_cfg=point_train_cfg, stages=list(stages),
         future_exo_cb=(future_exo_cb if use_exogenous_mode else None),
         exo_is_normalized=pm_base_cfg.exo_is_normalized_default,
+        use_exogenous_mode=use_exogenous_mode,
+
     )
     if save_root:
         ckpt_path = _make_ckpt_path(save_root, freq, "PatchMixerBase", lookback, horizon)
@@ -647,6 +686,8 @@ def _run_patchmixer(
         train_cfg=quantile_train_cfg, stages=list(stages),
         future_exo_cb=(future_exo_cb if use_exogenous_mode else None),
         exo_is_normalized=pm_q_cfg.exo_is_normalized_default,
+        use_exogenous_mode=use_exogenous_mode,
+
     )
     if save_root:
         ckpt_path = _make_ckpt_path(save_root, freq, "PatchMixerQuantile", lookback, horizon)

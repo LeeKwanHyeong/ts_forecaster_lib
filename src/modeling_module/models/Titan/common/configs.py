@@ -1,6 +1,7 @@
 # configs.py
 from __future__ import annotations
 from dataclasses import dataclass
+from typing import Tuple
 
 
 @dataclass
@@ -33,7 +34,7 @@ class TitanConfig:
     expander_use_conv: bool = True
 
     # Exogenous
-    use_exogenous: bool = True
+    use_exogenous_mode: bool = True
     exo_dim: int = 2
 
     # 출력 제약
@@ -50,3 +51,10 @@ class TitanConfig:
     dec_n_heads: int = 4
     dec_d_ff: int = 512
     dec_dropout: float = 0.1
+
+    # Past Exogenous (Encoder side)
+    past_exo_cont_dim: int = 0  # pe_cont last-dim
+    past_exo_cat_dim: int = 0  # pe_cat last-dim (K)
+    past_exo_cat_vocab_sizes: Tuple[int, ...] = ()  # length K
+    past_exo_cat_embed_dims: Tuple[int, ...] = ()  # length K
+    past_exo_mode: str = "concat"  # 현재는 concat만 지원(확장 여지)
