@@ -15,13 +15,19 @@ from modeling_module.utils.exogenous_utils import calendar_sin_cos
 
 
 def _dump_cfg(cfg):
+    """
+    현재 적용된 학습 설정(TrainingConfig)을 JSON 형식으로 출력하여 로깅함.
+    """
     data = asdict(cfg) if is_dataclass(cfg) else cfg.__dict__
     print("[train_titan] Effective TrainingConfig:")
     print(json.dumps(data, indent=2, ensure_ascii=False, default=str))
 
 
 def _infer_exo_dim_from_cb(future_exo_cb, horizon: int, device: str = "cpu") -> int:
-    """Infer E from callback output. Expected shape: (H, E) tensor-like."""
+    """
+    콜백 함수(future_exo_cb) 실행을 통해 미래 외생 변수(Future Exo)의 차원(E)을 추론함.
+    반환값은 (Horizon, Exo_Dim) 텐서의 마지막 차원 크기임.
+    """
     if future_exo_cb is None:
         return 0
     fe = future_exo_cb(0, horizon, device=device)  # (H,E) expected
@@ -34,11 +40,12 @@ def _infer_exo_dim_from_cb(future_exo_cb, horizon: int, device: str = "cpu") -> 
 
 
 def _ensure_model_exo_head(model, exo_dim: int):
-    """(Re)build model.exo_head only when we are in callback-based exo mode.
+    """
+    콜백 기반 외생 변수 모드일 때, 추론된 차원에 맞춰 모델의 `exo_head`를 동적으로 생성 또는 갱신함.
 
-    IMPORTANT:
-      - If exo_dim <= 0: do nothing (do NOT delete exo_head).
-        Disabling exogenous should be done via model/config construction (exo_dim=0).
+    특징:
+    - exo_dim이 0 이하일 경우 모델을 변경하지 않음 (의도치 않은 삭제 방지).
+    - 기존 차원과 다를 경우 MLP(Linear-GELU-Linear) 구조의 헤드를 재생성함.
     """
     if not hasattr(model, "exo_dim"):
         return model
@@ -62,10 +69,14 @@ def _ensure_model_exo_head(model, exo_dim: int):
     print(f"[train_titan] exo_head rebuilt with exo_dim={exo_dim}")
     return model
 
+
 def _maybe_make_spike_loader(train_loader: DataLoader, enable: bool) -> DataLoader:
     """
-    2단계에서만 스파이크 샘플을 더 자주 보게 하는 간단 오버샘플러.
-    Dataset에 `sample_is_spike` (bool array-like)가 있으면 가중 샘플러 적용.
+    스파이크(Spike, 급격한 변화) 구간의 학습 강화를 위한 가중 샘플링(Weighted Random Sampling) 데이터 로더 생성.
+
+    기능:
+    - 데이터셋에 `sample_is_spike` 정보가 있을 경우에만 동작함.
+    - 일반 샘플 대비 스파이크 샘플에 3.0배 높은 가중치를 부여하여 오버샘플링함.
     """
     if (not enable) or (not hasattr(train_loader.dataset, "sample_is_spike")):
         return train_loader
@@ -85,25 +96,30 @@ def _maybe_make_spike_loader(train_loader: DataLoader, enable: bool) -> DataLoad
         collate_fn=getattr(train_loader, "collate_fn", None),
     )
 
+
 def train_titan(
-    model,
-    train_loader,
-    val_loader,
-    *,
-    stages: list[StageConfig] | None = None,
-    train_cfg: Optional[TrainingConfig] = None,
-    future_exo_cb=None,
-    use_exogenous_mode: bool = True
+        model,
+        train_loader,
+        val_loader,
+        *,
+        stages: list[StageConfig] | None = None,
+        train_cfg: Optional[TrainingConfig] = None,
+        future_exo_cb=None,
+        use_exogenous_mode: bool = True
 ):
     """
-    2-stage 커리큘럼 지원:
-      - stages 가 없으면 기존처럼 train_cfg 한 번만 학습
-      - stages 가 있으면 각 StageConfig로 train_cfg를 덮어써서 연속 학습
+    Titan 모델의 학습 파이프라인 실행 (Runner).
+
+    주요 기능:
+    - 외생 변수(Exo) 설정 자동화 및 모델 헤드 동적 구성.
+    - AMP(Automatic Mixed Precision) 환경 설정.
+    - 다단계(Multi-stage) 커리큘럼 학습 지원 (각 스테이지별 LR, Epoch, Spike Loss 적용).
     """
     assert train_cfg is not None, "train_cfg는 필수입니다."
 
     print(f'future_exo_cb : {future_exo_cb is not None}')
 
+    # 1. 외생 변수 설정 및 헤드 갱신
     if future_exo_cb is not None:
         horizon = getattr(model, "horizon", None) or getattr(train_cfg, "horizon", None)
         if horizon is None:
@@ -123,8 +139,8 @@ def train_titan(
             f"has_head={getattr(model, 'exo_head', None) is not None}"
         )
 
+    # 2. AMP (Mixed Precision) 설정
 
-    # AMP 설정
     amp_device = getattr(train_cfg, "amp_device", "cuda")
     amp_enabled = (amp_device == "cuda" and torch.cuda.is_available())
     amp_dtype_str = getattr(train_cfg, "amp_dtype", "bf16")
@@ -142,24 +158,28 @@ def train_titan(
             amp_dtype = torch.bfloat16
     autocast_input = dict(device_type=amp_device, enabled=amp_enabled, dtype=amp_dtype)
 
+    # 3. 어댑터 초기화 (입출력 인터페이스 변환용)
     adapter = TitanAdapter() if TitanAdapter else DefaultAdapter()
 
-    # 스테이지 목록 구성 (없으면 단일 스테이지)
+    # 4. 스테이지 구성 (기본 단일 스테이지)
     if not stages or len(stages) == 0:
         stages = [StageConfig(epochs=train_cfg.epochs, spike_enabled=train_cfg.spike_loss.enabled)]
 
     best = None
+
+    # 5. 스테이지별 학습 루프 실행
     for i, stg in enumerate(stages, 1):
+        # 현재 스테이지 설정 적용
         cfg_i = apply_stage(train_cfg, stg)
         print(f"\n[train_patchmixer] ===== Stage {i}/{len(stages)} =====")
         print(f"  - spike: {'ON' if cfg_i.spike_loss.enabled else 'OFF'}")
         print(f"  - epochs: {cfg_i.epochs} | lr={cfg_i.lr} | horizon_decay={cfg_i.use_horizon_decay}")
         _dump_cfg(cfg_i)
 
+        # Spike Loss 설정에 따른 데이터 로더 생성
         tl_i = _maybe_make_spike_loader(train_loader, enable=cfg_i.spike_loss.enabled)
 
-
-        # 스테이지 트레이너 생성 및 실행
+        # CommonTrainer를 통한 학습 수행
         trainer = CommonTrainer(
             cfg=cfg_i,
             adapter=adapter,

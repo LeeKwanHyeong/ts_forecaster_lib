@@ -2,33 +2,10 @@
 
 High-level training runner for the LTB forecasting engine.
 
-This module orchestrates training for multiple model families (PatchTST, Titan, PatchMixer)
-across different frequencies (hourly/daily/weekly/monthly).
-
-Key design points
------------------
-1) Exogenous feature wiring
-   - Two supported sources for *future* exogenous features:
-     (A) Loader-provided: batch[3] == fe_cont with shape (B, H, E)
-     (B) Callback-provided: future_exo_cb(t0, H) -> (H, E)
-   - When use_exogenous_mode=True:
-     * If loader provides fe_cont, we prefer (A) and disable the callback to avoid dim mismatch.
-     * If loader does not provide fe_cont, we fall back to the calendar callback.
-   - When use_exogenous_mode=False: exogenous path is disabled for all models.
-
-2) Fail-fast validation
-   - If the loader provides fe_cont but E==0 while exogenous mode is enabled, we raise an error
-     because models configured with d_future>0 will fail in forward.
-
-3) Save layout
-   - Checkpoints are stored under save_dir/<freq>/... with model-specific prefixes.
-
-Operational guidance
--------------------
-- If you see an error like:
-    "future_exo last-dim(D)=0 != d_future=2"
-  then your model was built with exo_dim=2, but the inference/train batch provides fe_cont with E=0
-  (or you did not provide a future_exo callback/batch). Fix by aligning exo_dim with actual future exo.
+기능:
+1) 다양한 모델(PatchTST, Titan, PatchMixer)과 주기(Hourly/Daily/Weekly/Monthly)에 대한 통합 학습 실행.
+2) 외생 변수(Exogenous Variable) 주입 방식(Loader vs Callback) 자동 제어.
+3) 2-Stage 학습(Warmup -> Spike Loss) 및 Self-Supervised Learning(SSL) 파이프라인 오케스트레이션.
 """
 
 from typing import Dict, Tuple, Optional, Iterable, List, Callable
@@ -73,6 +50,7 @@ from typing import Literal
 SSLMode = Literal["ssl_only", "full", "sl_only"]
 
 def _validate_ssl_mode(use_ssl_mode: str) -> str:
+    """SSL 모드 문자열 유효성 검증."""
     m = str(use_ssl_mode).strip().lower()
     if m not in ("ssl_only", "full", "sl_only"):
         raise ValueError(f"use_ssl_mode must be one of ['ssl_only','full','sl_only'], got={use_ssl_mode!r}")
@@ -81,32 +59,19 @@ def _validate_ssl_mode(use_ssl_mode: str) -> str:
 # ===================== 공통 유틸 =====================
 
 def _get_part_vocab_size_from_loader(loader) -> int:
+    """데이터셋의 파트(ID) 어휘 크기 조회."""
     try:
         return len(getattr(loader.dataset, "part_vocab", {}))
     except Exception:
         return 0
 
 
-
-
 def _infer_future_exo_spec_from_loader(loader) -> tuple[bool, int]:
-    """Infer whether the loader provides future exogenous features (fe_cont).
+    """
+    데이터 로더로부터 미래 외생 변수(fe_cont) 제공 여부 및 차원 추론.
 
-    Expected batch format (MultiPartExoDataModule convention):
-        (x, y, uid, fe_cont, pe_cont, pe_cat)
-
-    Returns
-    -------
-    has_fe: bool
-        True if the batch includes a non-None fe_cont tensor.
-    fe_dim: int
-        The last-dimension of fe_cont if present, otherwise 0.
-
-    Notes
-    -----
-    - has_fe=False means "loader does not provide future exo" (we may rely on future_exo_cb).
-    - has_fe=True & fe_dim==0 means "loader provides fe_cont but its feature dimension is 0",
-      which is almost always a configuration error when exogenous mode is enabled.
+    반환:
+        (has_fe, fe_dim)
     """
     try:
         b = next(iter(loader))
@@ -126,9 +91,7 @@ def _infer_future_exo_spec_from_loader(loader) -> tuple[bool, int]:
 
 def _wrap_future_exo_cb(future_exo_cb):
     """
-    train_patchtst()는 future_exo_cb(t0, H, device=...) 형태로 호출할 수 있음.
-    그런데 기존 콜백이 device 인자를 안 받으면 TypeError가 발생.
-    이 래퍼는 device 인자를 안전하게 흡수하고, 텐서면 해당 device로 옮김.
+    미래 외생 변수 콜백 함수 래핑 (Device 인자 처리).
     """
     if future_exo_cb is None:
         return None
@@ -143,6 +106,7 @@ def _wrap_future_exo_cb(future_exo_cb):
     return _wrapped
 
 def save_model(model: torch.nn.Module, cfg, path: str) -> None:
+    """모델의 가중치(State Dict) 및 설정(Config) 저장."""
     path = str(path)
     state = {
         "model_state": model.state_dict(),
@@ -168,10 +132,13 @@ def _make_ckpt_path(
         lookback: int,
         horizon: int,
 ) -> Path:
+    """체크포인트 저장 경로 생성."""
     save_dir.mkdir(parents=True, exist_ok=True)
     fname = f"{freq}_{model_name}_L{lookback}_H{horizon}.pt"
     # fname = f"{model_name}.pt"
     return save_dir / fname
+
+
 
 
 def _build_common_train_configs(
@@ -184,7 +151,15 @@ def _build_common_train_configs(
         spike_epochs: Optional[int] = None,
         base_lr: Optional[float] = None,
 ) -> Tuple[TrainingConfig, TrainingConfig, SpikeLossConfig, Tuple[StageConfig, StageConfig]]:
+    """
+    공통 학습 설정(Config) 및 2단계 스테이지(Warmup -> Spike) 구성.
 
+    기능:
+    - 데이터 주기(freq)에 따른 학습률 및 에폭 자동 튜닝.
+    - Stage 1: Warmup (기본 학습).
+    - Stage 2: Spike Loss (급격한 변화 학습 강화 및 Horizon Decay 적용).
+    - Point/Quantile 모델용 설정 분리 반환.
+    """
 
     # 주기별 학습률/에폭 튜닝
     if warmup_epochs is None:
@@ -211,7 +186,7 @@ def _build_common_train_configs(
         else:
             base_lr = 3e-4
 
-    # 1) 2-stage 학습 스케줄
+    # 1) 2-stage 학습 스케줄 구성
     stg_warmup = StageConfig(
         epochs=warmup_epochs,
         spike_enabled=False,
@@ -301,6 +276,8 @@ def _contains(xs: List[str], key: str) -> bool:
     return key.lower() in xs
 
 
+
+
 def _run_patchtst(
         *,
         results: Dict[str, Dict],
@@ -322,41 +299,24 @@ def _run_patchtst(
         ssl_freeze_encoder_before_ft: bool = False,
         ssl_pretrained_ckpt_path: Optional[str] = None,
 ):
-    use_ssl_mode = _validate_ssl_mode(use_ssl_mode)
+    """
+    PatchTST 모델 학습 파이프라인 실행.
 
-    # ------------------------------------------------------------
-    # 0) infer past exo dims from loader
-    # ------------------------------------------------------------
-    # d_past_cont = 0
-    # d_past_cat = 0
-    # try:
-    #     b = next(iter(train_loader))
-    #     if isinstance(b, (list, tuple)) and len(b) >= 6:
-    #         pe_cont = b[4]  # [B,L,Dc]
-    #         pe_cat = b[5]   # [B,L,K]
-    #         if pe_cont is not None and hasattr(pe_cont, "ndim") and pe_cont.ndim == 3:
-    #             d_past_cont = int(pe_cont.shape[-1])
-    #         if pe_cat is not None and hasattr(pe_cat, "ndim") and pe_cat.ndim == 3:
-    #             d_past_cat = int(pe_cat.shape[-1])
-    # except Exception as e:
-    #     print(f"[DBG-pt_kwargs] failed to infer past_exo dims: {repr(e)}")
-    #     d_past_cont, d_past_cat = 0, 0
+    기능:
+    - 외생 변수 처리 정책 적용 (Loader vs Calendar Callback).
+    - SSL(Self-Supervised Learning) 모드 지원 (Pretrain -> Finetune).
+    - 지도 학습(Supervised): Point 모델 및 Quantile 모델 순차 학습.
+    """
+    use_ssl_mode = _validate_ssl_mode(use_ssl_mode)
 
     date_type_map = {"weekly": "W", "monthly": "M", "daily": "D", "hourly": "H"}
     dt_char = date_type_map.get(freq, "W")
 
     # --------------------------------------------------------------
-    # Exogenous feature policy (TRAIN)
+    # 외생 변수 처리 정책 (Exogenous Feature Policy)
     # --------------------------------------------------------------
-    # We support two ways of supplying "future exogenous" features:
-    #   (A) Loader-provided: batch[3] == fe_cont with shape (B, H, E)
-    #   (B) Callback-provided: future_exo_cb(t0, H) -> (H, E)
-    #
-    # IMPORTANT:
-    # - If loader provides fe_cont, we prefer (A) and set future_exo_cb=None
-    #   to avoid inconsistent dim between loader and calendar callback.
-    # - If loader does NOT provide fe_cont, we use (B) when use_exogenous_mode=True.
-    # - If loader provides fe_cont but E==0, that is treated as a configuration error.
+    # 로더가 fe_cont를 제공하면 콜백보다 우선 사용.
+    # 로더가 제공하지 않으면 캘린더 콜백 생성.
     has_fe, fe_dim = _infer_future_exo_spec_from_loader(train_loader)
 
     if use_exogenous_mode:
@@ -386,7 +346,7 @@ def _run_patchtst(
             )
 
     # ------------------------------------------------------------
-    # 1) common PatchTST kwargs (point/quantile share same backbone spec)
+    # 1) PatchTST 공통 설정 구성
     # ------------------------------------------------------------
     pt_kwargs = dict(
         device=device,
@@ -403,7 +363,7 @@ def _run_patchtst(
     )
 
     # ------------------------------------------------------------
-    # 2) external ckpt override (SSL pretrain ckpt)
+    # 2) 외부 사전학습 체크포인트 확인
     # ------------------------------------------------------------
     pretrain_ckpt_path = None
     if ssl_pretrained_ckpt_path:
@@ -413,14 +373,14 @@ def _run_patchtst(
         print(f"[SSL] use external pretrained ckpt: {pretrain_ckpt_path}")
 
     # ------------------------------------------------------------
-    # 3) SSL pretrain (optional) - only for point model flow
+    # 3) SSL 사전학습 실행 (Optional)
     # ------------------------------------------------------------
     if (use_ssl_mode in ('ssl_only', 'full')) and (pretrain_ckpt_path is None) and (save_root is not None):
         pretrain_dir = Path(save_root) / "pretrain"
         pretrain_dir.mkdir(parents=True, exist_ok=True)
         pretrain_ckpt_path = str(pretrain_dir / "patchtst_pretrain_best.pt")
 
-        # SSL은 y-only로 (d_future=0) 권장, 그러나 past_exo는 동일 스펙 유지(현재 구현 그대로)
+        # SSL은 y-only로 (d_future=0) 권장
         pt_pre_kwargs = dict(pt_kwargs)
         pt_pre_kwargs["d_future"] = 0
 
@@ -444,7 +404,7 @@ def _run_patchtst(
         )
 
     # ------------------------------------------------------------
-    # 4) ssl_only: SSL만 하고 종료 (point/quantile supervised 모두 skip)
+    # 4) ssl_only 모드일 경우 여기서 종료
     # ------------------------------------------------------------
     if use_ssl_mode == 'ssl_only':
         results["PatchTST SSL"] = {
@@ -454,13 +414,14 @@ def _run_patchtst(
         return
 
     # ============================================================
-    # 5) Supervised - Point(Base)
+    # 5) 지도학습 - Point Model (Finetuning)
     # ============================================================
     pt_base_cfg = PatchTSTConfig(**pt_kwargs, loss_mode='point', point_loss='huber')
     pt_base = build_patchTST_base(pt_base_cfg)
 
     print(f'PatchTST Base ({freq.capitalize()})')
     if (use_ssl_mode == 'full') and (pretrain_ckpt_path is not None):
+        # 사전학습 가중치 로드 및 파인튜닝
         best_pt_base = train_patchtst_finetune(
             pt_base, train_loader, val_loader,
             train_cfg=point_train_cfg, stages=list(stages),
@@ -471,6 +432,7 @@ def _run_patchtst(
             freeze_encoder_before_ft=ssl_freeze_encoder_before_ft,
         )
     else:
+        # 처음부터 학습 (Scratch)
         best_pt_base = train_patchtst(
             pt_base, train_loader, val_loader,
             train_cfg=point_train_cfg, stages=list(stages),
@@ -487,8 +449,7 @@ def _run_patchtst(
     results['PatchTST Base'] = best_pt_base
 
     # ============================================================
-    # 6) Supervised - Quantile (신규 추가)
-    #    - 핵심: 여기서도 pt_kwargs(d_past_cont=loader 기반)가 반영된 cfg로 "새로 학습/저장"해야 함
+    # 6) 지도학습 - Quantile Model
     # ============================================================
     pt_q_cfg = PatchTSTConfig(**pt_kwargs, loss_mode='quantile', quantiles=(0.1, 0.5, 0.9))
     pt_q = build_patchTST_quantile(pt_q_cfg)
@@ -522,6 +483,7 @@ def _run_titan(
         stages,
         device: str,
 ):
+    """Titan 계열 모델(Base, LMM, Seq2Seq) 학습 실행."""
     # --------------------------------------------------
     # 2) Titan
     # --------------------------------------------------
@@ -545,7 +507,7 @@ def _run_titan(
     cat_embed_dims = tuple([16] * d_past_cat)
     past_dim_total = d_past_cont + sum(cat_embed_dims)
 
-    # TitanConfig
+    # TitanConfig 구성
     ti_config = TitanConfig(
         lookback=lookback,
         horizon=horizon,
@@ -582,7 +544,7 @@ def _run_titan(
     if freq == 'hourly':
         ti_config.contextual_mem_size = 512
 
-    # Titan Base
+    # Titan Base 학습
     ti_base = build_titan_base(ti_config)
 
     best_ti_base = train_titan(
@@ -597,7 +559,7 @@ def _run_titan(
         best_ti_base["ckpt_path"] = str(ckpt_path)
     results['Titan Base'] = best_ti_base
 
-    # Titan LMM
+    # Titan LMM 학습
     ti_config_lmm = replace(ti_config, use_lmm=True)
     ti_lmm = build_titan_lmm(ti_config_lmm)
     print(f'Titan LMM ({freq.capitalize()})')
@@ -614,7 +576,7 @@ def _run_titan(
         best_ti_lmm["ckpt_path"] = str(ckpt_path)
     results['Titan LMM'] = best_ti_lmm
 
-    # Titan Seq2Seq
+    # Titan Seq2Seq 학습
     ti_seq2seq = build_titan_seq2seq(ti_config)
     print(f'Titan Seq2Seq ({freq.capitalize()})')
     best_ti_s2s = train_titan(
@@ -646,6 +608,7 @@ def _run_patchmixer(
         stages,
         device: str,
 ):
+    """PatchMixer 모델(Base, Quantile) 학습 실행."""
     # --------------------------------------------------
     # 1) PatchMixer
     # --------------------------------------------------
@@ -706,7 +669,7 @@ def _run_patchmixer(
         print(f"[DBG-pt_kwargs] failed to infer past_exo dims: {repr(e)}")
         d_past_cont, d_past_cat = 0, 0
 
-    # Base
+    # Base Model (Point)
     pm_base_cfg = PatchMixerConfig(**pm_kwargs, loss_mode='point', point_loss='huber', head_dropout=0.05)
     pm_base_cfg.learn_output_scale = False  # 초기 스케일 안정화
     pm_base_cfg.learn_dw_gain = False  # 초기 스케일 안정화
@@ -734,7 +697,7 @@ def _run_patchmixer(
         best_pm_base["ckpt_path"] = str(ckpt_path)
     results['PatchMixer Base'] = best_pm_base
 
-    # Quantile
+    # Quantile Model
     pm_q_cfg = PatchMixerConfig(**pm_kwargs, loss_mode='quantile', quantiles=(0.1, 0.5, 0.9), head_dropout=0.02)
     pm_q_cfg.learn_output_scale = False
     pm_q_cfg.learn_dw_gain = False
@@ -767,6 +730,8 @@ MODEL_REGISTRY: Dict[str, Callable] = {
     "patchmixer": _run_patchmixer,
 }
 
+
+
 # ===================== GENERIC RUNNER (통합) =====================
 def _run_total_train_generic(
     train_loader,
@@ -793,8 +758,17 @@ def _run_total_train_generic(
     ssl_pretrained_ckpt_path: Optional[str] = None,
 
 ):
+    """
+    전체 학습 프로세스 오케스트레이션 (Generic Runner).
+
+    기능:
+    - 공통 학습 설정(Configs & Stages) 빌드.
+    - 외생 변수 제공 여부 판단 및 정책 적용.
+    - `models_to_run`에 지정된 모델별 러너 실행.
+    """
     save_root = Path(save_dir) if save_dir is not None else None
 
+    # 공통 설정 및 스테이지 빌드
     point_train_cfg, quantile_train_cfg, spike_cfg, stages = _build_common_train_configs(
         device=device, lookback=lookback, horizon=horizon, freq=freq,
         warmup_epochs= warmup_epochs, spike_epochs = spike_epochs, base_lr = base_lr
@@ -803,6 +777,7 @@ def _run_total_train_generic(
     date_type_map = {"weekly": "W", "monthly": "M", "daily": "D", "hourly": "H"}
     dt_char = date_type_map.get(freq, "W")
 
+    # 외생 변수 처리
     has_fe, fe_dim = _infer_future_exo_spec_from_loader(train_loader)
     print('use_exogenous_mode:: ',use_exogenous_mode)
     print('has_fe:: ', has_fe)
@@ -834,7 +809,7 @@ def _run_total_train_generic(
                 f"Ignoring future exo."
             )
 
-    # freq별 patch_len/stride/season_period
+    # freq별 patch_len/stride/season_period 결정
     if freq == "hourly":
         patch_len, stride, season_period = 24, 12, 24
     elif freq == "daily":
@@ -844,10 +819,10 @@ def _run_total_train_generic(
     else:
         patch_len, stride, season_period = 6, 3, 12
 
-    # NEW: 선택값 정규화
+    # 실행할 모델 필터링
     selected = _norm_list(models_to_run)
     if not selected:
-        selected = ["patchtst"]  # 기본값(원하시면 전체로 바꿔도 됨)
+        selected = ["patchtst"]  # 기본값
 
     # 검증
     unknown = [m for m in selected if m not in MODEL_REGISTRY]
@@ -856,7 +831,7 @@ def _run_total_train_generic(
 
     results: Dict[str, Dict] = {}
 
-    # 선택된 모델만 실행
+    # 선택된 모델별 학습 실행
     for m in selected:
         print(f"\n[total_train] === RUN: {m} ({freq}) ===")
         kwargs = dict(
@@ -916,6 +891,7 @@ def run_total_train_weekly(
         ssl_pretrained_ckpt_path: Optional[str] = None,
 
 ):
+    """주간(Weekly) 데이터 통합 학습 실행기."""
     return _run_total_train_generic(
         train_loader,
         val_loader,
@@ -960,6 +936,7 @@ def run_total_train_monthly(
         ssl_pretrained_ckpt_path: Optional[str] = None,
 
 ):
+    """월간(Monthly) 데이터 통합 학습 실행기."""
     return _run_total_train_generic(
         train_loader,
         val_loader,
@@ -1003,6 +980,7 @@ def run_total_train_daily(
         ssl_pretrained_ckpt_path: Optional[str] = None,
 
 ):
+    """일간(Daily) 데이터 통합 학습 실행기."""
     return _run_total_train_generic(
         train_loader,
         val_loader,
@@ -1046,6 +1024,7 @@ def run_total_train_hourly(
         ssl_pretrained_ckpt_path: Optional[str] = None,
 
 ):
+    """시간(Hourly) 데이터 통합 학습 실행기."""
     return _run_total_train_generic(
         train_loader,
         val_loader,
@@ -1069,6 +1048,9 @@ def run_total_train_hourly(
 
 
 def summarize_metrics(results: Dict[str, Dict[str, np.ndarray]]) -> Dict[str, Dict[str, float]]:
+    """
+    학습 결과(y_true, y_pred)를 집계하여 평가 지표(MAE, RMSE, SMAPE 등) 요약.
+    """
     table: Dict[str, Dict[str, float]] = {}
     for name, res in results.items():
         y = res['y_true'].reshape(-1)

@@ -19,14 +19,18 @@ from modeling_module.utils.exogenous_utils import calendar_sin_cos
 from modeling_module.models.PatchTST.common.patching import compute_patch_num
 
 
-
 def _dump_cfg(cfg):
+    """학습 설정(Config) 내용 출력."""
     data = asdict(cfg) if is_dataclass(cfg) else cfg.__dict__
     print("[train_patchtst] Effective TrainingConfig:")
     print(json.dumps(data, indent=2, ensure_ascii=False, default=str))
 
 
 def _infer_exo_dim_from_cb(future_exo_cb, horizon: int, device: str = "cpu") -> int:
+    """
+    콜백 함수 실행을 통한 미래 외생 변수 차원(E) 추론.
+    반환: (H, E) 텐서의 마지막 차원.
+    """
     if future_exo_cb is None:
         return 0
     fe = future_exo_cb(0, horizon, device=device)  # (H,E) 또는 (B,H,E) 류를 가정
@@ -37,7 +41,12 @@ def _infer_exo_dim_from_cb(future_exo_cb, horizon: int, device: str = "cpu") -> 
     except Exception:
         return 0
 
+
 def _infer_exo_dim_from_loader(train_loader: DataLoader) -> int:
+    """
+    데이터 로더의 첫 배치 검사를 통한 미래 외생 변수 차원 추론.
+    배치 구조: (x, y, part_ids, fe_cont, ...) 가정.
+    """
     try:
         batch = next(iter(train_loader))
     except Exception:
@@ -53,8 +62,11 @@ def _infer_exo_dim_from_loader(train_loader: DataLoader) -> int:
     return 0
 
 
-
 def _pick_future_exo_cb(model, user_cb: Optional[Callable]) -> Optional[Callable]:
+    """
+    사용할 미래 외생 변수 생성 콜백 결정.
+    우선순위: 사용자 지정 콜백 > 모델 설정(d_future > 0) 시 캘린더 콜백 > None.
+    """
     # 사용자 콜백이 우선
     if user_cb is not None:
         return user_cb
@@ -65,8 +77,14 @@ def _pick_future_exo_cb(model, user_cb: Optional[Callable]) -> Optional[Callable
     return calendar_sin_cos if d_future > 0 else None
 
 
-
 def _ensure_patchtst_future_head(model, exo_dim: int):
+    """
+    추론된 외생 변수 차원(exo_dim)에 맞춰 PatchTST의 출력 헤드(Head) 동적 재구성.
+
+    기능:
+    - Config의 d_future 업데이트.
+    - 점 예측(PointHead) 또는 분위수 예측(QuantileHead) 여부에 따라 적절한 헤드 교체.
+    """
     cfg = getattr(model, "cfg", None)
     if cfg is None:
         return model
@@ -101,6 +119,9 @@ def _ensure_patchtst_future_head(model, exo_dim: int):
 
 
 def _maybe_make_spike_loader(train_loader: DataLoader, enable: bool) -> DataLoader:
+    """
+    Spike Loss 활성화 시 스파이크 샘플에 가중치를 부여한 DataLoader 생성.
+    """
     if (not enable) or (not hasattr(train_loader.dataset, "sample_is_spike")):
         return train_loader
 
@@ -121,23 +142,32 @@ def _maybe_make_spike_loader(train_loader: DataLoader, enable: bool) -> DataLoad
 
 
 def train_patchtst(
-    model,
-    train_loader,
-    val_loader,
-    *,
-    stages: list[StageConfig] | None = None,
-    train_cfg: Optional[TrainingConfig] = None,
-    future_exo_cb: Optional[Callable] = None,
-    exo_is_normalized: bool = True,
-    use_exogenous_mode: bool = True
+        model,
+        train_loader,
+        val_loader,
+        *,
+        stages: list[StageConfig] | None = None,
+        train_cfg: Optional[TrainingConfig] = None,
+        future_exo_cb: Optional[Callable] = None,
+        exo_is_normalized: bool = True,
+        use_exogenous_mode: bool = True
 ):
+    """
+    PatchTST 모델 학습 진입점(Entry Point).
+
+    기능:
+    - 외생 변수(Exogenous Variable) 차원 자동 추론 및 헤드 조정.
+    - AMP(Automatic Mixed Precision) 환경 구성.
+    - CommonTrainer를 이용한 스테이지별(Stage-wise) 학습 루프 실행.
+    """
     assert train_cfg is not None, "train_cfg는 필수입니다."
 
     # 1) exo 콜백 결정
     future_exo_cb = _pick_future_exo_cb(model, future_exo_cb)
 
     # 2) exo_dim 추론 후 head 보정 (PatchMixer와 동일한 전략)
-    horizon = getattr(model, "horizon", None) or getattr(getattr(model, "cfg", None), "horizon", None) or getattr(train_cfg, "horizon", None)
+    horizon = getattr(model, "horizon", None) or getattr(getattr(model, "cfg", None), "horizon", None) or getattr(
+        train_cfg, "horizon", None)
     if horizon is None:
         raise ValueError("horizon을 model/cfg/train_cfg에서 찾을 수 없습니다.")
 
@@ -170,7 +200,7 @@ def train_patchtst(
 
     autocast_input = dict(device_type=amp_device, enabled=amp_enabled, dtype=amp_dtype)
 
-    # 4) stages 구성
+    # 4) stages 구성 (기본 1 스테이지)
     if not stages or len(stages) == 0:
         stages = [StageConfig(epochs=train_cfg.epochs, spike_enabled=train_cfg.spike_loss.enabled)]
 
@@ -178,6 +208,7 @@ def train_patchtst(
 
     best = None
     for i, stg in enumerate(stages, 1):
+        # 스테이지별 설정 적용
         cfg_i = apply_stage(train_cfg, stg)
         print(f"\n[train_patchtst] ===== Stage {i}/{len(stages)} =====")
         print(f"  - spike: {'ON' if cfg_i.spike_loss.enabled else 'OFF'}")
@@ -186,6 +217,7 @@ def train_patchtst(
 
         tl_i = _maybe_make_spike_loader(train_loader, enable=cfg_i.spike_loss.enabled)
 
+        # 트레이너 초기화 및 학습 수행
         trainer = CommonTrainer(
             cfg=cfg_i,
             adapter=adapter,
@@ -193,10 +225,11 @@ def train_patchtst(
             logger=print,
             autocast_input=autocast_input,
             extra_loss_fn=None,
-            use_exogenous_mode = use_exogenous_mode
+            use_exogenous_mode=use_exogenous_mode
         )
         model = trainer.fit(model, tl_i, val_loader, tta_steps=0)
         best = {"model": model, "cfg": cfg_i}
 
-    print(f"[EXO-train] inferred E={E} | future_exo_cb? {future_exo_cb is not None} | exo_is_normalized={exo_is_normalized}")
+    print(
+        f"[EXO-train] inferred E={E} | future_exo_cb? {future_exo_cb is not None} | exo_is_normalized={exo_is_normalized}")
     return best

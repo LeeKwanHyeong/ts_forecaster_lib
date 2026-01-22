@@ -11,8 +11,11 @@ from modeling_module.models.Titan.common.configs import TitanConfig
 # -----------------------------
 def _ensure_patchmixer_config(cfg: Union[PatchMixerConfig, dict, Any]) -> PatchMixerConfig:
     """
-    구(旧) 체크포인트에서는 config가 dict로만 저장되어 있어서,
-    dict가 넘어오면 PatchMixerConfig로 감싸주는 호환 함수.
+    입력 설정을 PatchMixerConfig 객체로 변환 및 타입 보장.
+
+    기능:
+    - 구(旧) 버전 체크포인트(dict 형태) 로드 시 호환성 지원.
+    - Dict, Namespace 등 다양한 입력 형식을 표준 Config 객체로 래핑.
     """
     if isinstance(cfg, PatchMixerConfig):
         return cfg
@@ -25,12 +28,14 @@ def _ensure_patchmixer_config(cfg: Union[PatchMixerConfig, dict, Any]) -> PatchM
 
 
 def build_patch_mixer_base(cfg):
+    """PatchMixer 점 예측(Base/Point) 모델 인스턴스 생성."""
     from modeling_module.models.PatchMixer.PatchMixer import BaseModel
     cfg = _ensure_patchmixer_config(cfg)
     return BaseModel(cfg)
 
 
 def build_patch_mixer_quantile(cfg):
+    """PatchMixer 분위수 예측(Quantile) 모델 인스턴스 생성."""
     from modeling_module.models.PatchMixer.PatchMixer import QuantileModel
     cfg = _ensure_patchmixer_config(cfg)
     return QuantileModel(cfg)
@@ -41,14 +46,18 @@ def build_patch_mixer_quantile(cfg):
 # -----------------------------
 def _ensure_titan_config(cfg: Union[TitanConfig, dict, Any]) -> TitanConfig:
     """
-    Titan 구(旧) 체크포인트 호환용:
-    - dict 또는 Namespace로 저장된 config를 TitanConfig dataclass로 변환.
+    Titan 설정 객체 변환 및 필드 유효성 검증.
+
+    기능:
+    - Dict 또는 Namespace 입력을 TitanConfig로 변환.
+    - TitanConfig 정의에 없는 불필요한 키(Legacy params) 필터링.
+    - 구버전 파라미터(Alias) 매핑 처리.
     """
 
     if isinstance(cfg, TitanConfig):
         return cfg
 
-    # 1) dict로 만들기
+    # 1) dict 변환
     if isinstance(cfg, dict):
         d = dict(cfg)
     elif hasattr(cfg, "__dict__"):
@@ -56,18 +65,14 @@ def _ensure_titan_config(cfg: Union[TitanConfig, dict, Any]) -> TitanConfig:
     else:
         raise TypeError(f"Unsupported cfg type: {type(cfg)}")
 
-    # 2) alias: TrainingConfig/ckpt 키 -> TitanConfig 키로만 변환
-    #    (중요: use_exogenous 같은 "TitanConfig에 없는 키"는 만들지 않음)
+    # 2) 파라미터 매핑 및 Alias 처리
+    # (TitanConfig 필드명 변경 시 호환성 유지 로직)
     if "use_exogenous_mode" in d and "use_exogenous" not in d:
-        # TitanConfig가 use_exogenous_mode를 가진다면 그대로 두면 됨.
-        # TitanConfig가 use_exo 같은 이름이면 그쪽으로 옮김.
+        # 필요 시 구버전 키를 신버전 키로 매핑
         pass
 
-    # 예시: TitanConfig가 future_exo_dim을 쓴다면 여기에 매핑
-    # if "future_exo_dim" not in d and "exo_dim" in d:
-    #     d["future_exo_dim"] = d["exo_dim"]
-
-    # 3) TitanConfig가 아는 필드만 남기기
+    # 3) 유효 필드 필터링
+    # Config 클래스에 정의된 필드만 남겨 초기화 오류 방지
     allowed = {f.name for f in fields(TitanConfig)}
     d = {k: v for k, v in d.items() if k in allowed}
 
@@ -75,18 +80,21 @@ def _ensure_titan_config(cfg: Union[TitanConfig, dict, Any]) -> TitanConfig:
 
 
 def build_titan_base(cfg):
+    """Titan 기본 모델(BaseModel) 인스턴스 생성."""
     from modeling_module.models.Titan.Titans import TitanBaseModel
     cfg = _ensure_titan_config(cfg)
     return TitanBaseModel.from_config(cfg)
 
 
 def build_titan_lmm(cfg):
+    """Titan LMM(Large Multi-modal Model) 변형 모델 생성."""
     from modeling_module.models.Titan.Titans import TitanLMMModel
     cfg = _ensure_titan_config(cfg)
     return TitanLMMModel.from_config(cfg)
 
 
 def build_titan_seq2seq(cfg):
+    """Titan Seq2Seq 변형 모델 생성."""
     from modeling_module.models.Titan.Titans import TitanSeq2SeqModel
     cfg = _ensure_titan_config(cfg)
     return TitanSeq2SeqModel.from_config(cfg)
@@ -97,16 +105,18 @@ def build_titan_seq2seq(cfg):
 # -----------------------------
 def _ensure_patchtst_config(cfg: Union[PatchTSTConfig, dict, Any]) -> PatchTSTConfig:
     """
-    PatchTST 구(旧) 체크포인트 호환용:
-    - dict 또는 Namespace로 저장된 config를 PatchTSTConfig dataclass로 변환.
-    - (attn/head/decomp 가 dict로 들어있으면 가능한 한 Config 클래스로 감싸줌)
+    PatchTST 설정 객체 변환 및 중첩 구조 처리.
+
+    기능:
+    - Dict/Namespace를 PatchTSTConfig로 변환.
+    - 내부의 중첩된 설정(Attn, Head, Decomp)이 dict일 경우 해당 Config 객체로 재귀적 변환.
     """
     if isinstance(cfg, PatchTSTConfig):
         return cfg
 
     if isinstance(cfg, dict):
         cfgd = dict(cfg)
-        # nested config가 dict로 들어있을 수 있으니, 가능한 경우 변환
+        # 중첩된(Nested) Config 객체 변환 시도
         try:
             from modeling_module.models.PatchTST.common.configs import (
                 AttentionConfig,
@@ -121,7 +131,7 @@ def _ensure_patchtst_config(cfg: Union[PatchTSTConfig, dict, Any]) -> PatchTSTCo
             if "decomp" in cfgd and isinstance(cfgd["decomp"], dict):
                 cfgd["decomp"] = DecompositionConfig(**cfgd["decomp"])
         except Exception:
-            # 해당 Config 클래스가 없거나, 구조가 달라도 일단 PatchTSTConfig(**cfgd) 시도
+            # 변환 실패 시 원본 dict 구조 유지하며 Config 생성 시도
             pass
 
         return PatchTSTConfig(**cfgd)
@@ -133,12 +143,14 @@ def _ensure_patchtst_config(cfg: Union[PatchTSTConfig, dict, Any]) -> PatchTSTCo
 
 
 def build_patchTST_base(cfg):
+    """PatchTST 점 예측(Point) 모델 인스턴스 생성."""
     from modeling_module.models.PatchTST.supervised.PatchTST import PatchTSTPointModel
     cfg = _ensure_patchtst_config(cfg)
     return PatchTSTPointModel.from_config(cfg)
 
 
 def build_patchTST_quantile(cfg):
+    """PatchTST 분위수 예측(Quantile) 모델 인스턴스 생성."""
     from modeling_module.models.PatchTST.supervised.PatchTST import PatchTSTQuantileModel
     cfg = _ensure_patchtst_config(cfg)
     return PatchTSTQuantileModel.from_config(cfg)
