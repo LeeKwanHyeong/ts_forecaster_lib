@@ -10,22 +10,26 @@ from modeling_module.training.config import TrainingConfig, DecompositionConfig
 @dataclass
 class AttentionConfig(TrainingConfig):
     """
-        PatchTST의 어텐션 관련 하이퍼파라미터 묶음.
-        - 'full'은 표준 Multi-Head Self-Attention
-        - 'probsparse'는 Informer류의 확률적 희소 어텐션(긴 시계열 가속 목적)
+    PatchTST 모델의 어텐션 메커니즘을 제어하는 설정 클래스.
+
+    기능:
+    - 어텐션 유형(Full vs ProbSparse) 선택.
+    - 멀티 헤드 구조 및 차원 설정.
+    - 드롭아웃 및 인과적 마스킹(Causal Masking) 제어.
     """
-    type: Literal['full', 'probsparse'] = 'full'    # 어텐션 유형
-    n_heads: int = 16                               # multi head 개수 (d_model % n_heads == 0 권장)
-    d_model: int = 128                              # token embedding dimension (model hidden dimension)
-    d_k: Optional[int] = None                       # 각 헤드의 Query/Key dimension (기본 None이면 d_model // n_heads)
-    d_v: Optional[int] = None                       # 각 헤드의 Value dimension (기본 None이면 d_model // n_heads)
-    attn_dropout: float = 0.0                       # Attention Score (dropout)
-    proj_dropout: float = 0.0                       # Attention Output Projection (dropout)
-    causal: bool = True                             # Triangular Causal Mask 사용 (미래 차단) 여부
-    residual_logits: bool = True                    # RealFormer Style Logit Residual 추가 여부
-    output_attention: bool = False                  # 헤드별 어텐션 가중치 반환(디버깅/해석용) 여부
-    factor: int = 5                                 # ProbSparse 전용 (키 샘플링 개수 스케일)
-    lsa: bool = False                               # Local Self-Attn scale 학습 여부
+    type: Literal['full', 'probsparse'] = 'full'  # 어텐션 연산 방식 ('full': 표준, 'probsparse': 효율적 희소 어텐션)
+    n_heads: int = 16  # 멀티 헤드(Multi-head) 개수 (d_model의 약수 권장)
+    d_model: int = 128  # 모델 내부 은닉 차원 (Token Embedding Dimension)
+    d_k: Optional[int] = None  # 헤드별 Query/Key 차원 (None: d_model // n_heads 자동 설정)
+    d_v: Optional[int] = None  # 헤드별 Value 차원 (None: d_model // n_heads 자동 설정)
+    attn_dropout: float = 0.0  # 어텐션 스코어(Score)에 적용할 드롭아웃 비율
+    proj_dropout: float = 0.0  # 어텐션 출력 투영(Projection) 시 적용할 드롭아웃 비율
+    causal: bool = True  # 인과적 마스킹 사용 여부 (미래 시점 정보 차단)
+    residual_logits: bool = True  # Logit 단계의 잔차 연결(RealFormer 스타일) 사용 여부
+    output_attention: bool = False  # 어텐션 가중치 맵 반환 여부 (시각화/디버깅용)
+    factor: int = 5  # ProbSparse 어텐션의 샘플링 팩터 (Top-k 선택 비율 제어)
+    lsa: bool = False  # Local Self-Attention 스케일 파라미터 학습 여부
+
 
 # =========================
 # Head 설정 (출력부)
@@ -33,15 +37,17 @@ class AttentionConfig(TrainingConfig):
 @dataclass
 class HeadConfig:
     """
-        모델 헤드 유형 및 출력부 하이퍼파라미터.
-        - 'prediction' : 예측 전용 헤드 (시계열 포캐스팅)
-        - 'flatten'    : 패치/채널 평탄화 후 선형 투사
-        - 'pretrain'   : 자기지도 사전학습(재구성 등)용 헤드
+    모델의 최종 출력 헤드(Head) 구조 설정.
+
+    옵션:
+    - 'prediction' : 시계열 예측 전용 헤드.
+    - 'flatten'    : 평탄화 후 선형 변환 (일반적인 회귀/분류).
+    - 'pretrain'   : 자기지도 학습(Self-supervised Learning)용 재구성 헤드.
     """
     type: Literal['prediction', 'flatten', 'pretrain'] = 'flatten'
-    individual: bool = False
-    head_dropout: float = 0.0
-    y_range: Optional[Tuple[float, float]] = None
+    individual: bool = False  # 변수별 독립적 헤드(Individual Head) 사용 여부
+    head_dropout: float = 0.0  # 헤드 레이어 드롭아웃 비율
+    y_range: Optional[Tuple[float, float]] = None  # 출력값 범위 제한 (Sigmoid Scaling) 설정
 
 
 # =========================
@@ -50,80 +56,58 @@ class HeadConfig:
 @dataclass
 class PatchTSTConfig(TrainingConfig):
     """
-       PatchTST의 핵심 하이퍼파라미터 구성.
+    PatchTST 모델의 전체 하이퍼파라미터 통합 구성 클래스.
 
-       [데이터/윈도우]
-       - c_in       : 입력 채널 수(=모델 입력 변수 개수). 단변량은 1.
-       - target_dim : 예측해야 하는 타깃 변수 개수(멀티타깃이면 >1). 일반적으로 target_dim <= c_in.
-       - lookback   : 인코더가 보는 과거 길이(컨텍스트 윈도우).
-       - horizon    : 예측할 미래 길이.
-       - patch_len  : 한 패치가 커버하는 시간 길이(로컬 패턴 단위). 계절성이 뚜렷하면 주기와 정합(예: 12).
-       - stride     : 패치 이동 간격(겹침 정도). 기본적으로 patch_len//2 권장(50% overlap).
-       - padding_patch : 'end'면 말단에 패딩을 추가해 마지막 패치를 하나 더 확보(패치 손실 완화).
+    주요 구성:
+    - 데이터/윈도우: 입력 채널, 패치 길이, 스트라이드 등 데이터 전처리 관련 설정.
+    - 인코더/백본: 레이어 수, 차원, 정규화, 위치 임베딩 등 모델 구조 관련 설정.
+    - 외생 변수: 과거/미래 외생 변수(Exogenous Variables) 차원 및 임베딩 설정.
+    - 서브 모듈: 어텐션, 헤드, 분해(Decomposition) 모듈의 세부 설정 포함.
+    """
+    # ---------- 데이터/윈도우 설정 ----------
+    c_in: int = 1  # 입력 변수(Channel) 개수 (단변량=1, 다변량>1)
+    target_dim: int = 1  # 예측 대상 변수 개수 (일반적으로 c_in과 동일하거나 작음)
+    patch_len: int = 8  # 패치 길이 (로컬 패턴 학습 단위)
+    stride: int = patch_len // 2  # 패치 이동 간격 (Stride) - 중첩 비율 제어
+    # lookback: int = 36                # (TrainingConfig 상속) 과거 컨텍스트 길이 (Encoder Input)
+    # horizon: int = 48                 # (TrainingConfig 상속) 미래 예측 길이 (Decoder/Head Output)
+    padding_patch: Optional[str] = None  # 패딩 전략 ('end': 마지막 패치 보존을 위한 패딩 추가)
 
-       [인코더/백본]
-       - n_layers   : 인코더 레이어(블록) 개수.
-       - d_model    : 모델 은닉 차원(패치 임베딩 차원).
-       - d_ff       : FFN(포지션-와이즈) 내부 차원.
-       - norm       : 정규화 유형('BatchNorm' 권장). 구현체에 따라 'LayerNorm' 등 선택 가능.
-       - dropout    : 드롭아웃 비율(인코더 전반).
-       - act        : 활성함수('relu'|'gelu' 등).
-       - pre_norm   : True면 레이어 진입 전 정규화(Pre-LN). False면 Post-LN.
-       - store_attn : True면 어텐션 가중치를 내부에 저장(디버깅용).
-       - pe         : 위치임베딩 유형('zeros'|'learned' 등 프로젝트 구현에 따름).
-       - learn_pe   : True면 위치임베딩을 학습.
-       - revin      : True면 RevIN(분포 정규화) 사용.
-       - affine     : RevIN의 affine 파라미터 사용 여부.
-       - subtract_last : RevIN에서 마지막값 기준 보정 사용 여부.
-       - verbose    : True면 디버그/로그 상세 출력.
+    # ---------- 과거 외생 변수 (Past Exogenous) ----------
+    d_past_cont: int = 0  # 과거 연속형 외생 변수 개수
+    d_past_cat: int = 0  # 과거 범주형 외생 변수 개수
+    cat_cardinalities: List[int] = field(default_factory=list)  # 범주형 변수별 카디널리티(고유값 수)
+    d_cat_emb: int = 0  # 범주형 변수 임베딩 차원
 
-       [서브설정]
-       - attn       : 어텐션 설정(AttentionConfig)
-       - head       : 헤드 설정(HeadConfig)
-       """
-    # ---------- 데이터/윈도우 ----------
-    c_in: int = 1                       # 입력 채널 수
-    target_dim: int = 1                 # 예측 타깃 채널 수
-    patch_len: int = 8                  # 패치 길이(로컬 패턴 단위)
-    stride: int = patch_len // 2        # 패치 간 이동 간격 (None 이면 patch_len//2 자동 설정)
-    # lookback: int = 36                  # 과거 컨텍스트 길이 (encoder 입력 길이)
-    # horizon: int = 48                   # 예측 길이 (decoder/헤드 출력 길이)
-    padding_patch: Optional[str] = None # 'end' or None (끝 패딩 여부)
+    # ---------- 미래 외생 변수 (Future Exogenous) ----------
+    d_future: int = 0  # 미래 연속형 외생 변수 개수 (예측 헤드에 주입)
 
-    # 과거 외생변수 설정
-    d_past_cont: int = 0                # 과거 연속형 변수 개수
-    d_past_cat: int = 0                 # 과거 범주형 변수 개수
-    cat_cardinalities: List[int] = field(default_factory=list)  # 범주형 변수별 고유값 개수(Embedding 용)
-    d_cat_emb: int = 0
-    # 미래 외생변수 설정
-    d_future: int = 0                   # 미래 연속형 변수 개수 (Head 주입용)
+    # ---------- 인코더(백본) 구조 설정 ----------
+    n_layers: int = 3  # 인코더 블록(Layer) 개수
+    d_model: int = 128  # 모델 은닉 차원 (Patch Embedding Dimension)
+    d_ff: int = 256  # Feed-Forward Network(FFN) 내부 확장 차원
+    norm: str = 'BatchNorm'  # 정규화 방식 ('BatchNorm', 'LayerNorm')
+    dropout: float = 0.0  # 인코더 전반에 적용할 드롭아웃 비율
+    act: str = 'gelu'  # 활성화 함수 ('gelu', 'relu')
+    pre_norm: bool = False  # Pre-Normalization 적용 여부 (True: Pre-LN, False: Post-LN)
+    store_attn: bool = False  # 어텐션 맵 저장 여부 (분석용)
+    pe: str = 'zeros'  # 위치 임베딩(Positional Embedding) 유형 ('zeros', 'learned' 등)
+    learn_pe: bool = True  # 위치 임베딩 파라미터 학습 여부
+    use_revin: bool = True  # RevIN(분포 정규화) 모듈 사용 여부
+    affine: bool = True  # RevIN 내 Affine 파라미터(Scale/Shift) 학습 여부
+    subtract_last: bool = False  # RevIN 적용 시 마지막 시점 값 기준 보정 여부
+    verbose: bool = False  # 상세 디버깅 로그 출력 여부
 
+    # ---------- 헤드 기본 설정 ----------
+    head_type = 'regression'  # 헤드 작업 유형 (기본: 회귀)
+    head_dropout: float = 0.  # 헤드 드롭아웃 (HeadConfig와 중복 가능성 있으나 전역 설정으로 존재)
+    individual = False  # 채널별 독립 헤드 사용 여부
 
-    # ---------- 인코더(백본) ----------
-    n_layers: int = 3                   # 인코더 레이어 수
-    d_model: int = 128                  # 은닉 차원(패치 임베딩 차원)
-    d_ff: int = 256                     # FFN 내부 차원
-    norm: str = 'BatchNorm'             # 정규화 유형('BatchNorm' 권장)
-    dropout: float = 0.0                # Dropout ratio
-    act: str = 'gelu'                   # Activation function
-    pre_norm: bool = False              # Pre-LN 여부
-    store_attn: bool = False            # 어텐션 가중치 저장
-    pe: str = 'zeros'                   # Positional Embedding 유형
-    learn_pe: bool = True               # Positional Embedding 학습 여부
-    use_revin: bool = True                  # RevIN 사용 여부
-    affine: bool = True                 # RevIN affine 사용 여부
-    subtract_last: bool = False         # RevIN 마지막값 기준 보정
-    verbose: bool = False               # 상세 로그
-    head_type = 'regression'
-    head_dropout: float = 0.
-    individual = False
-
-
-
-    # ---------- 서브 설정 ----------
+    # ---------- 서브 모듈 상세 설정 ----------
     attn: AttentionConfig = field(default_factory=AttentionConfig)
     head: HeadConfig = field(default_factory=HeadConfig)
     decomp: DecompositionConfig = field(default_factory=DecompositionConfig)
+
 
 # =========================
 # 프리셋: 월간/주간 권장 윈도우
@@ -131,21 +115,26 @@ class PatchTSTConfig(TrainingConfig):
 @dataclass
 class PatchTSTConfigMonthly(PatchTSTConfig):
     """
-        월간 데이터 기본 프리셋:
-        - lookback=36(3년), horizon=48(4년) 예시
-        - patch_len은 월 주기(12)의 약수/배수를 권장(예: 12), stride는 patch_len//2 권장
+    월간(Monthly) 데이터 전용 프리셋 설정.
+
+    권장 사항:
+    - Patch Length: 12 (1년 주기)의 약수 또는 배수 권장.
+    - Stride: Patch Length의 절반(50% Overlap) 권장.
     """
-    # lookback: int = 36
-    # horizon: int = 48
+    # lookback: int = 36  # 예시: 3년
+    # horizon: int = 48   # 예시: 4년
     pass
+
 
 @dataclass
 class PatchTSTConfigWeekly(PatchTSTConfig):
     """
-        주간 데이터 기본 프리셋:
-        - lookback=54, horizon=27 예시
-        - patch_len은 8/12/16 등 주기와 데이터 특성에 맞춰 탐색, stride는 patch_len//2 권장
+    주간(Weekly) 데이터 전용 프리셋 설정.
+
+    권장 사항:
+    - Patch Length: 8, 12, 16 등 데이터 특성 및 주기에 맞춰 조정.
+    - Stride: Patch Length의 절반 권장.
     """
-    # lookback: int = 54
-    # horizon: int = 27
+    # lookback: int = 54  # 예시: 약 1년
+    # horizon: int = 27   # 예시: 약 6개월
     pass
