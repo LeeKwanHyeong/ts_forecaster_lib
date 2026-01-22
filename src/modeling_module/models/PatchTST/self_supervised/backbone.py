@@ -90,6 +90,9 @@ class PatchTSTSelfSupBackbone(nn.Module):
     def __init__(self, cfg, attn_core=None):
         super().__init__()
 
+        # keep a reference for debug / optional flags
+        self.cfg = cfg
+
         self.patch_len = int(_cfg_get(cfg, "patch_len", 16))
         self.stride = int(_cfg_get(cfg, "stride", self.patch_len))
         self.d_model = int(_cfg_get(cfg, "d_model", 128))
@@ -121,42 +124,53 @@ class PatchTSTSelfSupBackbone(nn.Module):
         self.pretrain_head = nn.Linear(self.d_model, self.n_vars * self.patch_len)
 
     def _build_encoder(self, attn_core=None) -> nn.Module:
-        # Try internal encoder first
-        try:
-            from modeling_module.models.PatchTST.common.encoder import TSTEncoder, TSTEncoderLayer
-            from modeling_module.models.common_layers.Attention import MultiHeadAttention, FullAttention
+        """
+        IMPORTANT
+        - 이 프로젝트의 supervised encoder는 build_attention(cfg.attn) 기반으로 mha를 만들고,
+          TSTEncoder(q_len, cfg)가 내부에서 layer stack을 구성합니다.
+        - 따라서 self-supervised에서도 MultiHeadAttention를 직접 만들지 말고,
+          TSTEncoder를 그대로 사용해야 state_dict key-space가 일치합니다.
+        """
 
-            if attn_core is None:
-                # safest default: FullAttention
-                attn_core = FullAttention(mask_flag=False, attention_dropout=self.dropout, output_attention=False)
+        # ---- cfg aliasing (self-supervised cfg <-> supervised encoder cfg contract) ----
+        cfg = self.cfg
 
-            attn = MultiHeadAttention(attn_core, self.d_model, self.n_heads)
+        # self-supervised에서 쓰던 e_layers -> supervised의 n_layers로 매핑
+        if not hasattr(cfg, "n_layers"):
+            setattr(cfg, "n_layers", int(getattr(cfg, "e_layers", self.e_layers)))
 
-            layers = []
-            for _ in range(self.e_layers):
-                layers.append(
-                    TSTEncoderLayer(
-                        attention=attn,
-                        d_model=self.d_model,
-                        d_ff=self.d_ff,
-                        dropout=self.dropout,
-                        activation=self.activation,
-                    )
-                )
-            return TSTEncoder(layers)
-        except Exception:
-            # Fallback: vanilla PyTorch TransformerEncoder
-            enc_layer = nn.TransformerEncoderLayer(
-                d_model=self.d_model,
-                nhead=self.n_heads,
-                dim_feedforward=self.d_ff,
-                dropout=self.dropout,
-                activation=self.activation,
-                batch_first=True,
-                norm_first=True,
-            )
-            return nn.TransformerEncoder(enc_layer, num_layers=self.e_layers)
+        # d_ff, act, norm, dropout, pre_norm, store_attn 등 encoder.py가 참조하는 키를 보장
+        if not hasattr(cfg, "d_ff"):
+            setattr(cfg, "d_ff", int(getattr(cfg, "d_ff", self.d_ff)))
+        if not hasattr(cfg, "act"):
+            setattr(cfg, "act", str(getattr(cfg, "activation", self.activation)))
+        if not hasattr(cfg, "norm"):
+            setattr(cfg, "norm", str(getattr(cfg, "norm", "BatchNorm")))
+        if not hasattr(cfg, "dropout"):
+            setattr(cfg, "dropout", float(getattr(cfg, "dropout", self.dropout)))
+        if not hasattr(cfg, "pre_norm"):
+            setattr(cfg, "pre_norm", bool(getattr(cfg, "pre_norm", False)))
+        if not hasattr(cfg, "store_attn"):
+            setattr(cfg, "store_attn", bool(getattr(cfg, "store_attn", False)))
 
+        # cfg.d_model / cfg.n_heads 정합성 보장
+        if not hasattr(cfg, "d_model"):
+            setattr(cfg, "d_model", int(self.d_model))
+        if not hasattr(cfg, "n_heads"):
+            setattr(cfg, "n_heads", int(self.n_heads))
+
+        # ---- build encoder (NO direct MultiHeadAttention construction) ----
+        from modeling_module.models.PatchTST.common.encoder import \
+            TSTEncoder  # 이 파일의 contract 기준 :contentReference[oaicite:2]{index=2}
+
+        # q_len은 현재 구현의 TSTEncoder에서는 실질적으로 사용되지 않지만, 안전하게 patch_num 추정
+        seq_len = getattr(cfg, "seq_len", getattr(cfg, "lookback", None))
+        if seq_len is None:
+            q_len = 1
+        else:
+            q_len = self.infer_patch_num(int(seq_len))
+
+        return TSTEncoder(q_len=q_len, cfg=cfg)
     @torch.no_grad()
     def infer_patch_num(self, L: int) -> int:
         L = int(L)

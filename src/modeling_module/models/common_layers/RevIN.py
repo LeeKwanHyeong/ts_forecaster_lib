@@ -28,9 +28,9 @@ class RevIN(nn.Module):
 
 
         # 통계 버퍼
-        self.register_buffer('last', torch.zeros(1, 1, num_features))
-        self.register_buffer('mean', torch.zeros(1, 1, num_features))
-        self.register_buffer('std', torch.ones(1, 1, num_features))
+        self.register_buffer('last', torch.zeros(1, 1, num_features), persistent=False)
+        self.register_buffer('mean', torch.zeros(1, 1, num_features), persistent=False)
+        self.register_buffer('std', torch.ones(1, 1, num_features), persistent=False)
 
 
     def forward(self, x: torch.Tensor, mode: str) -> torch.Tensor:

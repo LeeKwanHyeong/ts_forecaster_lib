@@ -5,10 +5,14 @@ from typing import Callable, Union, Sequence
 import numpy as np
 
 
-def calendar_sin_cos(t: torch.Tensor, period: float) -> torch.Tensor:
+def calendar_sin_cos(t: torch.Tensor, period: float, device = 'cpu') -> torch.Tensor:
     """
     단일 주기에 대한 sin/cos 쌍 반환 (..., 2)
     """
+
+    t = torch.as_tensor(t, device=device, dtype=torch.float32)
+
+
     return torch.stack([
         torch.sin(2 * torch.pi * t / period),
         torch.cos(2 * torch.pi * t / period)

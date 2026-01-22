@@ -31,7 +31,6 @@ def eval_on_loader(model, loader, device: str, future_exo_cb=None):
             future_exo = fe.to(device)
         else:
             future_exo = None
-
         past_exo_cont = batch[4].to(device)  # [B, 52, 11]
         past_exo_cat = batch[5].to(device)   # [B, 52, 0]
 

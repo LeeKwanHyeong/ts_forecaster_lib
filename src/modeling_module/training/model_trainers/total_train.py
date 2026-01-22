@@ -67,7 +67,16 @@ from modeling_module.training.model_trainers.patchtst_train import train_patchts
 from modeling_module.training.model_trainers.titan_train import train_titan
 from modeling_module.utils.exogenous_utils import compose_exo_calendar_cb
 from modeling_module.utils.metrics import smape, rmse, mae
+import os
+from typing import Literal
 
+SSLMode = Literal["ssl_only", "full", "sl_only"]
+
+def _validate_ssl_mode(use_ssl_mode: str) -> str:
+    m = str(use_ssl_mode).strip().lower()
+    if m not in ("ssl_only", "full", "sl_only"):
+        raise ValueError(f"use_ssl_mode must be one of ['ssl_only','full','sl_only'], got={use_ssl_mode!r}")
+    return m
 
 # ===================== 공통 유틸 =====================
 
@@ -114,6 +123,25 @@ def _infer_future_exo_spec_from_loader(loader) -> tuple[bool, int]:
         return (True, 0)
     except Exception:
         return (False, 0)
+
+def _wrap_future_exo_cb(future_exo_cb):
+    """
+    train_patchtst()는 future_exo_cb(t0, H, device=...) 형태로 호출할 수 있음.
+    그런데 기존 콜백이 device 인자를 안 받으면 TypeError가 발생.
+    이 래퍼는 device 인자를 안전하게 흡수하고, 텐서면 해당 device로 옮김.
+    """
+    if future_exo_cb is None:
+        return None
+
+    def _wrapped(t0, H, *args, **kwargs):
+        device = kwargs.pop("device", None)  # device keyword 흡수
+        out = future_exo_cb(t0, H)          # 기존 시그니처 유지 (t0, H)
+        if device is not None and isinstance(out, torch.Tensor):
+            out = out.to(device)
+        return out
+
+    return _wrapped
+
 def save_model(model: torch.nn.Module, cfg, path: str) -> None:
     path = str(path)
     state = {
@@ -273,9 +301,6 @@ def _contains(xs: List[str], key: str) -> bool:
     return key.lower() in xs
 
 
-# ---------------------------------------------------------------------
-# 모델별 러너: “(freq 공통 계산 결과) + loaders”만 받아서 results를 채움
-# ---------------------------------------------------------------------
 def _run_patchtst(
         *,
         results: Dict[str, Dict],
@@ -290,12 +315,79 @@ def _run_patchtst(
         stages,
         device: str,
         use_exogenous_mode: bool = True,
-        use_ssl_pretrain: bool = False,
+        use_ssl_mode: SSLMode = 'sl_only',
         ssl_pretrain_epochs: int = 10,
         ssl_mask_ratio: float = 0.3,
         ssl_loss_type: str = "mse",
         ssl_freeze_encoder_before_ft: bool = False,
+        ssl_pretrained_ckpt_path: Optional[str] = None,
 ):
+    use_ssl_mode = _validate_ssl_mode(use_ssl_mode)
+
+    # ------------------------------------------------------------
+    # 0) infer past exo dims from loader
+    # ------------------------------------------------------------
+    # d_past_cont = 0
+    # d_past_cat = 0
+    # try:
+    #     b = next(iter(train_loader))
+    #     if isinstance(b, (list, tuple)) and len(b) >= 6:
+    #         pe_cont = b[4]  # [B,L,Dc]
+    #         pe_cat = b[5]   # [B,L,K]
+    #         if pe_cont is not None and hasattr(pe_cont, "ndim") and pe_cont.ndim == 3:
+    #             d_past_cont = int(pe_cont.shape[-1])
+    #         if pe_cat is not None and hasattr(pe_cat, "ndim") and pe_cat.ndim == 3:
+    #             d_past_cat = int(pe_cat.shape[-1])
+    # except Exception as e:
+    #     print(f"[DBG-pt_kwargs] failed to infer past_exo dims: {repr(e)}")
+    #     d_past_cont, d_past_cat = 0, 0
+
+    date_type_map = {"weekly": "W", "monthly": "M", "daily": "D", "hourly": "H"}
+    dt_char = date_type_map.get(freq, "W")
+
+    # --------------------------------------------------------------
+    # Exogenous feature policy (TRAIN)
+    # --------------------------------------------------------------
+    # We support two ways of supplying "future exogenous" features:
+    #   (A) Loader-provided: batch[3] == fe_cont with shape (B, H, E)
+    #   (B) Callback-provided: future_exo_cb(t0, H) -> (H, E)
+    #
+    # IMPORTANT:
+    # - If loader provides fe_cont, we prefer (A) and set future_exo_cb=None
+    #   to avoid inconsistent dim between loader and calendar callback.
+    # - If loader does NOT provide fe_cont, we use (B) when use_exogenous_mode=True.
+    # - If loader provides fe_cont but E==0, that is treated as a configuration error.
+    has_fe, fe_dim = _infer_future_exo_spec_from_loader(train_loader)
+
+    if use_exogenous_mode:
+        if has_fe:
+            if fe_dim <= 0:
+                raise RuntimeError(
+                    f"[total_train] use_exogenous_mode=True but loader fe_cont dim is {fe_dim}. "
+                    f"Check feature selection / exogenous datamodule wiring."
+                )
+            # Prefer loader-provided exo
+            future_exo_cb = None
+            exo_dim = int(fe_dim)
+            print(f"[total_train] future exo from loader: fe_dim={exo_dim} (freq={freq})")
+        else:
+            # Loader does not provide fe_cont -> use calendar callback
+            future_exo_cb = compose_exo_calendar_cb(date_type=dt_char)
+            exo_dim = 4 if freq in ("daily", "hourly") else 2
+            print(f"[total_train] future exo from callback: exo_dim={exo_dim} (freq={freq}, dt={dt_char})")
+    else:
+        # Exogenous disabled
+        future_exo_cb = None
+        exo_dim = 0
+        if has_fe and fe_dim > 0:
+            print(
+                f"[total_train][WARN] use_exogenous_mode=False but loader provides fe_cont dim={fe_dim}. "
+                f"Ignoring future exo."
+            )
+
+    # ------------------------------------------------------------
+    # 1) common PatchTST kwargs (point/quantile share same backbone spec)
+    # ------------------------------------------------------------
     pt_kwargs = dict(
         device=device,
         lookback=lookback,
@@ -305,57 +397,40 @@ def _run_patchtst(
         n_layers=3,
         patch_len=patch_len,
         stride=stride,
-        d_future=exo_dim,     # future exo dim (A0=0, A1=2, A2=3 ...)
-        use_revin=True,
+        d_future=exo_dim,
+        # d_past_cont=d_past_cont,
+        # d_past_cat=d_past_cat,
     )
 
-    d_past_cont = 0
-    d_past_cat = 0
-    try:
-        b = next(iter(train_loader))
-        if isinstance(b, (list, tuple)) and len(b) >= 6:
-            # x, y, uid, fe, pe_cont, pe_cat
-            pe_cont = b[4]
-            pe_cat = b[5]
-
-            if pe_cont is not None and hasattr(pe_cont, "ndim") and pe_cont.ndim == 3:
-                d_past_cont = int(pe_cont.shape[-1])
-            if pe_cat is not None and hasattr(pe_cat, "ndim") and pe_cat.ndim == 3:
-                d_past_cat = int(pe_cat.shape[-1])
-        else:
-            print(f"[DBG-pt_kwargs] unexpected batch format: type={type(b)} len={len(b) if hasattr(b,'__len__') else 'NA'}")
-    except Exception as e:
-        print(f"[DBG-pt_kwargs] failed to infer past_exo dims: {repr(e)}")
-        d_past_cont, d_past_cat = 0, 0
-
-    if not use_exogenous_mode:
-        pt_kwargs["d_future"] = 0
-
-    pt_kwargs["d_past_cont"] = d_past_cont
-    pt_kwargs["d_past_cat"] = d_past_cat
-
-    print(
-        f"[DBG-pt_kwargs] use_exogenous_mode={use_exogenous_mode} | "
-        f"d_future={pt_kwargs['d_future']} | d_past_cont={d_past_cont} | d_past_cat={d_past_cat}"
-    )
-
-
-    # ---------------------------
-    # self-supervised pretrain (optional)
-    # ---------------------------
+    # ------------------------------------------------------------
+    # 2) external ckpt override (SSL pretrain ckpt)
+    # ------------------------------------------------------------
     pretrain_ckpt_path = None
-    if use_ssl_pretrain and save_root is not None:
+    if ssl_pretrained_ckpt_path:
+        if not os.path.exists(ssl_pretrained_ckpt_path):
+            raise FileNotFoundError(ssl_pretrained_ckpt_path)
+        pretrain_ckpt_path = str(ssl_pretrained_ckpt_path)
+        print(f"[SSL] use external pretrained ckpt: {pretrain_ckpt_path}")
+
+    # ------------------------------------------------------------
+    # 3) SSL pretrain (optional) - only for point model flow
+    # ------------------------------------------------------------
+    if (use_ssl_mode in ('ssl_only', 'full')) and (pretrain_ckpt_path is None) and (save_root is not None):
         pretrain_dir = Path(save_root) / "pretrain"
         pretrain_dir.mkdir(parents=True, exist_ok=True)
         pretrain_ckpt_path = str(pretrain_dir / "patchtst_pretrain_best.pt")
 
-        pt_pre_cfg = PatchTSTConfig(**pt_kwargs, loss_mode="point", point_loss="mse")
+        # SSL은 y-only로 (d_future=0) 권장, 그러나 past_exo는 동일 스펙 유지(현재 구현 그대로)
+        pt_pre_kwargs = dict(pt_kwargs)
+        pt_pre_kwargs["d_future"] = 0
+
+        pt_pre_cfg = PatchTSTConfig(**pt_pre_kwargs, loss_mode="point", point_loss="mse")
         pre_model = PatchTSTPretrainModel(cfg=pt_pre_cfg)
 
         pre_train_cfg = point_train_cfg
         pre_stages = [StageConfig(epochs=ssl_pretrain_epochs, lr=point_train_cfg.lr, spike_enabled=False)]
 
-        print(f"[SSL] PatchTST Pretrain ({freq.capitalize()})")
+        print(f"[SSL] PatchTST Pretrain ({freq.capitalize()}) -> {pretrain_ckpt_path}")
         _ = train_patchtst_pretrain(
             pre_model,
             train_loader,
@@ -368,14 +443,24 @@ def _run_patchtst(
             ckpt_name="patchtst_pretrain_best.pt",
         )
 
-    # ---------------------------
-    # 1) PatchTST Base (supervised)
-    # ---------------------------
+    # ------------------------------------------------------------
+    # 4) ssl_only: SSL만 하고 종료 (point/quantile supervised 모두 skip)
+    # ------------------------------------------------------------
+    if use_ssl_mode == 'ssl_only':
+        results["PatchTST SSL"] = {
+            "pretrain_ckpt_path": pretrain_ckpt_path,
+            "note": "use_ssl_mode='ssl_only' 이므로 supervised(point/quantile) 학습은 수행하지 않음",
+        }
+        return
+
+    # ============================================================
+    # 5) Supervised - Point(Base)
+    # ============================================================
     pt_base_cfg = PatchTSTConfig(**pt_kwargs, loss_mode='point', point_loss='huber')
     pt_base = build_patchTST_base(pt_base_cfg)
 
     print(f'PatchTST Base ({freq.capitalize()})')
-    if pretrain_ckpt_path is not None:
+    if (use_ssl_mode == 'full') and (pretrain_ckpt_path is not None):
         best_pt_base = train_patchtst_finetune(
             pt_base, train_loader, val_loader,
             train_cfg=point_train_cfg, stages=list(stages),
@@ -390,50 +475,36 @@ def _run_patchtst(
             pt_base, train_loader, val_loader,
             train_cfg=point_train_cfg, stages=list(stages),
             future_exo_cb=future_exo_cb,
-            use_exogenous_mode=use_exogenous_mode
+            use_exogenous_mode=use_exogenous_mode,
         )
 
     if save_root:
-        print('save_root:: ', save_root)
         ckpt_path = _make_ckpt_path(save_root, freq, "PatchTSTBase", lookback, horizon)
         save_model(pt_base, pt_base_cfg, ckpt_path)
         best_pt_base["ckpt_path"] = str(ckpt_path)
-        if pretrain_ckpt_path is not None:
+        if (use_ssl_mode == 'full') and (pretrain_ckpt_path is not None):
             best_pt_base["pretrain_ckpt_path"] = str(pretrain_ckpt_path)
     results['PatchTST Base'] = best_pt_base
 
-    # ---------------------------
-    # 2) PatchTST Quantile (supervised)
-    # ---------------------------
+    # ============================================================
+    # 6) Supervised - Quantile (신규 추가)
+    #    - 핵심: 여기서도 pt_kwargs(d_past_cont=loader 기반)가 반영된 cfg로 "새로 학습/저장"해야 함
+    # ============================================================
     pt_q_cfg = PatchTSTConfig(**pt_kwargs, loss_mode='quantile', quantiles=(0.1, 0.5, 0.9))
     pt_q = build_patchTST_quantile(pt_q_cfg)
 
     print(f'PatchTST Quantile ({freq.capitalize()})')
-    if pretrain_ckpt_path is not None:
-        best_pt_q = train_patchtst_finetune(
-            pt_q, train_loader, val_loader,
-            train_cfg=quantile_train_cfg, stages=list(stages),
-            future_exo_cb=future_exo_cb,
-            exo_is_normalized=True,
-            pretrain_ckpt_path=pretrain_ckpt_path,
-            load_strict=False,
-            freeze_encoder_before_ft=ssl_freeze_encoder_before_ft,
-        )
-    else:
-        best_pt_q = train_patchtst(
-            pt_q, train_loader, val_loader,
-            train_cfg=quantile_train_cfg, stages=list(stages),
-            future_exo_cb=future_exo_cb,
-            exo_is_normalized=True,
-            use_exogenous_mode=use_exogenous_mode
-        )
+    best_pt_q = train_patchtst(
+        pt_q, train_loader, val_loader,
+        train_cfg=quantile_train_cfg, stages=list(stages),
+        future_exo_cb=future_exo_cb,
+        use_exogenous_mode=use_exogenous_mode,
+    )
 
     if save_root:
-        ckpt_path = _make_ckpt_path(save_root, freq, "PatchTSTQuantile", lookback, horizon)
-        save_model(pt_q, pt_q_cfg, ckpt_path)
-        best_pt_q["ckpt_path"] = str(ckpt_path)
-        if pretrain_ckpt_path is not None:
-            best_pt_q["pretrain_ckpt_path"] = str(pretrain_ckpt_path)
+        ckpt_path_q = _make_ckpt_path(save_root, freq, "PatchTSTQuantile", lookback, horizon)
+        save_model(pt_q, pt_q_cfg, ckpt_path_q)
+        best_pt_q["ckpt_path"] = str(ckpt_path_q)
     results['PatchTST Quantile'] = best_pt_q
 
 def _run_titan(
@@ -714,11 +785,13 @@ def _run_total_train_generic(
 
 
     # PatchTST 전용 Property
-    use_ssl_pretrain: bool = False,
+    use_ssl_mode: SSLMode = 'sl_only',
     ssl_pretrain_epochs: int = 10,
     ssl_mask_ratio: float = 0.3,
     ssl_loss_type: str = "mse",
-    ssl_freeze_encoder_before_ft: bool = False
+    ssl_freeze_encoder_before_ft: bool = False,
+    ssl_pretrained_ckpt_path: Optional[str] = None,
+
 ):
     save_root = Path(save_dir) if save_dir is not None else None
 
@@ -731,7 +804,9 @@ def _run_total_train_generic(
     dt_char = date_type_map.get(freq, "W")
 
     has_fe, fe_dim = _infer_future_exo_spec_from_loader(train_loader)
-
+    print('use_exogenous_mode:: ',use_exogenous_mode)
+    print('has_fe:: ', has_fe)
+    print('fe_dim:: ', fe_dim)
     if use_exogenous_mode:
         if has_fe:
             if fe_dim <= 0:
@@ -746,6 +821,7 @@ def _run_total_train_generic(
         else:
             # Loader does not provide fe_cont -> use calendar callback
             future_exo_cb = compose_exo_calendar_cb(date_type=dt_char)
+            future_exo_cb = _wrap_future_exo_cb(future_exo_cb)
             exo_dim = 4 if freq in ("daily", "hourly") else 2
             print(f"[total_train] future exo from callback: exo_dim={exo_dim} (freq={freq}, dt={dt_char})")
     else:
@@ -804,11 +880,12 @@ def _run_total_train_generic(
 
         if m == "patchtst":
             kwargs.update(dict(
-                use_ssl_pretrain=use_ssl_pretrain,
+                use_ssl_mode = use_ssl_mode,
                 ssl_pretrain_epochs=ssl_pretrain_epochs,
                 ssl_mask_ratio=ssl_mask_ratio,
                 ssl_loss_type=ssl_loss_type,
                 ssl_freeze_encoder_before_ft=ssl_freeze_encoder_before_ft,
+                ssl_pretrained_ckpt_path=ssl_pretrained_ckpt_path,
             ))
 
         MODEL_REGISTRY[m](**kwargs)
@@ -831,11 +908,13 @@ def run_total_train_weekly(
         save_dir=None,
         use_exogenous_mode: bool = False,
         models_to_run=None,
-        use_ssl_pretrain: bool = False,
+        use_ssl_mode: SSLMode = 'sl_only',
         ssl_pretrain_epochs: int = 10,
         ssl_mask_ratio: float = 0.3,
         ssl_loss_type: str = "mse",
-        ssl_freeze_encoder_before_ft: bool = False
+        ssl_freeze_encoder_before_ft: bool = False,
+        ssl_pretrained_ckpt_path: Optional[str] = None,
+
 ):
     return _run_total_train_generic(
         train_loader,
@@ -850,11 +929,13 @@ def run_total_train_weekly(
         spike_epochs = spike_epochs,
         base_lr = base_lr,
         models_to_run=models_to_run,
-        use_ssl_pretrain=use_ssl_pretrain,
+        use_ssl_mode = use_ssl_mode,
         ssl_pretrain_epochs=ssl_pretrain_epochs,
         ssl_mask_ratio=ssl_mask_ratio,
         ssl_loss_type=ssl_loss_type,
         ssl_freeze_encoder_before_ft=ssl_freeze_encoder_before_ft,
+        ssl_pretrained_ckpt_path=ssl_pretrained_ckpt_path,
+
     )
 
 
@@ -870,11 +951,14 @@ def run_total_train_monthly(
         base_lr = None,
         save_dir=None,
         models_to_run=None,
-        use_ssl_pretrain: bool = False,
+        use_exogenous_mode: bool = False,
+        use_ssl_mode: SSLMode = 'sl_only',
         ssl_pretrain_epochs: int = 10,
         ssl_mask_ratio: float = 0.3,
         ssl_loss_type: str = "mse",
-        ssl_freeze_encoder_before_ft: bool = False
+        ssl_freeze_encoder_before_ft: bool = False,
+        ssl_pretrained_ckpt_path: Optional[str] = None,
+
 ):
     return _run_total_train_generic(
         train_loader,
@@ -888,11 +972,13 @@ def run_total_train_monthly(
         spike_epochs = spike_epochs,
         base_lr = base_lr,
         models_to_run=models_to_run,
-        use_ssl_pretrain=use_ssl_pretrain,
+        use_exogenous_mode=use_exogenous_mode,
+        use_ssl_mode=use_ssl_mode,
         ssl_pretrain_epochs=ssl_pretrain_epochs,
         ssl_mask_ratio=ssl_mask_ratio,
         ssl_loss_type=ssl_loss_type,
         ssl_freeze_encoder_before_ft=ssl_freeze_encoder_before_ft,
+        ssl_pretrained_ckpt_path=ssl_pretrained_ckpt_path,
     )
 
 
@@ -908,11 +994,14 @@ def run_total_train_daily(
         base_lr = None,
         save_dir=None,
         models_to_run=None,
-        use_ssl_pretrain: bool = False,
+        use_exogenous_mode: bool = False,
+        use_ssl_mode: SSLMode = 'sl_only',
         ssl_pretrain_epochs: int = 10,
         ssl_mask_ratio: float = 0.3,
         ssl_loss_type: str = "mse",
-        ssl_freeze_encoder_before_ft: bool = False
+        ssl_freeze_encoder_before_ft: bool = False,
+        ssl_pretrained_ckpt_path: Optional[str] = None,
+
 ):
     return _run_total_train_generic(
         train_loader,
@@ -926,11 +1015,13 @@ def run_total_train_daily(
         spike_epochs = spike_epochs,
         base_lr = base_lr,
         models_to_run=models_to_run,
-        use_ssl_pretrain=use_ssl_pretrain,
+        use_exogenous_mode=use_exogenous_mode,
+        use_ssl_mode = use_ssl_mode,
         ssl_pretrain_epochs=ssl_pretrain_epochs,
         ssl_mask_ratio=ssl_mask_ratio,
         ssl_loss_type=ssl_loss_type,
         ssl_freeze_encoder_before_ft=ssl_freeze_encoder_before_ft,
+        ssl_pretrained_ckpt_path=ssl_pretrained_ckpt_path,
     )
 
 
@@ -946,11 +1037,14 @@ def run_total_train_hourly(
         base_lr = None,
         save_dir=None,
         models_to_run=None,
-        use_ssl_pretrain: bool = False,
+        use_exogenous_mode: bool = False,
+        use_ssl_mode: SSLMode = 'sl_only',
         ssl_pretrain_epochs: int = 10,
         ssl_mask_ratio: float = 0.3,
         ssl_loss_type: str = "mse",
-        ssl_freeze_encoder_before_ft: bool = False
+        ssl_freeze_encoder_before_ft: bool = False,
+        ssl_pretrained_ckpt_path: Optional[str] = None,
+
 ):
     return _run_total_train_generic(
         train_loader,
@@ -964,11 +1058,13 @@ def run_total_train_hourly(
         spike_epochs = spike_epochs,
         base_lr = base_lr,
         models_to_run=models_to_run,
-        use_ssl_pretrain=use_ssl_pretrain,
+        use_exogenous_mode=use_exogenous_mode,
+        use_ssl_mode = use_ssl_mode,
         ssl_pretrain_epochs=ssl_pretrain_epochs,
         ssl_mask_ratio=ssl_mask_ratio,
         ssl_loss_type=ssl_loss_type,
         ssl_freeze_encoder_before_ft=ssl_freeze_encoder_before_ft,
+        ssl_pretrained_ckpt_path=ssl_pretrained_ckpt_path,
     )
 
 
