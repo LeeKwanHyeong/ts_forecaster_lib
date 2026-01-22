@@ -1,0 +1,10 @@
+seed,variant,model_type,MAE,RMSE,SMAPE,save_root
+11,A0,point,123906.7890625,229813.78125,0.09539750218391418,C:/Users/USER/PycharmProjects/ts_forecaster_lib/raw_data/fit\walmart_titan_ab\A0_y_only\seed_11
+11,A1,point,202372.796875,348315.5,0.1380067765712738,C:/Users/USER/PycharmProjects/ts_forecaster_lib/raw_data/fit\walmart_titan_ab\A1_time_exog\seed_11
+11,A2,point,215381.625,324163.96875,0.1478414535522461,C:/Users/USER/PycharmProjects/ts_forecaster_lib/raw_data/fit\walmart_titan_ab\A2_time_holiday\seed_11
+11,A0,quantile(q50),181821.890625,251992.421875,0.13804884254932404,C:/Users/USER/PycharmProjects/ts_forecaster_lib/raw_data/fit\walmart_titan_ab\A0_y_only\seed_11
+11,A1,quantile(q50),193458.796875,321543.0,0.13515140116214752,C:/Users/USER/PycharmProjects/ts_forecaster_lib/raw_data/fit\walmart_titan_ab\A1_time_exog\seed_11
+11,A2,quantile(q50),216320.640625,361498.5,0.1460411101579666,C:/Users/USER/PycharmProjects/ts_forecaster_lib/raw_data/fit\walmart_titan_ab\A2_time_holiday\seed_11
+11,A0,quantile(q50),119863.6328125,218435.140625,0.09373844414949417,C:/Users/USER/PycharmProjects/ts_forecaster_lib/raw_data/fit\walmart_titan_ab\A0_y_only\seed_11
+11,A1,quantile(q50),200565.484375,330200.09375,0.1404782384634018,C:/Users/USER/PycharmProjects/ts_forecaster_lib/raw_data/fit\walmart_titan_ab\A1_time_exog\seed_11
+11,A2,quantile(q50),180101.34375,294713.6875,0.13040263950824738,C:/Users/USER/PycharmProjects/ts_forecaster_lib/raw_data/fit\walmart_titan_ab\A2_time_holiday\seed_11
