@@ -1,5 +1,5 @@
 from dataclasses import fields
-from typing import Union, Any
+from typing import Union, Any, Optional
 
 from modeling_module.models.PatchMixer.common.configs import PatchMixerConfig
 from modeling_module.models.PatchTST.common.configs import PatchTSTConfig
@@ -154,3 +154,19 @@ def build_patchTST_quantile(cfg):
     from modeling_module.models.PatchTST.supervised.PatchTST import PatchTSTQuantileModel
     cfg = _ensure_patchtst_config(cfg)
     return PatchTSTQuantileModel.from_config(cfg)
+
+def build_patchTST_dist(cfg, *, min_scale: Optional[float] = None):
+    """PatchTST 분포 예측(Distribution) 모델 인스턴스 생성.
+
+    반환 pred는 텐서가 아니라 dict 형태로:
+      - pred["loc"]: (B, H)
+      - pred["scale"]: (B, H)  (항상 양수; LossComputer의 dist loss가 이를 사용)
+    """
+    from modeling_module.models.PatchTST.supervised.PatchTST import PatchTSTDistModel
+    cfg = _ensure_patchtst_config(cfg)
+
+    if min_scale is None:
+        # cfg에 dist_min_scale이 없을 수 있으므로 안전하게 기본값 사용
+        min_scale = float(getattr(cfg, "dist_min_scale", 1e-3))
+
+    return PatchTSTDistModel(cfg=cfg, min_scale=float(min_scale))

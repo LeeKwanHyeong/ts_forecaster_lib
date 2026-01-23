@@ -6,6 +6,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
 import torch
 import torch.nn.functional as F
+import math
 
 
 Tensor = torch.Tensor
@@ -346,6 +347,62 @@ def extract_quantile_pred(pred: Pred, *, target_channel: int = 0) -> Tensor:
     return ensure_3d_quantile(q)
 
 
+
+# =============================================================================
+# 4.5) Distribution losses (dist mode)
+# =============================================================================
+def ensure_bh(x: Tensor) -> Tensor:
+    """Normalize tensor to [B,H]. Accepts [B,H], [B,1,H], [B,H,1]."""
+    return ensure_2d(x)
+
+
+def normal_nll_elementwise(y: Tensor, loc: Tensor, scale: Tensor, *, eps: float = 1e-12) -> Tensor:
+    """
+    Elementwise Normal negative log-likelihood for y ~ N(loc, scale^2).
+    Returns [B,H].
+    """
+    y = ensure_2d(y)
+    loc = ensure_bh(loc)
+    scale = ensure_bh(scale).clamp_min(eps)
+
+    z = (y - loc) / scale
+    # 0.5*log(2*pi) as constant (keep dtype/device)
+    const = y.new_tensor(0.5 * math.log(2.0 * math.pi))
+    return const + torch.log(scale) + 0.5 * (z ** 2)
+
+
+def extract_dist_params(pred: Pred) -> Tuple[Tensor, Tensor]:
+    """
+    Extract (loc, scale) from model output for dist mode.
+    Supported:
+      - Dict with keys:
+          * "loc" and "scale"
+          * "loc" and "scale_raw" (caller may softplus)
+          * (compat) "mu"/"sigma"
+    Returns:
+      loc: [B,H], scale_like: [B,H]
+    """
+    if not isinstance(pred, dict):
+        raise ValueError(f"dist mode requires pred as dict, got {type(pred)}")
+
+    if "loc" in pred:
+        loc = pred["loc"]
+    elif "mu" in pred:
+        loc = pred["mu"]
+    else:
+        raise ValueError("dist mode requires key 'loc' (or 'mu').")
+
+    if "scale" in pred:
+        scale = pred["scale"]
+    elif "sigma" in pred:
+        scale = pred["sigma"]
+    elif "scale_raw" in pred:
+        scale = pred["scale_raw"]
+    else:
+        raise ValueError("dist mode requires key 'scale' (or 'sigma'/'scale_raw').")
+
+    return ensure_bh(loc), ensure_bh(scale)
+
 # =============================================================================
 # 5) Configs (minimal, 독립적으로 동작하도록 dataclass 제공)
 # =============================================================================
@@ -372,7 +429,7 @@ class SpikeLossConfig:
 @dataclass
 class TrainingConfigLite:
     # mode
-    loss_mode: str = "auto"  # "auto" | "point" | "quantile"
+    loss_mode: str = "auto"  # \"auto\" | \"point\" | \"quantile\" | \"dist\"
     point_loss: str = "mae"  # "mae" | "mse" | "huber" | "pinball" | "huber_asym"
     huber_delta: float = 5.0
 
@@ -382,6 +439,14 @@ class TrainingConfigLite:
     use_cost_q_star: bool = False
     Cu: float = 1.0
     Co: float = 1.0
+
+    # dist (distribution) - Normal by default
+    # Expected model output: dict with keys {"loc": [B,H], "scale": [B,H]}.
+    # If your model outputs "scale_raw", set dist_scale_is_positive=False to apply softplus.
+    dist_family: str = "normal"  # currently supports: "normal"
+    dist_scale_is_positive: bool = True
+    dist_min_scale: float = 1e-3
+    dist_eps: float = 1e-12
 
     # validation
     val_use_weights: bool = True
@@ -479,8 +544,9 @@ class LossComputer:
         return horizon_decay_weights(y, tau_h=float(self.cfg.tau_h))
 
     def _infer_mode(self, pred: Pred) -> str:
+        # explicit override
         if self.cfg.loss_mode != "auto":
-            return self.cfg.loss_mode
+            return str(self.cfg.loss_mode)
 
         # auto detect quantile
         if torch.is_tensor(pred):
@@ -488,16 +554,24 @@ class LossComputer:
                 return "quantile"
             return "point"
 
-        if isinstance(pred, dict) and "q" in pred:
-            return "quantile"
+        if isinstance(pred, dict):
+            if "q" in pred:
+                return "quantile"
+            # dist signature: loc + (scale|scale_raw|sigma)
+            if ("loc" in pred or "mu" in pred) and ("scale" in pred or "scale_raw" in pred or "sigma" in pred):
+                return "dist"
 
         return "point"
+
 
     # -------------------------------------------------------------------------
     # public
     # -------------------------------------------------------------------------
     def compute(self, pred: Pred, y: Tensor, *, is_val: bool) -> Tensor:
         mode = self._infer_mode(pred)
+
+        if mode == "dist":
+            return self._compute_dist(pred, y, is_val=is_val)
 
         if mode == "quantile":
             return self._compute_quantile(pred, y, is_val=is_val)
@@ -511,6 +585,7 @@ class LossComputer:
                 return self._compute_spike_direct(pred, y, is_val=is_val)
 
         return self._compute_point_base(pred, y, is_val=is_val)
+
 
     # -------------------------------------------------------------------------
     # quantile
@@ -547,6 +622,62 @@ class LossComputer:
         w = weights.unsqueeze(1).expand(-1, q_pred.size(1), -1)
         return multi_quantile_loss(y2, q_pred, self.cfg.quantiles, mask=w)
 
+
+    # -------------------------------------------------------------------------
+    # dist (distribution)
+    # -------------------------------------------------------------------------
+    def _compute_dist(self, pred: Pred, y: Tensor, *, is_val: bool) -> Tensor:
+        """
+        Distribution loss (currently Normal NLL).
+
+        Expected pred:
+          - dict with keys:
+              * 'loc': [B,H]
+              * 'scale': [B,H] (positive) OR 'scale_raw' (unconstrained)
+
+        Weighting policy:
+          - If cfg.use_intermittent: multiply elementwise weights (normalized) to NLL map.
+          - If cfg.use_horizon_decay: multiply horizon weights (normalized) to NLL map.
+          - If is_val and cfg.val_use_weights=False: disable all weights.
+        """
+        y2 = ensure_2d(y)
+
+        loc, scale_like = extract_dist_params(pred)
+
+        # scale positivity / floor
+        if not bool(self.cfg.dist_scale_is_positive) and ("scale" not in pred):
+            # treat as raw if caller used scale_raw/sigma without guaranteeing positivity
+            scale = F.softplus(scale_like)
+        else:
+            scale = scale_like
+
+        scale = scale.clamp_min(float(self.cfg.dist_min_scale))
+
+        if str(self.cfg.dist_family).lower() != "normal":
+            raise ValueError(f"Unsupported dist_family={self.cfg.dist_family!r}. Only 'normal' is implemented.")
+
+        nll_map = normal_nll_elementwise(y2, loc, scale, eps=float(self.cfg.dist_eps))  # [B,H]
+
+        # disable weights during val if requested
+        if is_val and not bool(self.cfg.val_use_weights):
+            return nll_map.mean()
+
+        w = torch.ones_like(nll_map)
+
+        # intermittent weights
+        iw = self._maybe_intermittent_weights(y2)
+        if iw is not None:
+            w = w * iw
+
+        # horizon decay weights
+        hw = self._effective_horizon_weights(y2)
+        if hw is not None:
+            w = w * hw
+
+        # normalize weights for stable scale
+        w = w / (w.mean() + 1e-12)
+
+        return (w * nll_map).mean()
     # -------------------------------------------------------------------------
     # point base
     # -------------------------------------------------------------------------

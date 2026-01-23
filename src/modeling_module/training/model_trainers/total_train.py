@@ -34,6 +34,7 @@ from modeling_module.models.model_builder import (
     build_patch_mixer_quantile,
     build_patchTST_base,
     build_patchTST_quantile,
+    build_patchTST_dist,
 )
 from modeling_module.training.config import SpikeLossConfig, TrainingConfig, StageConfig
 from modeling_module.training.metrics import quantile_metrics
@@ -150,6 +151,7 @@ def _build_common_train_configs(
         warmup_epochs: Optional[int] = None,
         spike_epochs: Optional[int] = None,
         base_lr: Optional[float] = None,
+        point_loss_mode: str = 'point',
 ) -> Tuple[TrainingConfig, TrainingConfig, SpikeLossConfig, Tuple[StageConfig, StageConfig]]:
     """
     공통 학습 설정(Config) 및 2단계 스테이지(Warmup -> Spike) 구성.
@@ -228,7 +230,7 @@ def _build_common_train_configs(
         weight_decay=1e-3,
         t_max=40,
         patience=100,
-        loss_mode='point',
+        loss_mode=point_loss_mode,
         point_loss='huber',
         huber_delta=0.8,
         use_intermittent=True,
@@ -298,6 +300,7 @@ def _run_patchtst(
         ssl_loss_type: str = "mse",
         ssl_freeze_encoder_before_ft: bool = False,
         ssl_pretrained_ckpt_path: Optional[str] = None,
+        point_loss_mode: str = 'point',
 ):
     """
     PatchTST 모델 학습 파이프라인 실행.
@@ -384,7 +387,7 @@ def _run_patchtst(
         pt_pre_kwargs = dict(pt_kwargs)
         pt_pre_kwargs["d_future"] = 0
 
-        pt_pre_cfg = PatchTSTConfig(**pt_pre_kwargs, loss_mode="point", point_loss="mse")
+        pt_pre_cfg = PatchTSTConfig(**pt_pre_kwargs, loss_mode="dist", point_loss="mse")
         pre_model = PatchTSTPretrainModel(cfg=pt_pre_cfg)
 
         pre_train_cfg = point_train_cfg
@@ -416,8 +419,14 @@ def _run_patchtst(
     # ============================================================
     # 5) 지도학습 - Point Model (Finetuning)
     # ============================================================
-    pt_base_cfg = PatchTSTConfig(**pt_kwargs, loss_mode='point', point_loss='huber')
-    pt_base = build_patchTST_base(pt_base_cfg)
+    point_loss_mode = str(point_loss_mode).strip().lower()
+    if point_loss_mode == 'dist':
+        pt_base_cfg = PatchTSTConfig(**pt_kwargs, loss_mode='dist')
+        pt_base = build_patchTST_dist(pt_base_cfg)
+    else:
+        pt_base_cfg = PatchTSTConfig(**pt_kwargs, loss_mode='point', point_loss='huber')
+        pt_base = build_patchTST_base(pt_base_cfg)
+
 
     print(f'PatchTST Base ({freq.capitalize()})')
     if (use_ssl_mode == 'full') and (pretrain_ckpt_path is not None):
@@ -747,6 +756,7 @@ def _run_total_train_generic(
     warmup_epochs: Optional[int] = None,
     spike_epochs: Optional[int] = None,
     base_lr: Optional[float] = None,
+    point_loss_mode: str = 'point',
 
 
     # PatchTST 전용 Property
@@ -771,7 +781,8 @@ def _run_total_train_generic(
     # 공통 설정 및 스테이지 빌드
     point_train_cfg, quantile_train_cfg, spike_cfg, stages = _build_common_train_configs(
         device=device, lookback=lookback, horizon=horizon, freq=freq,
-        warmup_epochs= warmup_epochs, spike_epochs = spike_epochs, base_lr = base_lr
+        warmup_epochs= warmup_epochs, spike_epochs = spike_epochs, base_lr = base_lr,
+        point_loss_mode=point_loss_mode,
     )
 
     date_type_map = {"weekly": "W", "monthly": "M", "daily": "D", "hourly": "H"}
@@ -855,6 +866,7 @@ def _run_total_train_generic(
 
         if m == "patchtst":
             kwargs.update(dict(
+                point_loss_mode=point_loss_mode,
                 use_ssl_mode = use_ssl_mode,
                 ssl_pretrain_epochs=ssl_pretrain_epochs,
                 ssl_mask_ratio=ssl_mask_ratio,
@@ -880,6 +892,7 @@ def run_total_train_weekly(
         warmup_epochs = None,
         spike_epochs = None,
         base_lr = None,
+        point_loss_mode: str = 'point',
         save_dir=None,
         use_exogenous_mode: bool = False,
         models_to_run=None,
@@ -904,6 +917,7 @@ def run_total_train_weekly(
         warmup_epochs= warmup_epochs,
         spike_epochs = spike_epochs,
         base_lr = base_lr,
+        point_loss_mode=point_loss_mode,
         models_to_run=models_to_run,
         use_ssl_mode = use_ssl_mode,
         ssl_pretrain_epochs=ssl_pretrain_epochs,
@@ -925,6 +939,7 @@ def run_total_train_monthly(
         warmup_epochs = None,
         spike_epochs = None,
         base_lr = None,
+        point_loss_mode: str = 'point',
         save_dir=None,
         models_to_run=None,
         use_exogenous_mode: bool = False,
@@ -948,6 +963,7 @@ def run_total_train_monthly(
         warmup_epochs= warmup_epochs,
         spike_epochs = spike_epochs,
         base_lr = base_lr,
+        point_loss_mode=point_loss_mode,
         models_to_run=models_to_run,
         use_exogenous_mode=use_exogenous_mode,
         use_ssl_mode=use_ssl_mode,
@@ -969,6 +985,7 @@ def run_total_train_daily(
         warmup_epochs = None,
         spike_epochs = None,
         base_lr = None,
+        point_loss_mode: str = 'point',
         save_dir=None,
         models_to_run=None,
         use_exogenous_mode: bool = False,
@@ -992,6 +1009,7 @@ def run_total_train_daily(
         warmup_epochs= warmup_epochs,
         spike_epochs = spike_epochs,
         base_lr = base_lr,
+        point_loss_mode=point_loss_mode,
         models_to_run=models_to_run,
         use_exogenous_mode=use_exogenous_mode,
         use_ssl_mode = use_ssl_mode,
@@ -1013,6 +1031,7 @@ def run_total_train_hourly(
         warmup_epochs = None,
         spike_epochs = None,
         base_lr = None,
+        point_loss_mode: str = 'point',
         save_dir=None,
         models_to_run=None,
         use_exogenous_mode: bool = False,
@@ -1036,6 +1055,7 @@ def run_total_train_hourly(
         warmup_epochs= warmup_epochs,
         spike_epochs = spike_epochs,
         base_lr = base_lr,
+        point_loss_mode=point_loss_mode,
         models_to_run=models_to_run,
         use_exogenous_mode=use_exogenous_mode,
         use_ssl_mode = use_ssl_mode,

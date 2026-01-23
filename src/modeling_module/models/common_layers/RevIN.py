@@ -119,3 +119,32 @@ class RevIN(nn.Module):
             y = y + self.mean
 
         return y
+
+    @torch.no_grad()
+    def denorm_scale(self, s: torch.Tensor) -> torch.Tensor:
+        """
+        scale(표준편차) 전용 역정규화.
+        - mean/last(centering)은 절대 더하지 않음
+        - affine_bias도 scale엔 불필요
+        - affine_weight, std만 반영
+
+        입력 s: [B, H] 또는 [B, H, C]
+        출력: 동일 shape (원 스케일 단위)
+        """
+        y = s
+
+        # shape 맞추기: RevIN 내부 버퍼는 [1,1,C] 형태로 저장됨
+        # PatchTST는 C=1을 가정하는 경우가 많음
+        if y.dim() == 2:
+            y = y.unsqueeze(-1)  # [B,H,1]
+
+        # 1) affine 역스케일 (bias는 사용하지 않음)
+        if self.affine:
+            w = self.affine_weight.view(1, 1, -1)  # [1,1,C]
+            y = y / (w + self.eps)
+
+        # 2) std 역스케일
+        if self.use_std:
+            y = y * (self.std + self.eps)
+
+        return y.squeeze(-1) if s.dim() == 2 else y

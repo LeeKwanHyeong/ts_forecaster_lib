@@ -1,8 +1,11 @@
 import torch
 from torch import nn
+
+from modeling_module.models.PatchTST.common import get_activation_fn
 from modeling_module.models.PatchTST.common.configs import PatchTSTConfig
 from modeling_module.models.PatchTST.supervised.backbone import SupervisedBackbone
 from modeling_module.models.common_layers.RevIN import RevIN
+from typing import Optional, Tuple
 
 
 class PointHeadWithExo(nn.Module):
@@ -324,3 +327,132 @@ class PatchTSTQuantileModel(nn.Module):
                 raise RuntimeError(f"[PatchTSTQuantile] unexpected q_n.dim={q_n.dim()} shape={tuple(q_n.shape)}")
 
         return {"q": q_n}
+
+# =========================================================
+# Distribution Head / Model (Gaussian: loc + scale)
+# =========================================================
+
+class DistHeadWithExo(nn.Module):
+    """(y, exo) -> (loc, scale_raw)
+
+    - backbone 출력 h: (B, N, D) 또는 (B, D) 형태를 모두 지원 (현재 구현은 (B, N, D) 가정).
+    - exo_future: (B, H, E) (옵션)
+    - 반환:
+        loc: (B, H)
+        scale_raw: (B, H)  # 양수 제약은 LossComputer에서 처리(softplus/exp + min_scale)
+    """
+
+    def __init__(self, d_model: int, horizon: int, *, d_future: int = 0, act: str = "gelu"):
+        super().__init__()
+        self.horizon = int(horizon)
+        self.d_future = int(d_future)
+
+        # (B, N, D) -> (B, D)
+        self.pool = nn.AdaptiveAvgPool1d(1)
+
+        if self.d_future > 0:
+            self.exo_proj = nn.Linear(self.d_future, d_model)
+            self.fuse = nn.Sequential(
+                nn.Linear(d_model, d_model),
+                get_activation_fn(act),
+            )
+        else:
+            self.exo_proj = None
+            self.fuse = None
+
+        self.loc_head = nn.Linear(d_model, self.horizon)
+        self.scale_head = nn.Linear(d_model, self.horizon)
+
+    def forward(self,
+                h: torch.Tensor,
+                future_exo: Optional[torch.Tensor] = None,
+                ) -> Tuple[torch.Tensor, torch.Tensor]:
+
+        # h: (B, N, D) -> (B, D)
+        if h.dim() == 3:
+            B, N, D = h.shape
+            h_pool = self.pool(h.transpose(1, 2)).squeeze(-1)  # (B, D)
+        elif h.dim() == 2:
+            h_pool = h
+        else:
+            raise ValueError(f"DistHeadWithExo expects 2D/3D tensor, got {tuple(h.shape)}")
+
+        if (self.d_future > 0) and (future_exo is not None):
+            # future_exo: (B, H, E) -> (B, H, D) -> 평균 풀링 -> (B, D)
+            exo_h = self.exo_proj(future_exo).mean(dim=1)
+            h_pool = self.fuse(h_pool + exo_h)
+
+        loc = self.loc_head(h_pool)         # (B, H)
+        scale_raw = self.scale_head(h_pool) # (B, H)
+        return loc, scale_raw
+
+
+class PatchTSTDistModel(nn.Module):
+    """PatchTST Gaussian distribution head (loc + scale).
+
+    - forward 반환 pred는 dict:
+        {"loc": loc, "scale": scale_raw}
+      (scale 양수화/최소값 적용은 LossComputer(dist)에서 수행)
+    - RevIN 사용 시:
+        loc는 기존 point 모델과 동일하게 denorm.
+        scale은 mean/last는 무시하고 std 및 affine만 역변환하여 denorm.
+    """
+
+    def __init__(self, cfg: PatchTSTConfig, *, min_scale: float = 1e-3):
+        super().__init__()
+        self.cfg = cfg
+        self.min_scale = float(min_scale)
+
+        # Backbone
+        self.backbone = SupervisedBackbone(cfg)
+
+        # RevIN
+        self.use_revin = bool(cfg.use_revin)
+        self.revin_layer = RevIN(num_features=cfg.c_in)
+
+        # Head
+        self.head = DistHeadWithExo(
+            d_model=cfg.d_model,
+            horizon=cfg.horizon,
+            d_future=getattr(cfg, "d_future", 0),
+            act=getattr(cfg, "act", "gelu"),
+        )
+
+    def _denorm_scale(self, scale_n: torch.Tensor) -> torch.Tensor:
+        """RevIN denorm을 scale(표준편차)에 맞게 적용.
+        - (x_n - b)/w * std  (mean/last는 scale에 영향 없음)
+        """
+        if not self.use_revin:
+            return scale_n
+
+        s = scale_n.unsqueeze(-1)  # (B, H, 1)
+
+        # 1) affine 역변환 (있다면)
+        if getattr(self.revin_layer, "affine", False):
+            w = self.revin_layer.affine_weight.view(1, 1, -1)
+            # 안전: 0 division 방지
+            s = s / (w + 1e-8)
+
+        # 2) std 역변환 (있다면)
+        if getattr(self.revin_layer, "use_std", True):
+            std = self.revin_layer.std  # (B, 1, C)
+            s = s * std
+
+        return s.squeeze(-1)  # (B, H)
+
+    def forward(self, x: torch.Tensor, *, future_exo: Optional[torch.Tensor] = None) -> dict:
+        # x: (B, L, C)
+        x_n = self.revin_layer(x, "norm") if self.use_revin else x
+
+        h = self.backbone(x_n)  # (B, N, D) or (B, D) depending on backbone
+
+        loc_n, scale_raw_n = self.head(h, future_exo)
+
+        # loc denorm (point 모델과 동일)
+        if self.use_revin:
+            loc = self.revin_layer(loc_n.unsqueeze(-1), "denorm").squeeze(-1)  # (B, H)
+            scale_raw = self._denorm_scale(scale_raw_n)  # (B, H)
+        else:
+            loc, scale_raw = loc_n, scale_raw_n
+
+        return {"loc": loc, "scale_raw": scale_raw}

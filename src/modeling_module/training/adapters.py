@@ -207,6 +207,14 @@ class DefaultAdapter:
             part_ids=part_ids,
             mode=mode,
         )
+
+        if isinstance(out, dict):
+            return out
+
+            # ---- (선택) tuple로 (loc, scale_raw) 주는 모델도 지원 ----
+        if isinstance(out, (tuple, list)) and len(out) == 2 and torch.is_tensor(out[0]) and torch.is_tensor(out[1]):
+            return {"loc": out[0], "scale_raw": out[1]}
+
         return self._as_tensor(out)
 
     # -------------------- optional hooks --------------------
