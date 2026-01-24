@@ -7,7 +7,7 @@ from typing import Optional, Callable
 
 import torch
 import torch.nn as nn
-from modeling_module.models.PatchTST.supervised.PatchTST import PointHeadWithExo, QuantileHeadWithExo
+from modeling_module.models.PatchTST.supervised.PatchTST import PointHeadWithExo, QuantileHeadWithExo, DistHeadWithExo
 from torch.utils.data import DataLoader, WeightedRandomSampler
 
 from modeling_module.training.adapters import DefaultAdapter
@@ -77,14 +77,7 @@ def _pick_future_exo_cb(model, user_cb: Optional[Callable]) -> Optional[Callable
     return calendar_sin_cos if d_future > 0 else None
 
 
-def _ensure_patchtst_future_head(model, exo_dim: int):
-    """
-    추론된 외생 변수 차원(exo_dim)에 맞춰 PatchTST의 출력 헤드(Head) 동적 재구성.
-
-    기능:
-    - Config의 d_future 업데이트.
-    - 점 예측(PointHead) 또는 분위수 예측(QuantileHead) 여부에 따라 적절한 헤드 교체.
-    """
+def _ensure_patchtst_future_head(model, exo_dim: int, *, loss_mode: str = "point"):
     cfg = getattr(model, "cfg", None)
     if cfg is None:
         return model
@@ -94,8 +87,20 @@ def _ensure_patchtst_future_head(model, exo_dim: int):
 
     patch_num = compute_patch_num(cfg.lookback, cfg.patch_len, cfg.stride, cfg.padding_patch)
 
+    # ---- dist 우선 처리 ----
+    if loss_mode == "dist":
+        # 이미 dist head면 유지(단, d_future 변경 반영 필요 시 rebuild)
+        model.head = DistHeadWithExo(
+            d_model=cfg.d_model,
+            horizon=cfg.horizon,
+            d_future=int(cfg.d_future),
+            act=getattr(cfg, "act", "gelu"),
+        )
+        print(f"[train_patchtst] dist head rebuilt: d_future {current} -> {cfg.d_future}")
+        return model
+
+    # ---- 기존 quantile / point ----
     if getattr(model, "is_quantile", False):
-        # Quantile head에는 patch_num이 필요 없으면 제거(당신 코드 정의 기준)
         model.head = QuantileHeadWithExo(
             d_model=cfg.d_model,
             horizon=cfg.horizon,
@@ -177,8 +182,11 @@ def train_patchtst(
     # 실제 학습 입력 기준으로 head를 맞추는 것이 안전
     E = E_loader if E_loader > 0 else E_cb
 
+    loss_mode = str(getattr(train_cfg, "loss_mode", "point")).lower()
+    print(f'[train_patchtst] loss_mode: {loss_mode}')
     if use_exogenous_mode:
-        model = _ensure_patchtst_future_head(model, E)
+        print(f'[train_patchtst] exogenous_mode: {use_exogenous_mode}')
+        model = _ensure_patchtst_future_head(model, E, loss_mode = loss_mode)
 
     # loader가 fe_cont를 주는 경우, 자동 CB는 끄는 쪽이 안전 (중복/불일치 방지)
     if E_loader > 0 and future_exo_cb is not None:
