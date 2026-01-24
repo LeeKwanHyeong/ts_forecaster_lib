@@ -2,9 +2,9 @@ __all__ = ['BasePointLoss', 'MAE', 'MSE', 'RMSE', 'MAPE', 'SMAPE', 'MASE', 'relM
            'IQLoss', 'DistributionLoss', 'PMM', 'GMM', 'NBMM', 'HuberLoss', 'TukeyLoss', 'HuberQLoss', 'HuberMQLoss',
            'HuberIQLoss', 'Accuracy', 'sCRPS']
 
-
+from dataclasses import dataclass
 from functools import partial
-from typing import List, Optional, Tuple, Union
+from typing import List, Optional, Tuple, Union, Dict, Iterable
 
 import numpy as np
 import torch
@@ -27,6 +27,11 @@ from torch.distributions import (
 )
 
 
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+Tensor = torch.Tensor
 def _divide_no_nan(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     """
     Auxiliary funtion to handle divide by 0
@@ -41,67 +46,237 @@ def _weighted_mean(losses, weights):
     """
     return _divide_no_nan(torch.sum(losses * weights), torch.sum(weights))
 
+EPS = 1e-12
 
-class BasePointLoss(torch.nn.Module):
-    """Base class for point loss functions.
 
-    Args:
-        horizon_weight (Optional[torch.Tensor]): Tensor of size h, weight for each timestamp of the forecasting window. Defaults to None.
-        outputsize_multiplier (Optional[int]): Multiplier for the output size. Defaults to None.
-        output_names (Optional[List[str]]): Names of the outputs. Defaults to None.
+# =========================================================
+# Helpers
+# =========================================================
+def _as_float(x: Tensor) -> Tensor:
+    return x if x.is_floating_point() else x.float()
+
+
+def _to_bhn1(x: Tensor, *, name: str = "x") -> Tensor:
+    """
+    Normalize point tensor to [B,H,1].
+    Accepts:
+      - [B,H]
+      - [B,1,H]
+      - [B,H,1]
+    """
+    if not torch.is_tensor(x):
+        raise TypeError(f"{name} must be a Tensor, got {type(x)}")
+
+    x = _as_float(x)
+    if x.dim() == 2:          # [B,H]
+        return x.unsqueeze(-1)
+    if x.dim() == 3:
+        if x.size(1) == 1:    # [B,1,H] -> [B,H,1]
+            return x.squeeze(1).unsqueeze(-1)
+        if x.size(-1) == 1:   # [B,H,1]
+            return x
+    raise RuntimeError(f"{name} must be [B,H] or [B,1,H] or [B,H,1], got {tuple(x.shape)}")
+
+
+def _to_bh(x: Tensor, *, name: str = "x") -> Tensor:
+    """Normalize tensor to [B,H] for internal elementwise maps."""
+    x = _to_bhn1(x, name=name)
+    return x.squeeze(-1)
+
+
+def _weighted_mean(losses: Tensor, weights: Tensor) -> Tensor:
+    # losses, weights: same shape
+    num = (losses * weights).sum()
+    den = weights.sum().clamp_min(EPS)
+    return num / den
+
+
+def _pinball_elem(diff: Tensor, q: float) -> Tensor:
+    # diff = y - y_hat  (or target - pred)
+    q_t = torch.as_tensor(float(q), device=diff.device, dtype=diff.dtype)
+    return torch.maximum(q_t * diff, (q_t - 1.0) * diff)
+
+
+def _normalize_quantile_pred(
+    pred_q: Union[Tensor, Dict[str, Tensor]],
+    target: Tensor,
+    quantiles: Iterable[float],
+) -> Tuple[Tensor, Tensor, int, int]:
+    """
+    pred_q: (B,Q,H) or (B,H,Q) or {"q": ...}
+    target: (B,H) or (B,1,H) or (B,H,1)
+    return: pred_q_norm (B,Q,H), target_2d (B,H), Q, H
+    """
+    if isinstance(pred_q, dict):
+        if "q" not in pred_q:
+            raise RuntimeError(f"[quantile] dict pred has no 'q' key. keys={list(pred_q.keys())}")
+        pred_q = pred_q["q"]
+
+    target_2d = _to_bh(target, name="target")  # [B,H]
+    H = target_2d.shape[1]
+    qs = list(quantiles)
+    Q = len(qs)
+
+    pred_q = _as_float(pred_q).to(device=target_2d.device)
+
+    if pred_q.dim() != 3:
+        raise RuntimeError(f"[quantile] pred_q must be 3D, got {tuple(pred_q.shape)}")
+
+    # (B,H,Q) -> (B,Q,H)
+    if pred_q.shape[1] == H and pred_q.shape[2] == Q:
+        pred_q = pred_q.permute(0, 2, 1).contiguous()
+    # already (B,Q,H)
+    elif pred_q.shape[1] == Q and pred_q.shape[2] == H:
+        pass
+    else:
+        raise RuntimeError(
+            f"[quantile] pred_q shape={tuple(pred_q.shape)} not compatible with target H={H}, Q={Q}. "
+            f"Expected (B,Q,H) or (B,H,Q)."
+        )
+
+    return pred_q, target_2d, Q, H
+
+
+# =========================================================
+# Intermittent / Horizon weights (from custom_loss_utils.py)
+# =========================================================
+def _zero_runlength(target_bh: Tensor) -> Tensor:
+    """
+    target_bh: [B,H]
+    return run length of consecutive zeros ending at t (inclusive). [B,H]
+    """
+    target_bh = _as_float(target_bh)
+    B, H = target_bh.shape
+    run = torch.zeros_like(target_bh)
+    is_zero = (target_bh == 0).to(target_bh.dtype)
+    for t in range(H):
+        if t == 0:
+            run[:, t] = is_zero[:, t]
+        else:
+            run[:, t] = torch.where(is_zero[:, t] > 0, run[:, t - 1] + 1.0, torch.zeros_like(run[:, t - 1]))
+    return run
+
+
+def intermittent_weights(
+    target: Tensor,
+    alpha_zero: float = 1.2,
+    alpha_pos: float = 1.0,
+    gamma_run: float = 0.6,
+    cap: Optional[float] = None,
+) -> Tensor:
+    """
+    기본형 간헐 가중
+    w = α_zero·I[y=0]·(1 + γ·runlen_norm) + α_pos·I[y>0]
+    """
+    y = _to_bh(target, name="target")  # [B,H]
+    B, H = y.shape
+    run = _zero_runlength(y)
+    norm_run = run / max(1, H)
+
+    is_zero = (y == 0).to(y.dtype)
+    is_pos = 1.0 - is_zero
+
+    w_zero = float(alpha_zero) * is_zero * (1.0 + float(gamma_run) * norm_run)
+    w_pos = float(alpha_pos) * is_pos
+
+    w = w_zero + w_pos
+    if cap is not None:
+        w = w.clamp(max=float(cap))
+    return w  # [B,H]
+
+
+def intermittent_weights_balanced(
+    target: Tensor,
+    alpha_zero: float = 1.2,
+    alpha_pos: float = 1.0,
+    gamma_run: float = 0.6,
+    clip_run: float = 0.5,
+    eps: float = 1e-8,
+) -> Tensor:
+    """
+    balanced 버전: zero/pos 각 집합 평균이 1이 되도록 정규화.
+    연속 0-run 영향은 clip_run 이하로 제한.
+    """
+    y = _to_bh(target, name="target")  # [B,H]
+    B, H = y.shape
+    run = _zero_runlength(y)
+    norm_run = (run / max(1, H)).clamp(max=float(clip_run))
+
+    is_zero = (y == 0).to(y.dtype)
+    is_pos = 1.0 - is_zero
+
+    w_zero = float(alpha_zero) * is_zero * (1.0 + float(gamma_run) * norm_run)
+    w_pos = float(alpha_pos) * is_pos
+
+    m_zero = (w_zero.sum() / (is_zero.sum() + eps)).clamp_min(eps)
+    m_pos = (w_pos.sum() / (is_pos.sum() + eps)).clamp_min(eps)
+
+    w = (w_zero / m_zero) + (w_pos / m_pos)
+    return w  # [B,H]
+
+
+def horizon_decay_weights(target_like: Tensor, tau_h: float = 24.0) -> Tensor:
+    """
+    exp(-t/tau_h)
+    target_like: (H,) or (B,H)
+    """
+    x = _as_float(target_like)
+    if x.dim() == 1:
+        H = x.size(0)
+        h = torch.arange(H, device=x.device, dtype=x.dtype)
+        return torch.exp(-h / max(float(tau_h), 1.0))  # [H]
+    if x.dim() == 2:
+        B, H = x.shape
+        h = torch.arange(H, device=x.device, dtype=x.dtype)
+        w = torch.exp(-h / max(float(tau_h), 1.0))  # [H]
+        return w.unsqueeze(0).expand(B, H)          # [B,H]
+    raise ValueError("target_like must be (H,) or (B,H)")
+
+
+def newsvendor_q_star(Cu: float, Co: float) -> float:
+    return float(Cu) / max(float(Cu) + float(Co), EPS)
+
+class BasePointLoss(nn.Module):
+    """
+    Base class for point loss functions.
+
+    - 내부 shape는 [B,H,1] 기준으로 처리하는 것을 권장.
+    - mask는 [B,H,1] 또는 [B,H] 모두 허용(내부에서 [B,H,1]로 정규화)
     """
 
-    def __init__(
-        self, horizon_weight=None, outputsize_multiplier=None, output_names=None
-    ):
-        super(BasePointLoss, self).__init__()
+    def __init__(self, horizon_weight=None, outputsize_multiplier=None, output_names=None):
+        super().__init__()
         if horizon_weight is not None:
-            horizon_weight = torch.Tensor(horizon_weight.flatten())
+            horizon_weight = torch.Tensor(torch.as_tensor(horizon_weight).flatten())
         self.horizon_weight = horizon_weight
         self.outputsize_multiplier = outputsize_multiplier
         self.output_names = output_names
         self.is_distribution_output = False
 
-    def domain_map(self, y_hat: torch.Tensor):
-        """Domain mapping for predicted values.
-
-        Args:
-            y_hat (torch.Tensor): Predicted values tensor.
-                - Univariate: [B, H, 1]
-                - Multivariate: [B, H, N]
-
-        Returns:
-            torch.Tensor: Mapped values tensor with shape [B, H, N].
-        """
+    def domain_map(self, y_hat: Tensor) -> Tensor:
         return y_hat
 
-    def _compute_weights(self, y, mask):
-        """Compute final weights for each datapoint based on all weights and masks.
-
-        Set horizon_weight to a ones[H] tensor if not set.
-        If set, check that it has the same length as the horizon in x.
-
-        Args:
-            y (torch.Tensor): Target values tensor.
-            mask (torch.Tensor, optional): Mask tensor specifying datapoints to consider.
-
-        Returns:
-            torch.Tensor: Final weights tensor for each datapoint.
+    def _compute_weights(self, y: Tensor, mask: Optional[Tensor]) -> Tensor:
+        """
+        y: [B,H,1]
+        mask: [B,H,1] or [B,H] or None
+        return: [B,H,1]
         """
         if mask is None:
-            mask = torch.ones_like(y)
+            mask3 = torch.ones_like(y)
+        else:
+            mask3 = _to_bhn1(mask, name="mask").to(device=y.device, dtype=y.dtype)
 
         if self.horizon_weight is None:
-            weights = torch.ones_like(mask)
+            weights = torch.ones_like(mask3)
         else:
-            assert mask.shape[1] == len(
-                self.horizon_weight
-            ), "horizon_weight must have same length as Y"
-            weights = self.horizon_weight.clone()
-            weights = weights[None, :, None].to(mask.device)
-            weights = torch.ones_like(mask, device=mask.device) * weights
+            H = y.shape[1]
+            assert H == len(self.horizon_weight), "horizon_weight must have same length as horizon(H)"
+            hw = self.horizon_weight.clone().to(device=y.device, dtype=y.dtype)  # [H]
+            hw = hw.view(1, H, 1)  # [1,H,1]
+            weights = torch.ones_like(mask3) * hw
 
-        return weights * mask
+        return weights * mask3
 
 
 class MAE(BasePointLoss):
@@ -501,6 +676,157 @@ class QuantileLoss(BasePointLoss):
         return _weighted_mean(losses=losses, weights=weights)
 
 
+class Huber(BasePointLoss):
+    def __init__(self, delta: float = 1.0, horizon_weight=None):
+        super().__init__(horizon_weight=horizon_weight, outputsize_multiplier=1, output_names=[""])
+        self.delta = float(delta)
+
+    def forward(self, y: Tensor, y_hat: Tensor, mask: Optional[Tensor] = None, y_insample: Optional[Tensor] = None) -> Tensor:
+        y3 = _to_bhn1(y, name="y")
+        yh3 = _to_bhn1(y_hat, name="y_hat")
+        losses = F.huber_loss(yh3, y3, delta=self.delta, reduction="none")
+        weights = self._compute_weights(y=y3, mask=mask)
+        return _weighted_mean(losses=losses, weights=weights)
+
+
+class Pinball(BasePointLoss):
+    """
+    Single-quantile pinball loss for point-style prediction.
+    (주의) y_hat는 "단일 분위수" 예측(= point head)일 때 사용.
+    """
+    def __init__(self, q: float = 0.5, horizon_weight=None):
+        super().__init__(horizon_weight=horizon_weight, outputsize_multiplier=1, output_names=[""])
+        self.q = float(q)
+
+    def forward(self, y: Tensor, y_hat: Tensor, mask: Optional[Tensor] = None, y_insample: Optional[Tensor] = None) -> Tensor:
+        y3 = _to_bhn1(y, name="y")
+        yh3 = _to_bhn1(y_hat, name="y_hat")
+        diff = y3 - yh3
+        losses = _pinball_elem(diff, self.q)
+        weights = self._compute_weights(y=y3, mask=mask)
+        return _weighted_mean(losses=losses, weights=weights)
+
+
+class AsymmetricHuber(BasePointLoss):
+    """
+    losses.py의 huber_asymmetric를 클래스화.
+    err = pred - y 기준, err>0(과대예측)에 up_w, err<=0에 down_w.
+    """
+    def __init__(self, delta: float = 2.0, up_w: float = 2.0, down_w: float = 1.0, horizon_weight=None):
+        super().__init__(horizon_weight=horizon_weight, outputsize_multiplier=1, output_names=[""])
+        self.delta = float(delta)
+        self.up_w = float(up_w)
+        self.down_w = float(down_w)
+
+    def forward(self, y: Tensor, y_hat: Tensor, mask: Optional[Tensor] = None, y_insample: Optional[Tensor] = None) -> Tensor:
+        y3 = _to_bhn1(y, name="y")
+        yh3 = _to_bhn1(y_hat, name="y_hat")
+        err = yh3 - y3
+        hub = F.huber_loss(yh3, y3, delta=self.delta, reduction="none")
+        asym = torch.where(err > 0, torch.full_like(hub, self.up_w), torch.full_like(hub, self.down_w))
+        losses = asym * hub
+        weights = self._compute_weights(y=y3, mask=mask)
+        return _weighted_mean(losses=losses, weights=weights)
+
+
+class AsymmetricMSE(BasePointLoss):
+    """
+    losses.py의 asymmetric_mse를 클래스화.
+    err = pred - y 기준, err>0에 up_w, err<=0에 down_w.
+    """
+    def __init__(self, up_w: float = 2.0, down_w: float = 1.0, horizon_weight=None):
+        super().__init__(horizon_weight=horizon_weight, outputsize_multiplier=1, output_names=[""])
+        self.up_w = float(up_w)
+        self.down_w = float(down_w)
+
+    def forward(self, y: Tensor, y_hat: Tensor, mask: Optional[Tensor] = None, y_insample: Optional[Tensor] = None) -> Tensor:
+        y3 = _to_bhn1(y, name="y")
+        yh3 = _to_bhn1(y_hat, name="y_hat")
+        err = yh3 - y3
+        w_asym = torch.where(err > 0, torch.full_like(err, self.up_w), torch.full_like(err, self.down_w))
+        losses = w_asym * (err ** 2)
+        weights = self._compute_weights(y=y3, mask=mask)
+        return _weighted_mean(losses=losses, weights=weights)
+
+
+# =========================================================
+# Quantile losses (multi-quantile pinball)
+# =========================================================
+class MultiQuantilePinball(nn.Module):
+    """
+    멀티-분위수 pinball.
+    - pred_q: (B,Q,H) or (B,H,Q) or {"q": ...}
+    - target: (B,H) or (B,1,H) or (B,H,1)
+    - mask:  (B,H) or (B,H,1)  (옵션)
+    - weights: (B,H)  (옵션)  -> horizon/간헐/스파이크 등 외부에서 합성 후 전달 가능
+
+    reduction:
+      - "mean": (각 quantile mean) 평균
+      - "weighted": weights로 [B,H] 가중평균(각 quantile마다 동일 weights 적용)
+      - "masked_lower": q<0.5 에만 weights 적용 (custom_loss_utils.pinball_loss_weighted_masked 대응)
+    """
+    def __init__(self, quantiles: Tuple[float, ...] = (0.1, 0.5, 0.9), reduction: str = "mean"):
+        super().__init__()
+        self.quantiles = tuple(float(q) for q in quantiles)
+        self.reduction = str(reduction)
+
+    def forward(
+        self,
+        target: Tensor,
+        pred_q: Union[Tensor, Dict[str, Tensor]],
+        *,
+        mask: Optional[Tensor] = None,
+        weights: Optional[Tensor] = None,
+    ) -> Tensor:
+        pred_q, y, Q, H = _normalize_quantile_pred(pred_q, target, self.quantiles)  # (B,Q,H), (B,H)
+        B = y.size(0)
+
+        # base mask -> [B,H]
+        if mask is not None:
+            m = _to_bh(mask, name="mask").to(device=y.device, dtype=y.dtype)
+        else:
+            m = torch.ones_like(y)
+
+        # external weights -> [B,H]
+        if weights is not None:
+            w = _as_float(weights).to(device=y.device)
+            if w.dim() != 2 or w.shape != y.shape:
+                raise RuntimeError(f"weights must be [B,H]={tuple(y.shape)}, got {tuple(w.shape)}")
+            # mask 반영
+            w = w * m
+        else:
+            w = None
+
+        diff = y.unsqueeze(1) - pred_q  # (B,Q,H)
+
+        losses_q = []
+        for i, q in enumerate(self.quantiles):
+            e = _pinball_elem(diff[:, i], float(q))  # (B,H)
+
+            if self.reduction == "mean":
+                # mask만 적용한 mean
+                losses_q.append(_weighted_mean(e, m))
+                continue
+
+            if self.reduction == "weighted":
+                if w is None:
+                    losses_q.append(_weighted_mean(e, m))
+                else:
+                    losses_q.append(_weighted_mean(e, w))
+                continue
+
+            if self.reduction == "masked_lower":
+                # q<0.5 에만 weights 적용, 그 외는 mask mean
+                if (w is not None) and (q < 0.5):
+                    losses_q.append(_weighted_mean(e, w))
+                else:
+                    losses_q.append(_weighted_mean(e, m))
+                continue
+
+            raise ValueError("reduction must be one of ['mean', 'weighted', 'masked_lower']")
+
+        return sum(losses_q) / max(1, len(losses_q))
+
 def level_to_outputs(level):
     qs = sum([[50 - l / 2, 50 + l / 2] for l in level], [])
     output_names = sum([[f"-lo-{l}", f"-hi-{l}"] for l in level], [])
@@ -527,6 +853,7 @@ def quantiles_to_outputs(quantiles):
         else:
             output_names.append("-median")
     return quantiles, output_names
+
 
 
 class MQLoss(BasePointLoss):
@@ -788,6 +1115,208 @@ class IQLoss(QuantileLoss):
         y_hat = emb_outputs.squeeze(-1)
 
         return y_hat
+
+# =========================================================
+# Dist losses (Normal NLL)
+# =========================================================
+class NormalNLL(nn.Module):
+    """
+    Normal negative log-likelihood.
+    pred:
+      - dict {"loc": [B,H] or [B,H,1], "scale": [B,H] or [B,H,1]}
+      - or {"loc": ..., "scale_raw": ...} (scale_raw를 softplus로 양수화)
+    target:
+      - [B,H] / [B,1,H] / [B,H,1]
+    """
+    def __init__(
+        self,
+        *,
+        from_scale_raw: bool = True,    # scale_raw면 softplus 적용
+        min_scale: float = 1e-3,
+        eps: float = 1e-8,
+    ):
+        super().__init__()
+        self.from_scale_raw = bool(from_scale_raw)
+        self.min_scale = float(min_scale)
+        self.eps = float(eps)
+
+    def forward(
+        self,
+        target: Tensor,
+        pred: Dict[str, Tensor],
+        *,
+        mask: Optional[Tensor] = None,
+        weights: Optional[Tensor] = None,
+    ) -> Tensor:
+        if not isinstance(pred, dict):
+            raise TypeError(f"NormalNLL expects pred dict, got {type(pred)}")
+
+        if "loc" not in pred:
+            raise KeyError("pred must have 'loc'")
+        loc = _to_bh(pred["loc"], name="loc")
+
+        # scale 가져오기
+        if "scale" in pred:
+            scale = _to_bh(pred["scale"], name="scale")
+        elif "scale_raw" in pred:
+            sr = _to_bh(pred["scale_raw"], name="scale_raw")
+            scale = F.softplus(sr) if self.from_scale_raw else sr
+        elif "sigma" in pred:
+            scale = _to_bh(pred["sigma"], name="sigma")
+        else:
+            raise KeyError("pred must have one of ['scale', 'scale_raw', 'sigma']")
+
+        y = _to_bh(target, name="target").to(device=loc.device, dtype=loc.dtype)
+
+        scale = scale.clamp_min(self.min_scale)
+
+        # elementwise nll [B,H]
+        # nll = 0.5*log(2π) + log(scale) + 0.5*((y-loc)/scale)^2
+        z = (y - loc) / (scale + self.eps)
+        nll = 0.5 * torch.log(torch.tensor(2.0 * torch.pi, device=y.device, dtype=y.dtype)) + torch.log(scale + self.eps) + 0.5 * (z ** 2)
+
+        # mask [B,H]
+        if mask is not None:
+            m = _to_bh(mask, name="mask").to(device=y.device, dtype=y.dtype)
+        else:
+            m = torch.ones_like(y)
+
+        if weights is not None:
+            w = _as_float(weights).to(device=y.device, dtype=y.dtype)
+            if w.dim() != 2 or w.shape != y.shape:
+                raise RuntimeError(f"weights must be [B,H]={tuple(y.shape)}, got {tuple(w.shape)}")
+            w = w * m
+            return _weighted_mean(nll, w)
+
+        return _weighted_mean(nll, m)
+
+
+# =========================================================
+# Convenience wrappers: intermittent + horizon decay
+# =========================================================
+@dataclass
+class IntermittentCfg:
+    alpha_zero: float = 1.2
+    alpha_pos: float = 1.0
+    gamma_run: float = 0.6
+    cap: Optional[float] = None
+    balanced: bool = True
+    clip_run: float = 0.5
+
+
+@dataclass
+class HorizonDecayCfg:
+    enabled: bool = False
+    tau_h: float = 24.0
+
+
+def build_intermittent_weight(target_bh: Tensor, cfg: IntermittentCfg) -> Tensor:
+    if cfg.balanced:
+        return intermittent_weights_balanced(
+            target_bh,
+            alpha_zero=cfg.alpha_zero,
+            alpha_pos=cfg.alpha_pos,
+            gamma_run=cfg.gamma_run,
+            clip_run=cfg.clip_run,
+        )
+    return intermittent_weights(
+        target_bh,
+        alpha_zero=cfg.alpha_zero,
+        alpha_pos=cfg.alpha_pos,
+        gamma_run=cfg.gamma_run,
+        cap=cfg.cap,
+    )
+
+
+def compose_weights(
+    target: Tensor,
+    *,
+    mask: Optional[Tensor] = None,
+    intermittent: Optional[IntermittentCfg] = None,
+    horizon_decay: Optional[HorizonDecayCfg] = None,
+    normalize_mean: bool = True,
+) -> Tensor:
+    """
+    최종 weights [B,H] 생성.
+    - mask 포함
+    - intermittent 포함
+    - horizon decay 포함
+    - normalize_mean=True면 평균 1로 정규화(스케일 안정화)
+    """
+    y = _to_bh(target, name="target")
+    B, H = y.shape
+
+    w = torch.ones_like(y)
+
+    if mask is not None:
+        m = _to_bh(mask, name="mask").to(device=y.device, dtype=y.dtype)
+        w = w * m
+
+    if intermittent is not None:
+        iw = build_intermittent_weight(y, intermittent).to(device=y.device, dtype=y.dtype)
+        w = w * iw
+
+    if horizon_decay is not None and horizon_decay.enabled:
+        hw = horizon_decay_weights(y, tau_h=horizon_decay.tau_h).to(device=y.device, dtype=y.dtype)
+        w = w * hw
+
+    if normalize_mean:
+        w = w / (w.mean().clamp_min(EPS))
+
+    return w
+
+
+# =========================================================
+# Ready-made "project equivalents"
+# =========================================================
+class ProjectQuantileLoss(nn.Module):
+    """
+    losses.py의 quantile 손실(간헐 + 호라이즌)과 같은 용도.
+    """
+    def __init__(
+        self,
+        quantiles: Tuple[float, ...] = (0.1, 0.5, 0.9),
+        *,
+        intermittent: Optional[IntermittentCfg] = None,
+        horizon_decay: Optional[HorizonDecayCfg] = None,
+        masked_lower: bool = False,
+    ):
+        super().__init__()
+        self.q_loss = MultiQuantilePinball(
+            quantiles=quantiles,
+            reduction=("masked_lower" if masked_lower else "weighted"),
+        )
+        self.intermittent = intermittent
+        self.horizon_decay = horizon_decay
+
+    def forward(self, target: Tensor, pred_q: Union[Tensor, Dict[str, Tensor]], *, mask: Optional[Tensor] = None) -> Tensor:
+        y = _to_bh(target, name="target")
+        w = compose_weights(y, mask=mask, intermittent=self.intermittent, horizon_decay=self.horizon_decay)
+        return self.q_loss(target=y, pred_q=pred_q, mask=mask, weights=w)
+
+
+class ProjectDistLoss(nn.Module):
+    """
+    losses.py의 dist(normal) 손실(간헐 + 호라이즌)과 같은 용도.
+    """
+    def __init__(
+        self,
+        *,
+        intermittent: Optional[IntermittentCfg] = None,
+        horizon_decay: Optional[HorizonDecayCfg] = None,
+        from_scale_raw: bool = True,
+        min_scale: float = 1e-3,
+        eps: float = 1e-8,
+    ):
+        super().__init__()
+        self.nll = NormalNLL(from_scale_raw=from_scale_raw, min_scale=min_scale, eps=eps)
+        self.intermittent = intermittent
+        self.horizon_decay = horizon_decay
+
+    def forward(self, target: Tensor, pred: Dict[str, Tensor], *, mask: Optional[Tensor] = None) -> Tensor:
+        y = _to_bh(target, name="target")
+        w = compose_weights(y, mask=mask, intermittent=self.intermittent, horizon_decay=self.horizon_decay)
+        return self.nll(target=y, pred=pred, mask=mask, weights=w)
 
 
 def weighted_average(

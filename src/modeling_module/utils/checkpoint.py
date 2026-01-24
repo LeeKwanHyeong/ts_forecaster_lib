@@ -66,29 +66,135 @@ _REBUILDERS_BY_CLS = {
 #      - 신규(본 파일 save_model): {"state_dict","cfg","cfg_state","cfg_cls"}
 #      - 구버전: {"model_state","config"} 또는 {"state_dict","cfg_state","cfg_cls"} 등
 # ------------------------------------------------------------------
+# def save_model(model, cfg, path: str):
+#     """
+#     단일 모델 저장.
+#
+#     ckpt 포맷:
+#       {
+#         "cfg":        cfg 객체 (pickle),
+#         "cfg_state":  dict(asdict(cfg)) or cfg.__dict__,
+#         "cfg_cls":    cfg 클래스 이름(str),
+#         "state_dict": model.state_dict(),
+#       }
+#     """
+#     if is_dataclass(cfg):
+#         cfg_state = asdict(cfg)
+#     else:
+#         cfg_state = getattr(cfg, "__dict__", None)
+#
+#     ckpt = {
+#         "cfg": cfg,
+#         "cfg_state": cfg_state,
+#         "cfg_cls": type(cfg).__name__,
+#         "state_dict": model.state_dict(),
+#     }
+#     os.makedirs(os.path.dirname(path), exist_ok=True)
+#     torch.save(ckpt, path)
+#     print(f"[save] model saved to: {path}")
+
+
+# -----------------------------
+# helpers: primitive sanitize
+# -----------------------------
+_PRIMITIVE_TYPES = (str, int, float, bool, type(None))
+
+def _is_primitive(x: Any) -> bool:
+    return isinstance(x, _PRIMITIVE_TYPES)
+
+def _sanitize(obj: Any, *, max_depth: int = 8, _depth: int = 0) -> Any:
+    """
+    cfg_state 안에 들어있는 값들을 'pickle-free' 하게 정리.
+    - dict/list/tuple 재귀 처리
+    - nn.Module / 함수 / 클래스 / 기타 객체는 문자열로 강등 또는 제거
+    """
+    if _depth >= max_depth:
+        return str(obj)
+
+    if _is_primitive(obj):
+        return obj
+
+    # torch tensors -> list (원하면 제거로 바꿔도 됨)
+    if torch.is_tensor(obj):
+        try:
+            return obj.detach().cpu().tolist()
+        except Exception:
+            return str(obj)
+
+    # dict
+    if isinstance(obj, dict):
+        out = {}
+        for k, v in obj.items():
+            # key는 문자열화
+            ks = k if isinstance(k, str) else str(k)
+            out[ks] = _sanitize(v, max_depth=max_depth, _depth=_depth + 1)
+        return out
+
+    # list/tuple
+    if isinstance(obj, (list, tuple)):
+        return [_sanitize(v, max_depth=max_depth, _depth=_depth + 1) for v in obj]
+
+    # set
+    if isinstance(obj, set):
+        return [_sanitize(v, max_depth=max_depth, _depth=_depth + 1) for v in sorted(list(obj), key=str)]
+
+    # nn.Module 등: 클래스명으로만
+    if isinstance(obj, torch.nn.Module):
+        return {"__type__": obj.__class__.__name__}
+
+    # callable / function / class
+    if callable(obj):
+        name = getattr(obj, "__name__", obj.__class__.__name__)
+        mod = getattr(obj, "__module__", "")
+        return {"__callable__": f"{mod}.{name}".strip(".")}
+
+    # fallback: 문자열로 강등
+    return str(obj)
+
+
+def _drop_or_stringify_loss(cfg_state: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    cfg_state에 loss/criterion 같은 필드가 있으면 pickle 이슈 방지를 위해 문자열화.
+    (원하면 완전히 drop 해도 됨)
+    """
+    for k in ("loss", "loss_fn", "criterion", "loss_point", "loss_quantile"):
+        if k in cfg_state and cfg_state[k] is not None:
+            v = cfg_state[k]
+            # dict 형태로 들어온 경우도 있으니 방어
+            if isinstance(v, dict):
+                cfg_state[k] = v.get("__type__", "loss")
+            else:
+                cfg_state[k] = getattr(v, "__class__", type(v)).__name__
+    return cfg_state
+
+
 def save_model(model, cfg, path: str):
     """
-    단일 모델 저장.
-
-    ckpt 포맷:
-      {
-        "cfg":        cfg 객체 (pickle),
-        "cfg_state":  dict(asdict(cfg)) or cfg.__dict__,
-        "cfg_cls":    cfg 클래스 이름(str),
-        "state_dict": model.state_dict(),
-      }
+    안전한 단일 모델 저장.
+    - cfg 객체를 그대로 저장하지 않음 (pickle 차단)
+    - cfg_state는 primitive-only로 sanitize
     """
     if is_dataclass(cfg):
-        cfg_state = asdict(cfg)
+        raw = asdict(cfg)
     else:
-        cfg_state = getattr(cfg, "__dict__", None)
+        raw = dict(getattr(cfg, "__dict__", {}) or {})
+
+    # 1) loss 등 pickle 위험 필드 문자열화
+    raw = _drop_or_stringify_loss(raw)
+
+    # 2) 전체 sanitize (dict/list 재귀)
+    cfg_state = _sanitize(raw)
 
     ckpt = {
-        "cfg": cfg,
-        "cfg_state": cfg_state,
-        "cfg_cls": type(cfg).__name__,
-        "state_dict": model.state_dict(),
+        "cfg_state": cfg_state,                 # primitive-only
+        "cfg_cls": type(cfg).__name__,          # class name only
+        "model_class": model.__class__.__name__,# optional but useful
+        "state_dict": model.state_dict(),       # weights only
+        "meta": {
+            "torch_version": torch.__version__,
+        }
     }
+
     os.makedirs(os.path.dirname(path), exist_ok=True)
     torch.save(ckpt, path)
     print(f"[save] model saved to: {path}")
@@ -285,7 +391,7 @@ def load_model_dict(
             continue
 
         print(f"[load] {builder_key} ← {path}")
-        ckpt = torch.load(path, map_location="cpu")
+        ckpt = torch.load(path, map_location="cpu", weights_only=False)
 
         # 1) 어떤 builder를 쓸지 결정 (회사식 ckpt는 model_class가 있을 수 있음)
         ckpt_model_class = ckpt.get("model_class", None)

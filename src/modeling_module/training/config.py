@@ -83,6 +83,12 @@ class TrainingConfig:
     max_grad_norm: float = 30.0  # 그라디언트 클리핑 임계값
     amp_device: str = 'cuda'  # AMP 수행 장치 유형
 
+    # --- New unified loss object (preferred) ---
+    # Any torch.nn.Module that can be called as loss(y, y_hat, mask=..., y_insample=...)
+    loss: Any = None
+
+    # --- Legacy loss routing fields (kept for backward compatibility) ---
+
     # ------------Loss (손실 함수 설정)-------------
     loss_mode: Literal['auto', 'point', 'quantile', 'dist'] = 'auto'  # 손실 계산 모드 선택
     point_loss: Literal['mae', 'mse', 'huber', 'pinball', 'huber_asym', None] = 'mse'  # 점 예측용 손실 함수
@@ -107,19 +113,6 @@ class TrainingConfig:
     # If the model already outputs positive scale under key 'scale', set True.
     # If the model outputs raw/unconstrained scale under key 'scale_raw', set False.
     dist_scale_is_positive: bool = True
-
-    # (Optional) Custom loss override.
-    # - If provided, LossComputer will prefer this module over built-in point/quantile/dist losses.
-    # - Typical usage: `DistributionLoss(distribution="StudentT", level=[80, 90])`.
-    # - IMPORTANT: If you pass a DistributionLoss, the model output must match its expected parameter layout:
-    #     y_hat: (B, H, P) where P == loss.outputsize_multiplier, in the same order as loss.param_names.
-    custom_loss: Optional[Any] = None
-
-    # How the model provides distribution parameters when loss_mode='dist'.
-    # - 'auto': infer from `pred` type (Tensor -> (B,H,P), Dict -> key-based packing).
-    # - 'tensor': pred is a Tensor (B,H,P) (or (B,P,H) which will be permuted).
-    # - 'dict': pred is a dict with keys matching distribution param names (e.g., df/loc/scale).
-    dist_pred_format: Literal['auto', 'tensor', 'dict'] = 'auto'
 
 
     # ------------Intermittent/Horizon Weight (가중치 보정)-------------

@@ -182,7 +182,19 @@ def train_patchtst(
     # 실제 학습 입력 기준으로 head를 맞추는 것이 안전
     E = E_loader if E_loader > 0 else E_cb
 
-    loss_mode = str(getattr(train_cfg, "loss_mode", "point")).lower()
+    loss_mode = str(getattr(train_cfg, "loss_mode", "auto")).lower()
+
+    # --- ADD: auto 해석 ---
+    if loss_mode in ("auto", "infer"):
+        loss_obj = getattr(train_cfg, "loss", None)
+        loss_name = getattr(loss_obj, "__class__", type("x", (object,), {})).__name__
+
+        if (loss_name == "DistributionLoss") or bool(getattr(loss_obj, "is_distribution_output", False)):
+            loss_mode = "dist"
+        elif loss_name in ("MQLoss", "QuantileLoss") or bool(getattr(model, "is_quantile", False)):
+            loss_mode = "quantile"
+        else:
+            loss_mode = "point"
     print(f'[train_patchtst] loss_mode: {loss_mode}')
     if use_exogenous_mode:
         print(f'[train_patchtst] exogenous_mode: {use_exogenous_mode}')
@@ -202,7 +214,7 @@ def train_patchtst(
     elif amp_dtype_str in ("fp16", "float16", "half"):
         amp_dtype = torch.float16
     elif amp_dtype_str in ("fp32", "float32"):
-        amp_dtype = torch.float32
+        amp_dtype = torch.float32f
     else:
         amp_dtype = torch.bfloat16
 

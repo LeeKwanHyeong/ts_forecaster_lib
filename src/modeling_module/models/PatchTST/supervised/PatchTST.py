@@ -6,7 +6,7 @@ from modeling_module.models.PatchTST.common.configs import PatchTSTConfig
 from modeling_module.models.PatchTST.supervised.backbone import SupervisedBackbone
 from modeling_module.models.common_layers.RevIN import RevIN
 from typing import Optional, Tuple
-
+import torch.nn.functional as F
 
 class PointHeadWithExo(nn.Module):
     """
@@ -398,9 +398,30 @@ class PatchTSTDistModel(nn.Module):
         scale은 mean/last는 무시하고 std 및 affine만 역변환하여 denorm.
     """
 
+    def _denorm_scale(self, scale: torch.Tensor) -> torch.Tensor:
+        """RevIN denorm for scale (std-like). scale must be positive."""
+        if not self.use_revin:
+            return scale
+
+        s = scale.unsqueeze(-1)  # (B, H, 1)
+
+        # affine 역변환: std는 |w|로 나누는 편이 안전
+        if getattr(self.revin_layer, "affine", False):
+            w = self.revin_layer.affine_weight.view(1, 1, -1)
+            s = s / (w.abs() + 1e-8)
+
+        # std 역변환
+        if getattr(self.revin_layer, "use_std", True):
+            std = self.revin_layer.std  # (B, 1, C)
+            s = s * std
+
+        return s.squeeze(-1)  # (B, H)
+
     def __init__(self, cfg: PatchTSTConfig, *, min_scale: float = 1e-3):
         super().__init__()
         self.cfg = cfg
+
+        self.horizon = cfg.horizon
         self.min_scale = float(min_scale)
 
         # Backbone
@@ -413,46 +434,99 @@ class PatchTSTDistModel(nn.Module):
         # Head
         self.head = DistHeadWithExo(
             d_model=cfg.d_model,
-            horizon=cfg.horizon,
+            horizon=self.horizon,
             d_future=getattr(cfg, "d_future", 0),
             act=getattr(cfg, "act", "gelu"),
         )
 
-    def _denorm_scale(self, scale_n: torch.Tensor) -> torch.Tensor:
-        """RevIN denorm을 scale(표준편차)에 맞게 적용.
-        - (x_n - b)/w * std  (mean/last는 scale에 영향 없음)
-        """
-        if not self.use_revin:
-            return scale_n
 
-        s = scale_n.unsqueeze(-1)  # (B, H, 1)
+        if not isinstance(self.head, DistHeadWithExo):
+            raise RuntimeError(
+                f"[PatchTSTDistModel] head must be DistHeadWithExo, got={type(self.head)}. "
+                f"Your builder/registry may be wiring a point head into a dist model."
+            )
 
-        # 1) affine 역변환 (있다면)
-        if getattr(self.revin_layer, "affine", False):
-            w = self.revin_layer.affine_weight.view(1, 1, -1)
-            # 안전: 0 division 방지
-            s = s / (w + 1e-8)
 
-        # 2) std 역변환 (있다면)
-        if getattr(self.revin_layer, "use_std", True):
-            std = self.revin_layer.std  # (B, 1, C)
-            s = s * std
+    def forward(
+        self,
+        x: torch.Tensor,
+        # 신규 인터페이스 (Trainer/Adapter 호환)
+        future_exo: torch.Tensor | None = None,
+        past_exo_cont: torch.Tensor | None = None,
+        past_exo_cat: torch.Tensor | None = None,
+        part_ids=None,
+        mode: str | None = None,
+        # 레거시 인터페이스 (하위 호환)
+        fe_cont: torch.Tensor | None = None,
+        pe_cont: torch.Tensor | None = None,
+        pe_cat: torch.Tensor | None = None,
+        **kwargs,
+    ):
+        # 0) alias 통일
+        fe = future_exo if future_exo is not None else fe_cont
+        p_cont = past_exo_cont if past_exo_cont is not None else pe_cont
+        p_cat  = past_exo_cat  if past_exo_cat  is not None else pe_cat
 
-        return s.squeeze(-1)  # (B, H)
-
-    def forward(self, x: torch.Tensor, *, future_exo: Optional[torch.Tensor] = None) -> dict:
-        # x: (B, L, C)
+        # 1) RevIN norm
         x_n = self.revin_layer(x, "norm") if self.use_revin else x
 
-        h = self.backbone(x_n)  # (B, N, D) or (B, D) depending on backbone
+        # 2) Backbone에 과거 외생 주입 (중요)
+        h = self.backbone(x_n, p_cont=p_cont, p_cat=p_cat)
 
-        loc_n, scale_raw_n = self.head(h, future_exo)
+        # 3) Head에 미래 외생 주입
+        head_out = self.head(h, future_exo=fe)
 
-        # loc denorm (point 모델과 동일)
-        if self.use_revin:
-            loc = self.revin_layer(loc_n.unsqueeze(-1), "denorm").squeeze(-1)  # (B, H)
-            scale_raw = self._denorm_scale(scale_raw_n)  # (B, H)
+        if torch.is_tensor(head_out):
+            # Case A) [B, H, 2] where last dim = (loc, scale_raw)
+            if head_out.dim() == 3 and head_out.size(-1) == 2:
+                loc_n = head_out[..., 0]
+                scale_raw_n = head_out[..., 1]
+
+            # Case B) [B, H*2] flattened
+            elif head_out.dim() == 2 and head_out.size(-1) == 2 * self.cfg.horizon:
+                H = self.cfg.horizon
+                loc_n = head_out[:, :H]
+                scale_raw_n = head_out[:, H:]
+
+            else:
+                raise TypeError(
+                    f"[PatchTSTDistModel] Unsupported tensor head_out shape={tuple(head_out.shape)}. "
+                    f"Expected [B,H,2] or [B,2H]."
+                )
+
+        elif isinstance(head_out, (tuple, list)):
+            loc_n, scale_raw_n = head_out[0], head_out[1]
+
+        elif isinstance(head_out, dict):
+            loc_n = head_out.get("loc", head_out.get("mu"))
+            scale_raw_n = head_out.get("scale_raw", head_out.get("scale"))
+            if loc_n is None or scale_raw_n is None:
+                raise TypeError(f"[PatchTSTDistModel] dict head_out missing keys. keys={list(head_out.keys())}")
+
         else:
-            loc, scale_raw = loc_n, scale_raw_n
+            raise TypeError(f"[PatchTSTDistModel] Unsupported head output type: {type(head_out)}")
 
-        return {"loc": loc, "scale_raw": scale_raw}
+        # loc denorm
+        if self.use_revin:
+            loc = self.revin_layer(loc_n.unsqueeze(-1), "denorm").squeeze(-1)
+        else:
+            loc = loc_n
+
+        # scale: 양수화 + min_scale (모델에서 수행)
+        # min_scale은 self.min_scale 사용
+        scale_pos = F.softplus(scale_raw_n) + self.min_scale
+
+        # RevIN scale denorm (양수 scale에 대해 수행)
+        if self.use_revin:
+            scale = self._denorm_scale(scale_pos)
+        else:
+            scale = scale_pos
+
+        # Return tensor for DistributionLoss compatibility: [B,H,2] = (loc, scale_raw)
+        # Here `scale` is already positive & in original units.
+        scale_pos = torch.clamp(scale, min=self.min_scale)
+        # Invert softplus (stable) after removing min_scale so that DistributionLoss recovers `scale_pos`.
+        x = torch.clamp(scale_pos - self.min_scale, min=1e-8)
+        scale_raw_for_loss = x + torch.log(-torch.expm1(-x))
+        return torch.cat([loc.unsqueeze(-1), scale_raw_for_loss.unsqueeze(-1)], dim=-1)
+        # return {"loc": loc, "scale": scale}
