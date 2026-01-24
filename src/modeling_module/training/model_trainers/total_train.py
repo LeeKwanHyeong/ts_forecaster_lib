@@ -152,6 +152,7 @@ def _build_common_train_configs(
         spike_epochs: Optional[int] = None,
         base_lr: Optional[float] = None,
         point_loss_mode: str = 'point',
+        use_exogenous_mode: bool = False
 ) -> Tuple[TrainingConfig, TrainingConfig, SpikeLossConfig, Tuple[StageConfig, StageConfig]]:
     """
     공통 학습 설정(Config) 및 2단계 스테이지(Warmup -> Spike) 구성.
@@ -231,6 +232,7 @@ def _build_common_train_configs(
         t_max=40,
         patience=100,
         loss_mode=point_loss_mode,
+        use_exogenous_mode=use_exogenous_mode,
         point_loss='huber',
         huber_delta=0.8,
         use_intermittent=True,
@@ -254,6 +256,7 @@ def _build_common_train_configs(
         t_max=40,
         patience=20,
         loss_mode='quantile',
+        use_exogenous_mode=use_exogenous_mode,
         quantiles=(0.1, 0.5, 0.9),
         use_intermittent=True,
         alpha_zero=1.2,
@@ -347,6 +350,8 @@ def _run_patchtst(
                 f"[total_train][WARN] use_exogenous_mode=False but loader provides fe_cont dim={fe_dim}. "
                 f"Ignoring future exo."
             )
+
+    print('point_train_cfg: ', point_train_cfg)
 
     # ------------------------------------------------------------
     # 1) PatchTST 공통 설정 구성
@@ -782,7 +787,7 @@ def _run_total_train_generic(
     point_train_cfg, quantile_train_cfg, spike_cfg, stages = _build_common_train_configs(
         device=device, lookback=lookback, horizon=horizon, freq=freq,
         warmup_epochs= warmup_epochs, spike_epochs = spike_epochs, base_lr = base_lr,
-        point_loss_mode=point_loss_mode,
+        point_loss_mode=point_loss_mode, use_exogenous_mode = use_exogenous_mode
     )
 
     date_type_map = {"weekly": "W", "monthly": "M", "daily": "D", "hourly": "H"}

@@ -7,7 +7,7 @@ import torch
 from torch.amp import autocast, GradScaler
 
 from modeling_module.training.adapters import DefaultAdapter
-from modeling_module.training.losses import LossComputer
+from modeling_module.training.model_losses.losses import LossComputer
 
 
 class CommonTrainer:

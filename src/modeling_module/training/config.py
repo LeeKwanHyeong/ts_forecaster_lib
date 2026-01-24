@@ -89,7 +89,7 @@ class TrainingConfig:
     huber_delta: float = 5.0  # Huber Loss의 임계값 (L1/L2 전환점)
     q_star: float = 0.5  # 점 예측 시 타겟 분위수 (Pinball Loss 사용 시)
     use_cost_q_star: bool = False  # 비용 기반 비대칭 가중치(Newsvendor) 사용 여부
-    Cu: float = 1.0;
+    Cu: float = 1.0
     Co: float = 1.0  # 언더/오버 예측에 대한 비용 가중치 (Cost Under/Over)
     quantiles: Tuple[float, ...] = (0.1, 0.5, 0.9)  # 확률 예측 시 타겟 분위수 목록
     # ------------Distribution Loss (분포 기반 NLL)-------------
@@ -98,7 +98,7 @@ class TrainingConfig:
     # - 기본은 Normal NLL (Gaussian negative log-likelihood) 입니다.
     dist_name: Literal['normal'] = 'normal'  # 현재 지원 분포 (확장 가능)
     dist_scale_transform: Literal['softplus', 'exp', 'none'] = 'softplus'  # scale 양수화 방식
-    dist_min_scale: float = 1e-3  # scale 하한(수치 안정성)
+    dist_min_scale: float = 1000   # 1e-3  # scale 하한(수치 안정성)
     dist_use_weights: bool = True  # dist loss에서 intermittent/horizon 가중치 적용 여부
 
     # (alias) LossComputer expects the following names
@@ -106,7 +106,7 @@ class TrainingConfig:
     dist_eps: float = 1e-8
     # If the model already outputs positive scale under key 'scale', set True.
     # If the model outputs raw/unconstrained scale under key 'scale_raw', set False.
-    dist_scale_is_positive: bool = False
+    dist_scale_is_positive: bool = True
 
 
     # ------------Intermittent/Horizon Weight (가중치 보정)-------------

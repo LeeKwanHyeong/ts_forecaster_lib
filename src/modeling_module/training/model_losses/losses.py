@@ -8,6 +8,7 @@ import torch
 import torch.nn.functional as F
 import math
 
+from modeling_module.training.config import TrainingConfig
 
 Tensor = torch.Tensor
 Pred = Union[Tensor, Dict[str, Any]]
@@ -403,68 +404,6 @@ def extract_dist_params(pred: Pred) -> Tuple[Tensor, Tensor]:
 
     return ensure_bh(loc), ensure_bh(scale)
 
-# =============================================================================
-# 5) Configs (minimal, 독립적으로 동작하도록 dataclass 제공)
-# =============================================================================
-@dataclass
-class SpikeLossConfig:
-    enabled: bool = False
-    strategy: str = "mix"  # "mix" | "direct"
-    mad_k: float = 3.5
-    w_spike: float = 6.0
-    w_norm: float = 1.0
-    w_cap: float = 12.0
-
-    huber_delta: float = 2.0
-    asym_up_weight: float = 1.0
-    asym_down_weight: float = 1.0
-
-    alpha_huber: float = 0.7
-    beta_asym: float = 0.3
-
-    mix_with_baseline: bool = False
-    gamma_baseline: float = 0.0
-
-
-@dataclass
-class TrainingConfigLite:
-    # mode
-    loss_mode: str = "auto"  # \"auto\" | \"point\" | \"quantile\" | \"dist\"
-    point_loss: str = "mae"  # "mae" | "mse" | "huber" | "pinball" | "huber_asym"
-    huber_delta: float = 5.0
-
-    # quantile
-    quantiles: Tuple[float, ...] = (0.1, 0.5, 0.9)
-    q_star: float = 0.5
-    use_cost_q_star: bool = False
-    Cu: float = 1.0
-    Co: float = 1.0
-
-    # dist (distribution) - Normal by default
-    # Expected model output: dict with keys {"loc": [B,H], "scale": [B,H]}.
-    # If your model outputs "scale_raw", set dist_scale_is_positive=False to apply softplus.
-    dist_family: str = "normal"  # currently supports: "normal"
-    dist_scale_is_positive: bool = True
-    dist_min_scale: float = 1e-3
-    dist_eps: float = 1e-12
-
-    # validation
-    val_use_weights: bool = True
-
-    # intermittent (외부 util이 있으면 연결해서 쓰되, 여기서는 인터페이스만)
-    use_intermittent: bool = False
-    alpha_zero: float = 1.0
-    alpha_pos: float = 1.0
-    gamma_run: float = 0.0
-    cap: Optional[float] = None
-
-    # horizon decay
-    use_horizon_decay: bool = False
-    tau_h: float = 1.0
-
-    # spike
-    spike_loss: SpikeLossConfig = field(default_factory=SpikeLossConfig)
-
 
 # =============================================================================
 # 6) Optional hooks: 프로젝트 내부 util이 있으면 여기로 연결
@@ -512,7 +451,7 @@ class LossComputer:
 
     def __init__(
         self,
-        cfg: TrainingConfigLite,
+        cfg: TrainingConfig,
         *,
         newsvendor_q_star_fn=default_newsvendor_q_star,
         intermittent_weights_fn=default_intermittent_weights_balanced,
@@ -644,14 +583,28 @@ class LossComputer:
 
         loc, scale_like = extract_dist_params(pred)
 
-        # scale positivity / floor
-        if not bool(self.cfg.dist_scale_is_positive) and ("scale" not in pred):
-            # treat as raw if caller used scale_raw/sigma without guaranteeing positivity
-            scale = F.softplus(scale_like)
-        else:
-            scale = scale_like
+        min_scale = float(self.cfg.dist_min_scale)
 
-        scale = scale.clamp_min(float(self.cfg.dist_min_scale))
+        # 예: pred가 {"loc": ..., "scale": ...} 또는 {"loc": ..., "scale_raw": ...}
+        if "scale_raw" in pred:
+            scale = F.softplus(pred["scale_raw"]) + min_scale
+        else:
+            scale = pred.get("scale", scale_like)  # scale_like는 기존 변수라면 유지
+            if not bool(self.cfg.dist_scale_is_positive):
+                # cfg가 positive 보장하지 않는다면 보수적으로 변환
+                scale = F.softplus(scale) + min_scale
+
+        scale = scale.clamp_min(min_scale)
+        with torch.no_grad():
+            s = scale.detach()
+            print("[DBG] scale stats:",
+                  float(s.min()), float(s.median()), float(s.mean()), float(s.max()))
+            yt = y2.detach()
+            print("[DBG] y_true stats:",
+                  float(yt.min()), float(yt.median()), float(yt.mean()), float(yt.max()))
+            err = (yt - loc).detach()
+            print("[DBG] |err| median/max:",
+                  float(err.abs().median()), float(err.abs().max()))
 
         if str(self.cfg.dist_family).lower() != "normal":
             raise ValueError(f"Unsupported dist_family={self.cfg.dist_family!r}. Only 'normal' is implemented.")

@@ -65,7 +65,12 @@ def _dump_cfg(cfg, save_dir: str, name: str) -> None:
     os.makedirs(save_dir, exist_ok=True)
     path = os.path.join(save_dir, name)
 
-    payload = asdict(cfg) if is_dataclass(cfg) else dict(cfg.__dict__)
+    # NOTE:
+    # - dataclass(asdict)는 dataclass field만 직렬화하므로, 런타임에 setattr로 주입한 값(예: use_exogenous_mode)은 누락될 수 있습니다.
+    # - 따라서 asdict 결과에 cfg.__dict__를 병합하여 '추가/오버라이드' 키까지 함께 저장합니다.
+    payload = asdict(cfg) if is_dataclass(cfg) else {}
+    if hasattr(cfg, "__dict__"):
+        payload.update(cfg.__dict__)  # dataclass field + runtime-injected attrs
     with open(path, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2, default=_json_safe)
 
