@@ -487,6 +487,11 @@ class LossComputer:
         if self.cfg.loss_mode != "auto":
             return str(self.cfg.loss_mode)
 
+        # custom loss hint (auto mode)
+        # - NeuralForecast-style DistributionLoss sets `is_distribution_output=True`.
+        if self.cfg.custom_loss is not None and getattr(self.cfg.custom_loss, "is_distribution_output", False):
+            return "dist"
+
         # auto detect quantile
         if torch.is_tensor(pred):
             if pred.dim() == 3 and pred.size(1) > 1:  # [B,Q,H]
@@ -510,6 +515,9 @@ class LossComputer:
         mode = self._infer_mode(pred)
 
         if mode == "dist":
+            # Prefer custom distribution loss if provided (e.g., DistributionLoss).
+            if self.cfg.custom_loss is not None and getattr(self.cfg.custom_loss, "is_distribution_output", False):
+                return self._compute_dist_custom(pred, y, is_val=is_val)
             return self._compute_dist(pred, y, is_val=is_val)
 
         if mode == "quantile":
@@ -634,6 +642,95 @@ class LossComputer:
     # -------------------------------------------------------------------------
     # point base
     # -------------------------------------------------------------------------
+
+    def _pack_distributionloss_args(self, pred: Pred, *, expected_p: int) -> Tensor:
+        """Pack model outputs into (B, H, P) tensor expected by NeuralForecast-style DistributionLoss.
+
+        Accepted formats:
+          - Tensor: (B, H, P) or (B, P, H) (auto-permuted)
+          - Dict: keys matching distribution params (e.g., df/loc/scale or df_raw/scale_raw, mu/sigma aliases)
+        """
+        if torch.is_tensor(pred):
+            if pred.dim() != 3:
+                raise ValueError(f"DistributionLoss expects 3D tensor, got shape={tuple(pred.shape)}")
+            # Prefer (B,H,P)
+            if pred.size(-1) == expected_p:
+                return pred
+            # Accept (B,P,H)
+            if pred.size(1) == expected_p:
+                return pred.permute(0, 2, 1).contiguous()
+            raise ValueError(
+                f"Cannot infer DistributionLoss param layout. expected P={expected_p}, got shape={tuple(pred.shape)}"
+            )
+
+        if not isinstance(pred, dict):
+            raise ValueError(f"dist pred must be Tensor or dict, got {type(pred)}")
+
+        loss = self.cfg.custom_loss
+        param_names = getattr(loss, "param_names", None)
+        if not param_names:
+            raise ValueError("custom_loss does not expose `param_names`; cannot pack dict predictions.")
+
+        parts: List[Tensor] = []
+        for name in param_names:
+            k = str(name).lstrip("-")  # '-loc' -> 'loc'
+            # common aliases
+            aliases = [k, f"{k}_raw"]
+            if k == "loc":
+                aliases += ["mu", "mean"]
+            if k == "scale":
+                aliases += ["sigma", "std", "stddev", "scale_raw"]
+            v = None
+            for a in aliases:
+                if a in pred:
+                    v = pred[a]
+                    break
+            if v is None:
+                raise KeyError(
+                    f"Missing distribution parameter '{k}' in pred dict. Tried aliases={aliases}. keys={list(pred.keys())[:20]}..."
+                )
+            if v.dim() == 3 and v.size(-1) == 1:
+                v = v.squeeze(-1)
+            if v.dim() != 2:
+                raise ValueError(f"Each dist param must be (B,H) (or (B,H,1)), got {k} shape={tuple(v.shape)}")
+            parts.append(v)
+
+        out = torch.stack(parts, dim=2)  # (B,H,P)
+        if out.size(-1) != expected_p:
+            raise ValueError(f"Packed args P mismatch: expected {expected_p}, got {out.size(-1)}")
+        return out
+
+    def _compute_dist_custom(self, pred: Pred, y: Tensor, *, is_val: bool) -> Tensor:
+        """Distribution loss via user-provided DistributionLoss (e.g., StudentT).
+
+        Requirements:
+          - cfg.custom_loss must be a NeuralForecast-style DistributionLoss (has `is_distribution_output=True`).
+          - pred must provide distribution parameters matching custom_loss.param_names order.
+        """
+        loss_fn = self.cfg.custom_loss
+        expected_p = int(getattr(loss_fn, "outputsize_multiplier", 0))
+        if expected_p <= 0:
+            raise ValueError("custom_loss missing/invalid `outputsize_multiplier`")
+
+        y2 = ensure_2d(y)  # (B,H)
+        args = self._pack_distributionloss_args(pred, expected_p=expected_p)  # (B,H,P)
+
+        # weights/mask policy matches normal dist path
+        if is_val and (not self.cfg.val_use_weights):
+            mask = torch.ones_like(y2)
+        else:
+            mask = torch.ones_like(y2)
+            if self.cfg.dist_use_weights:
+                iw = self._maybe_intermittent_weights(y2)
+                if iw is not None:
+                    mask = mask * iw
+                mask = mask * self._effective_horizon_weights(y2)
+
+        # DistributionLoss treats `mask` as weights (via _compute_weights -> weighted_average).
+        return loss_fn(y2, args, mask=mask)
+
+
+
     def _compute_point_base(self, pred: Pred, y: Tensor, *, is_val: bool) -> Tensor:
         y2 = ensure_2d(y)
         y_hat = extract_point_pred(pred)  # [B,H]

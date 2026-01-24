@@ -152,6 +152,7 @@ def _build_common_train_configs(
         spike_epochs: Optional[int] = None,
         base_lr: Optional[float] = None,
         point_loss_mode: str = 'point',
+        loss: Optional[torch.nn.Module] = None,
         use_exogenous_mode: bool = False
 ) -> Tuple[TrainingConfig, TrainingConfig, SpikeLossConfig, Tuple[StageConfig, StageConfig]]:
     """
@@ -245,6 +246,12 @@ def _build_common_train_configs(
         spike_loss=spike_cfg,
         max_grad_norm=30.0,
     )
+    # Optional custom loss injection
+    if loss is not None:
+        # When custom loss is provided, it typically implies distributional training.
+        point_train_cfg.custom_loss = loss
+        if str(point_train_cfg.loss_mode).strip().lower() in ("point", "auto"):
+            point_train_cfg.loss_mode = "dist"
 
     # 4) Quantile용 공통 TrainingConfig
     quantile_train_cfg = TrainingConfig(
@@ -748,30 +755,29 @@ MODEL_REGISTRY: Dict[str, Callable] = {
 
 # ===================== GENERIC RUNNER (통합) =====================
 def _run_total_train_generic(
-    train_loader,
-    val_loader,
-    device: str,
-    lookback: int,
-    horizon: int,
-    freq: str,
-    save_dir: Optional[str],
-    *,
-    use_exogenous_mode: Optional[bool] = False,
-    models_to_run: Optional[Iterable[str]] = None,
-    warmup_epochs: Optional[int] = None,
-    spike_epochs: Optional[int] = None,
-    base_lr: Optional[float] = None,
-    point_loss_mode: str = 'point',
+        train_loader,
+        val_loader,
+        device: str,
+        lookback: int,
+        horizon: int,
+        freq: str,
+        save_dir: Optional[str],
+        *,
+        use_exogenous_mode: Optional[bool] = False,
+        models_to_run: Optional[Iterable[str]] = None,
+        warmup_epochs: Optional[int] = None,
+        spike_epochs: Optional[int] = None,
+        base_lr: Optional[float] = None,
+        point_loss_mode: str = 'point',
+        loss: Optional[torch.nn.Module] = None,
 
-
-    # PatchTST 전용 Property
-    use_ssl_mode: SSLMode = 'sl_only',
-    ssl_pretrain_epochs: int = 10,
-    ssl_mask_ratio: float = 0.3,
-    ssl_loss_type: str = "mse",
-    ssl_freeze_encoder_before_ft: bool = False,
-    ssl_pretrained_ckpt_path: Optional[str] = None,
-
+        # PatchTST 전용 Property
+        use_ssl_mode: SSLMode = 'sl_only',
+        ssl_pretrain_epochs: int = 10,
+        ssl_mask_ratio: float = 0.3,
+        ssl_loss_type: str = "mse",
+        ssl_freeze_encoder_before_ft: bool = False,
+        ssl_pretrained_ckpt_path: Optional[str] = None,
 ):
     """
     전체 학습 프로세스 오케스트레이션 (Generic Runner).
@@ -781,13 +787,18 @@ def _run_total_train_generic(
     - 외생 변수 제공 여부 판단 및 정책 적용.
     - `models_to_run`에 지정된 모델별 러너 실행.
     """
+    point_loss_mode_eff = str(point_loss_mode).strip().lower()
+    if loss is not None and point_loss_mode_eff in ("point", "auto"):
+        point_loss_mode_eff = "dist"
+
+
     save_root = Path(save_dir) if save_dir is not None else None
 
     # 공통 설정 및 스테이지 빌드
     point_train_cfg, quantile_train_cfg, spike_cfg, stages = _build_common_train_configs(
         device=device, lookback=lookback, horizon=horizon, freq=freq,
-        warmup_epochs= warmup_epochs, spike_epochs = spike_epochs, base_lr = base_lr,
-        point_loss_mode=point_loss_mode, use_exogenous_mode = use_exogenous_mode
+        warmup_epochs=warmup_epochs, spike_epochs=spike_epochs, base_lr=base_lr,
+        loss=loss, point_loss_mode=point_loss_mode_eff, use_exogenous_mode=use_exogenous_mode
     )
 
     date_type_map = {"weekly": "W", "monthly": "M", "daily": "D", "hourly": "H"}
@@ -795,9 +806,7 @@ def _run_total_train_generic(
 
     # 외생 변수 처리
     has_fe, fe_dim = _infer_future_exo_spec_from_loader(train_loader)
-    print('use_exogenous_mode:: ',use_exogenous_mode)
-    print('has_fe:: ', has_fe)
-    print('fe_dim:: ', fe_dim)
+    print(f'[total_train] use_exogenous_mode: {use_exogenous_mode} has_fe: {has_fe}, fe_dim: {fe_dim}')
     if use_exogenous_mode:
         if has_fe:
             if fe_dim <= 0:
@@ -898,6 +907,7 @@ def run_total_train_weekly(
         spike_epochs = None,
         base_lr = None,
         point_loss_mode: str = 'point',
+        loss: Optional[torch.nn.Module] = None,
         save_dir=None,
         use_exogenous_mode: bool = False,
         models_to_run=None,
@@ -925,6 +935,7 @@ def run_total_train_weekly(
         point_loss_mode=point_loss_mode,
         models_to_run=models_to_run,
         use_ssl_mode = use_ssl_mode,
+        loss=loss,
         ssl_pretrain_epochs=ssl_pretrain_epochs,
         ssl_mask_ratio=ssl_mask_ratio,
         ssl_loss_type=ssl_loss_type,
@@ -945,6 +956,7 @@ def run_total_train_monthly(
         spike_epochs = None,
         base_lr = None,
         point_loss_mode: str = 'point',
+        loss: Optional[torch.nn.Module] = None,
         save_dir=None,
         models_to_run=None,
         use_exogenous_mode: bool = False,
@@ -969,6 +981,7 @@ def run_total_train_monthly(
         spike_epochs = spike_epochs,
         base_lr = base_lr,
         point_loss_mode=point_loss_mode,
+        loss = loss,
         models_to_run=models_to_run,
         use_exogenous_mode=use_exogenous_mode,
         use_ssl_mode=use_ssl_mode,
@@ -991,6 +1004,7 @@ def run_total_train_daily(
         spike_epochs = None,
         base_lr = None,
         point_loss_mode: str = 'point',
+        loss: Optional[torch.nn.Module] = None,
         save_dir=None,
         models_to_run=None,
         use_exogenous_mode: bool = False,
@@ -1015,6 +1029,7 @@ def run_total_train_daily(
         spike_epochs = spike_epochs,
         base_lr = base_lr,
         point_loss_mode=point_loss_mode,
+        loss = loss,
         models_to_run=models_to_run,
         use_exogenous_mode=use_exogenous_mode,
         use_ssl_mode = use_ssl_mode,
@@ -1037,6 +1052,7 @@ def run_total_train_hourly(
         spike_epochs = None,
         base_lr = None,
         point_loss_mode: str = 'point',
+        loss: Optional[torch.nn.Module] = None,
         save_dir=None,
         models_to_run=None,
         use_exogenous_mode: bool = False,
@@ -1061,6 +1077,7 @@ def run_total_train_hourly(
         spike_epochs = spike_epochs,
         base_lr = base_lr,
         point_loss_mode=point_loss_mode,
+        loss = loss,
         models_to_run=models_to_run,
         use_exogenous_mode=use_exogenous_mode,
         use_ssl_mode = use_ssl_mode,
@@ -1070,26 +1087,3 @@ def run_total_train_hourly(
         ssl_freeze_encoder_before_ft=ssl_freeze_encoder_before_ft,
         ssl_pretrained_ckpt_path=ssl_pretrained_ckpt_path,
     )
-
-
-def summarize_metrics(results: Dict[str, Dict[str, np.ndarray]]) -> Dict[str, Dict[str, float]]:
-    """
-    학습 결과(y_true, y_pred)를 집계하여 평가 지표(MAE, RMSE, SMAPE 등) 요약.
-    """
-    table: Dict[str, Dict[str, float]] = {}
-    for name, res in results.items():
-        y = res['y_true'].reshape(-1)
-        yhat = res['y_pred'].reshape(-1)
-
-        row: Dict[str, float] = {
-            'MAE': mae(y, yhat),
-            'RMSE': rmse(y, yhat),
-            'SMAPE': smape(y, yhat),
-        }
-        if res.get('q_pred') is not None and 0.1 in res['q_pred'] and 0.9 in res['q_pred']:
-            result = quantile_metrics(y, yhat)
-            row['converage_per_q'] = result['coverage_per_q']
-            row['i80_cov'] = result['i80_cov']
-            row['i80_wid'] = result['i80_wid']
-        table[name] = row
-    return table

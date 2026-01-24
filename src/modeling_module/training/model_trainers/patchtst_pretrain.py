@@ -242,9 +242,13 @@ def train_patchtst_pretrain(
                     best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
                     if save_dir is not None:
                         ckpt_path = os.path.join(save_dir, ckpt_name)
+                        # torch.save(
+                        #     {"state_dict": best_state, "best_val": best_val,
+                        #      "cfg": asdict(cfg_i) if is_dataclass(cfg_i) else None},
+                        #     ckpt_path,
+                        # )
                         torch.save(
-                            {"state_dict": best_state, "best_val": best_val,
-                             "cfg": asdict(cfg_i) if is_dataclass(cfg_i) else None},
+                            {"state_dict": best_state, "best_val": float(best_val)},
                             ckpt_path,
                         )
             else:
