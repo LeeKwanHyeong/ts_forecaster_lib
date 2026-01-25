@@ -332,59 +332,110 @@ class PatchTSTQuantileModel(nn.Module):
 # Distribution Head / Model (Gaussian: loc + scale)
 # =========================================================
 
+# class DistHeadWithExo(nn.Module):
+#     """(y, exo) -> (loc, scale_raw)
+#
+#     - backbone 출력 h: (B, N, D) 또는 (B, D) 형태를 모두 지원 (현재 구현은 (B, N, D) 가정).
+#     - exo_future: (B, H, E) (옵션)
+#     - 반환:
+#         loc: (B, H)
+#         scale_raw: (B, H)  # 양수 제약은 LossComputer에서 처리(softplus/exp + min_scale)
+#     """
+#
+#     def __init__(self, d_model: int, horizon: int, *, d_future: int = 0, act: str = "gelu"):
+#         super().__init__()
+#         self.horizon = int(horizon)
+#         self.d_future = int(d_future)
+#
+#         # (B, N, D) -> (B, D)
+#         self.pool = nn.AdaptiveAvgPool1d(1)
+#
+#         if self.d_future > 0:
+#             self.exo_proj = nn.Linear(self.d_future, d_model)
+#             self.fuse = nn.Sequential(
+#                 nn.Linear(d_model, d_model),
+#                 get_activation_fn(act),
+#             )
+#         else:
+#             self.exo_proj = None
+#             self.fuse = None
+#
+#         self.loc_head = nn.Linear(d_model, self.horizon)
+#         self.scale_head = nn.Linear(d_model, self.horizon)
+#
+#     def forward(self,
+#                 h: torch.Tensor,
+#                 future_exo: Optional[torch.Tensor] = None,
+#                 ) -> Tuple[torch.Tensor, torch.Tensor]:
+#
+#         # h: (B, N, D) -> (B, D)
+#         if h.dim() == 3:
+#             B, N, D = h.shape
+#             h_pool = self.pool(h.transpose(1, 2)).squeeze(-1)  # (B, D)
+#         elif h.dim() == 2:
+#             h_pool = h
+#         else:
+#             raise ValueError(f"DistHeadWithExo expects 2D/3D tensor, got {tuple(h.shape)}")
+#
+#         if (self.d_future > 0) and (future_exo is not None):
+#             # future_exo: (B, H, E) -> (B, H, D) -> 평균 풀링 -> (B, D)
+#             exo_h = self.exo_proj(future_exo).mean(dim=1)
+#             h_pool = self.fuse(h_pool + exo_h)
+#
+#         loc = self.loc_head(h_pool)         # (B, H)
+#         scale_raw = self.scale_head(h_pool) # (B, H)
+#         return loc, scale_raw
 class DistHeadWithExo(nn.Module):
-    """(y, exo) -> (loc, scale_raw)
-
-    - backbone 출력 h: (B, N, D) 또는 (B, D) 형태를 모두 지원 (현재 구현은 (B, N, D) 가정).
-    - exo_future: (B, H, E) (옵션)
-    - 반환:
-        loc: (B, H)
-        scale_raw: (B, H)  # 양수 제약은 LossComputer에서 처리(softplus/exp + min_scale)
     """
-
-    def __init__(self, d_model: int, horizon: int, *, d_future: int = 0, act: str = "gelu"):
+    backbone 출력 (B, N_patch, d_model)을 pool해서 (B, d_model)로 만든 뒤,
+    (B, horizon, out_mult)를 출력.
+    - out_mult: Normal=2 (loc, scale_raw), StudentT=3 (df, loc, scale_raw)
+    """
+    def __init__(
+        self,
+        d_model: int,
+        horizon: int,
+        d_future: int = 0,
+        act: str = "gelu",
+        out_mult: int = 2,
+        hidden: int = 128,
+    ):
         super().__init__()
         self.horizon = int(horizon)
+        self.out_mult = int(out_mult)
         self.d_future = int(d_future)
 
-        # (B, N, D) -> (B, D)
-        self.pool = nn.AdaptiveAvgPool1d(1)
+        # 미래 외생: (B, H, E) -> (B, H*E) -> (B, d_model)
+        self.future_proj = nn.Linear(self.horizon * self.d_future, d_model) if self.d_future > 0 else None
+        in_dim = d_model * 2 if self.d_future > 0 else d_model
 
+        self.net = nn.Sequential(
+            nn.Linear(in_dim, hidden),
+            get_activation_fn(act),
+            nn.Linear(hidden, self.horizon * self.out_mult),
+        )
+
+    def forward(self, h: torch.Tensor, *, future_exo: Optional[torch.Tensor] = None) -> torch.Tensor:
+        # h: (B, N_patch, d_model)  -> pool -> (B, d_model)
+        if h.dim() != 3:
+            raise ValueError(f"[DistHeadWithExo] expected (B,N,D), got {tuple(h.shape)}")
+        feat = h.mean(dim=1)  # (B, d_model)
+
+        # future_exo 결합
         if self.d_future > 0:
-            self.exo_proj = nn.Linear(self.d_future, d_model)
-            self.fuse = nn.Sequential(
-                nn.Linear(d_model, d_model),
-                get_activation_fn(act),
-            )
-        else:
-            self.exo_proj = None
-            self.fuse = None
+            if future_exo is None:
+                raise ValueError("[DistHeadWithExo] future_exo is required when d_future>0")
+            if future_exo.dim() == 2:  # (H,E) -> (B,H,E)
+                future_exo = future_exo.unsqueeze(0).expand(h.size(0), -1, -1)
+            B, H, E = future_exo.shape
+            if H != self.horizon or E != self.d_future:
+                raise ValueError(f"[DistHeadWithExo] future_exo shape mismatch: {tuple(future_exo.shape)}")
+            f_flat = future_exo.reshape(B, -1)
+            f_feat = self.future_proj(f_flat)
+            feat = torch.cat([feat, f_feat], dim=-1)  # (B, 2*d_model)
 
-        self.loc_head = nn.Linear(d_model, self.horizon)
-        self.scale_head = nn.Linear(d_model, self.horizon)
-
-    def forward(self,
-                h: torch.Tensor,
-                future_exo: Optional[torch.Tensor] = None,
-                ) -> Tuple[torch.Tensor, torch.Tensor]:
-
-        # h: (B, N, D) -> (B, D)
-        if h.dim() == 3:
-            B, N, D = h.shape
-            h_pool = self.pool(h.transpose(1, 2)).squeeze(-1)  # (B, D)
-        elif h.dim() == 2:
-            h_pool = h
-        else:
-            raise ValueError(f"DistHeadWithExo expects 2D/3D tensor, got {tuple(h.shape)}")
-
-        if (self.d_future > 0) and (future_exo is not None):
-            # future_exo: (B, H, E) -> (B, H, D) -> 평균 풀링 -> (B, D)
-            exo_h = self.exo_proj(future_exo).mean(dim=1)
-            h_pool = self.fuse(h_pool + exo_h)
-
-        loc = self.loc_head(h_pool)         # (B, H)
-        scale_raw = self.scale_head(h_pool) # (B, H)
-        return loc, scale_raw
+        out = self.net(feat).view(h.size(0), self.horizon, self.out_mult)  # (B, H, out_mult)
+        return out
 
 
 class PatchTSTDistModel(nn.Module):
@@ -420,31 +471,54 @@ class PatchTSTDistModel(nn.Module):
     def __init__(self, cfg: PatchTSTConfig, *, min_scale: float = 1e-3):
         super().__init__()
         self.cfg = cfg
-
-        self.horizon = cfg.horizon
+        self.horizon = int(cfg.horizon)
         self.min_scale = float(min_scale)
 
-        # Backbone
-        self.backbone = SupervisedBackbone(cfg)
+        # ----------------------------
+        # 1) loss 스펙을 "그대로" 사용 (핵심)
+        # ----------------------------
+        loss = cfg.loss
+        if not hasattr(loss, "param_names") or not hasattr(loss, "outputsize_multiplier"):
+            raise TypeError(f"[PatchTSTDistModel] cfg.loss must be DistributionLoss-like, got={type(loss)}")
 
-        # RevIN
+        self.param_names = list(loss.param_names)                  # 예: StudentT -> ["-df","-loc","-scale"]
+        self.out_mult = int(loss.outputsize_multiplier)            # 예: StudentT -> 3, Normal -> 2
+
+        # (옵션) 방어: StudentT인데 3이 아니면 즉시 실패
+        if getattr(loss, "distribution", None) == "StudentT" and self.out_mult != 3:
+            raise RuntimeError(f"[PatchTSTDistModel] StudentT requires out_mult=3, got {self.out_mult}")
+
+        # Backbone / RevIN
+        self.backbone = SupervisedBackbone(cfg)
         self.use_revin = bool(cfg.use_revin)
         self.revin_layer = RevIN(num_features=cfg.c_in)
 
-        # Head
+        # ----------------------------
+        # 2) Head: 반드시 out_mult를 주입
+        # ----------------------------
         self.head = DistHeadWithExo(
             d_model=cfg.d_model,
             horizon=self.horizon,
             d_future=getattr(cfg, "d_future", 0),
             act=getattr(cfg, "act", "gelu"),
+            out_mult=self.out_mult,
         )
 
-
-        if not isinstance(self.head, DistHeadWithExo):
+        # ----------------------------
+        # 3) 즉시 검증 (지금 상태를 잡아내는 가장 빠른 방법)
+        # ----------------------------
+        if getattr(self.head, "out_mult", None) != self.out_mult:
             raise RuntimeError(
-                f"[PatchTSTDistModel] head must be DistHeadWithExo, got={type(self.head)}. "
-                f"Your builder/registry may be wiring a point head into a dist model."
+                f"[PatchTSTDistModel] head.out_mult({getattr(self.head,'out_mult',None)}) != model.out_mult({self.out_mult}). "
+                f"Head is not configured for the requested distribution."
             )
+
+        # Linear(out_features)까지 확인 가능한 구조면 더 강하게 체크
+        if hasattr(self.head, "proj") and hasattr(self.head.proj, "out_features"):
+            if self.head.proj.out_features != self.out_mult:
+                raise RuntimeError(
+                    f"[PatchTSTDistModel] head.proj.out_features({self.head.proj.out_features}) != out_mult({self.out_mult})"
+                )
 
 
     def forward(
@@ -476,57 +550,58 @@ class PatchTSTDistModel(nn.Module):
         # 3) Head에 미래 외생 주입
         head_out = self.head(h, future_exo=fe)
 
-        if torch.is_tensor(head_out):
-            # Case A) [B, H, 2] where last dim = (loc, scale_raw)
-            if head_out.dim() == 3 and head_out.size(-1) == 2:
-                loc_n = head_out[..., 0]
-                scale_raw_n = head_out[..., 1]
+        if not torch.is_tensor(head_out) or head_out.dim() != 3 or head_out.size(-1) != self.out_mult:
+            raise TypeError(
+                f"[PatchTSTDistModel] head_out must be (B,H,{self.out_mult}), got {type(head_out)} {getattr(head_out, 'shape', None)}")
 
-            # Case B) [B, H*2] flattened
-            elif head_out.dim() == 2 and head_out.size(-1) == 2 * self.cfg.horizon:
-                H = self.cfg.horizon
-                loc_n = head_out[:, :H]
-                scale_raw_n = head_out[:, H:]
+            # param_names 순서 그대로 분해
+            # e.g. Normal: ["-loc","-scale"]
+            #      StudentT: ["-df","-loc","-scale"]
+        params = {name: head_out[..., i] for i, name in enumerate(self.param_names)}
 
-            else:
-                raise TypeError(
-                    f"[PatchTSTDistModel] Unsupported tensor head_out shape={tuple(head_out.shape)}. "
-                    f"Expected [B,H,2] or [B,2H]."
-                )
+        # ---- loc 처리 (기존과 동일) ----
+        loc_n = params.get("-loc")
+        if loc_n is None:
+            raise RuntimeError(f"[PatchTSTDistModel] '-loc' not found in param_names={self.param_names}")
 
-        elif isinstance(head_out, (tuple, list)):
-            loc_n, scale_raw_n = head_out[0], head_out[1]
-
-        elif isinstance(head_out, dict):
-            loc_n = head_out.get("loc", head_out.get("mu"))
-            scale_raw_n = head_out.get("scale_raw", head_out.get("scale"))
-            if loc_n is None or scale_raw_n is None:
-                raise TypeError(f"[PatchTSTDistModel] dict head_out missing keys. keys={list(head_out.keys())}")
-
-        else:
-            raise TypeError(f"[PatchTSTDistModel] Unsupported head output type: {type(head_out)}")
-
-        # loc denorm
         if self.use_revin:
             loc = self.revin_layer(loc_n.unsqueeze(-1), "denorm").squeeze(-1)
         else:
             loc = loc_n
 
-        # scale: 양수화 + min_scale (모델에서 수행)
-        # min_scale은 self.min_scale 사용
+        # ---- scale 처리 (기존 로직 유지: raw -> pos -> denorm -> raw) ----
+        scale_raw_n = params.get("-scale")
+        if scale_raw_n is None:
+            raise RuntimeError(f"[PatchTSTDistModel] '-scale' not found in param_names={self.param_names}")
+
         scale_pos = F.softplus(scale_raw_n) + self.min_scale
-
-        # RevIN scale denorm (양수 scale에 대해 수행)
         if self.use_revin:
-            scale = self._denorm_scale(scale_pos)
-        else:
-            scale = scale_pos
+            scale_pos = self._denorm_scale(scale_pos)
+        scale_pos = torch.clamp(scale_pos, min=self.min_scale)
 
-        # Return tensor for DistributionLoss compatibility: [B,H,2] = (loc, scale_raw)
-        # Here `scale` is already positive & in original units.
-        scale_pos = torch.clamp(scale, min=self.min_scale)
-        # Invert softplus (stable) after removing min_scale so that DistributionLoss recovers `scale_pos`.
+        # inverse-softplus (DistributionLoss가 다시 softplus 하므로 raw로 되돌려서 반환)
         x = torch.clamp(scale_pos - self.min_scale, min=1e-8)
         scale_raw_for_loss = x + torch.log(-torch.expm1(-x))
-        return torch.cat([loc.unsqueeze(-1), scale_raw_for_loss.unsqueeze(-1)], dim=-1)
-        # return {"loc": loc, "scale": scale}
+
+        # ---- df (StudentT 전용) ----
+        df_raw_n = params.get("-df", None)  # Normal이면 None
+
+        # 최종 반환: param_names 순서 유지가 핵심
+        outs = []
+        for name in self.param_names:
+            if name == "-loc":
+                outs.append(loc)
+            elif name == "-scale":
+                outs.append(scale_raw_for_loss)
+            elif name == "-df":
+                # [수정된 부분]
+                # df는 RevIN denorm 대상은 아니지만, 양수 제약조건이 필수입니다.
+                # Linear 출력은 음수가 나올 수 있으므로 Softplus로 감싸야 합니다.
+                # + 2.0을 해주는 이유는 df <= 2 일 때 분산이 무한대가 되는 것을 막아 학습 안정성을 높이기 위함입니다.
+                df_val = F.softplus(df_raw_n) + 2.0
+                outs.append(df_val)
+            else:
+                raise RuntimeError(f"[PatchTSTDistModel] unsupported param name: {name}")
+
+        return torch.stack(outs, dim=-1)
+

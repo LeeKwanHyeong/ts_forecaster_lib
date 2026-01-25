@@ -980,8 +980,16 @@ class MQLoss(BasePointLoss):
         sq = torch.maximum(-error, torch.zeros_like(error))
         s1_q = torch.maximum(error, torch.zeros_like(error))
 
-        quantiles = self.quantiles[None, None, None, :]
-        losses = (1 / len(quantiles)) * (quantiles * sq + (1 - quantiles) * s1_q)
+        # quantiles = self.quantiles[None, None, None, :]
+        # losses = (1 / len(quantiles)) * (quantiles * sq + (1 - quantiles) * s1_q)
+        dev = error.device
+        dt = error.dtype
+
+        # self.quantiles가 list든 tensor든 상관없이, 항상 현재 device로 올림
+        q = torch.as_tensor(self.quantiles, device=dev, dtype=dt).view(1, 1, 1, -1)
+
+        # len(quantiles) 대신 Q로 나누는게 의도라면 q.shape[-1] 사용
+        losses = (1.0 / q.shape[-1]) * (q * sq + (1.0 - q) * s1_q)
         weights = self._compute_weights(y=losses, mask=mask)  # Use losses for extra dim
 
         return _weighted_mean(losses=losses, weights=weights)
@@ -2366,6 +2374,7 @@ class DistributionLoss(torch.nn.Module):
         **distribution_kwargs,
     ):
         super(DistributionLoss, self).__init__()
+        self.distribution = distribution
 
         qs, self.output_names = level_to_outputs(level)
         qs = torch.Tensor(qs)

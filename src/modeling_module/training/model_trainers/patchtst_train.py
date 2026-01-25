@@ -89,12 +89,14 @@ def _ensure_patchtst_future_head(model, exo_dim: int, *, loss_mode: str = "point
 
     # ---- dist 우선 처리 ----
     if loss_mode == "dist":
+        out_mult = int(cfg.loss.outputsize_multiplier) if hasattr(cfg.loss, 'outputsize_multiplier') else 2
         # 이미 dist head면 유지(단, d_future 변경 반영 필요 시 rebuild)
         model.head = DistHeadWithExo(
             d_model=cfg.d_model,
             horizon=cfg.horizon,
             d_future=int(cfg.d_future),
             act=getattr(cfg, "act", "gelu"),
+            out_mult=out_mult
         )
         print(f"[train_patchtst] dist head rebuilt: d_future {current} -> {cfg.d_future}")
         return model
