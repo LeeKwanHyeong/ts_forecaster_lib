@@ -37,7 +37,7 @@ from modeling_module.models.model_builder import (
     build_patch_mixer_quantile,
     build_patchTST_base,
     build_patchTST_quantile,
-    build_patchTST_dist,
+    build_patchTST_dist, build_patch_mixer_dist,
 )
 from modeling_module.training.config import SpikeLossConfig, TrainingConfig, StageConfig
 from modeling_module.training.model_losses.loss_module import (
@@ -591,7 +591,10 @@ def _run_patchtst(
     loss_point_obj = loss_point if loss_point is not None else point_train_cfg.loss
     mode = infer_supervised_mode(loss_point_obj)
 
-    pt_base_cfg = PatchTSTConfig(**pt_kwargs, loss=loss_point_obj, loss_mode=("dist" if mode == "dist" else "point"))
+    pt_base_cfg = PatchTSTConfig(
+        **pt_kwargs, loss=loss_point_obj,
+        loss_mode=("dist" if mode == "dist" else "point")
+    )
     print(f'[run_patchtst] mode:: {mode}')
     if mode == "dist":
         pt_base = build_patchTST_dist(pt_base_cfg)
@@ -830,6 +833,7 @@ def _run_patchmixer(
 ):
     """PatchMixer 모델(Base, Quantile) 학습 실행."""
     loss_point_obj = loss_point if loss_point is not None else (point_train_cfg.loss if point_train_cfg else default_loss_point())
+    mode = infer_supervised_mode(loss_point_obj)
     quantiles = (0.1, 0.5, 0.9)
     loss_q_obj = coerce_quantile_loss(loss_quantile, quantiles=quantiles)
     if quantile_train_cfg is not None:
@@ -885,7 +889,7 @@ def _run_patchmixer(
         print(f"[DBG-pm_kwargs] failed to infer past_exo dims: {repr(e)}")
         d_past_cont, d_past_cat = 0, 0
 
-    pm_base_cfg = PatchMixerConfig(**pm_kwargs, head_dropout=0.05)
+    pm_base_cfg = PatchMixerConfig(**pm_kwargs, head_dropout=0.02)
     pm_base_cfg.learn_output_scale = False
     pm_base_cfg.learn_dw_gain = False
     pm_base_cfg.exo_is_normalized_default = False
@@ -895,7 +899,14 @@ def _run_patchmixer(
     pm_base_cfg.past_exo_cat_vocab_sizes = (512, 128)
     pm_base_cfg.past_exo_cat_embed_dims = (16, 16)
 
-    pm_base_model = build_patch_mixer_base(pm_base_cfg)
+    if mode == "dist":
+        pm_base_model = build_patch_mixer_dist(pm_base_cfg)
+        name_base_model = "PatchMixer Dist"
+    else:
+        pm_base_model = build_patch_mixer_base(pm_base_cfg)
+        name_base_model = "PatchMixer Base"
+
+
     print(f"PatchMixer Base ({freq.capitalize()})")
     best_pm_base = train_patchmixer(
         pm_base_model,
@@ -908,12 +919,12 @@ def _run_patchmixer(
         use_exogenous_mode=use_exogenous_mode,
     )
     if save_root:
-        ckpt_path = _make_ckpt_path(save_root, freq, "PatchMixerBase", lookback, horizon)
+        ckpt_path = _make_ckpt_path(save_root, freq, name_base_model.replace(" ", ""), lookback, horizon)
         save_model(pm_base_model, pm_base_cfg, ckpt_path)
         best_pm_base["ckpt_path"] = str(ckpt_path)
     results["PatchMixer Base"] = best_pm_base
 
-    pm_q_cfg = PatchMixerConfig(**pm_kwargs, quantiles=quantiles, head_dropout=0.02)
+    pm_q_cfg = PatchMixerConfig(**pm_kwargs, head_dropout = 0.02)
     pm_q_cfg.loss = loss_q_obj
     pm_q_cfg.learn_output_scale = False
     pm_q_cfg.learn_dw_gain = False

@@ -33,6 +33,11 @@ def build_patch_mixer_base(cfg):
     cfg = _ensure_patchmixer_config(cfg)
     return BaseModel(cfg)
 
+def build_patch_mixer_dist(cfg):
+    from modeling_module.models.PatchMixer.PatchMixer import DistModel
+    cfg = _ensure_patchmixer_config(cfg)
+    return DistModel(cfg)
+
 
 def build_patch_mixer_quantile(cfg):
     """PatchMixer 분위수 예측(Quantile) 모델 인스턴스 생성."""

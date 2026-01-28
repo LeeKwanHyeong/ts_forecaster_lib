@@ -206,15 +206,19 @@ class LossComputer:
                     )
 
                 parts = torch.tensor_split(y_hat, m, dim=-1)  # tuple of [B,H,1]
-                # Normal이면 (loc, scale_raw/scale)
                 loc = parts[0]
                 scale_raw = parts[1]
-
-                # scale이 이미 양수라면 그대로 써도 되지만,
-                # scale_raw일 수도 있으니 안전하게 softplus 적용
                 scale = F.softplus(scale_raw) + 1e-6
 
-                distr_args = (loc, scale)
+                if m == 2:
+                    distr_args = (loc, scale)
+                elif m == 3:
+                    df_raw = parts[2]
+                    # StudentT df는 양수 + 안정성 위해 보통 2 이상
+                    df = F.softplus(df_raw) + 2.0
+                    distr_args = (loc, scale, df)
+                else:
+                    raise ValueError(f"Unsupported outputsize_multiplier={m} for DistributionLoss")
 
             # 3) DistributionLoss는 __call__(y, distr_args, mask) 시그니처
             return self.loss_fn(y=y3, distr_args=distr_args, mask=mask)

@@ -1,7 +1,7 @@
 seed,variant,model_type,MAE,RMSE,SMAPE,save_root
-55,A0,point,108473.40625,166056.625,0.08731936663389206,C:/Users/USER/PycharmProjects/ts_forecaster_lib/raw_data/fit\walmart_patchmixer_ab\A0_y_only\seed_55
-55,A1,point,105169.6484375,160425.578125,0.08540170639753342,C:/Users/USER/PycharmProjects/ts_forecaster_lib/raw_data/fit\walmart_patchmixer_ab\A1_time_exog\seed_55
-55,A2,point,88148.4453125,141899.375,0.07286465167999268,C:/Users/USER/PycharmProjects/ts_forecaster_lib/raw_data/fit\walmart_patchmixer_ab\A2_time_holiday\seed_55
-55,A0,quantile(q50),71553.9921875,114369.9453125,0.059290118515491486,C:/Users/USER/PycharmProjects/ts_forecaster_lib/raw_data/fit\walmart_patchmixer_ab\A0_y_only\seed_55
-55,A1,quantile(q50),71458.4609375,112050.0703125,0.05951368436217308,C:/Users/USER/PycharmProjects/ts_forecaster_lib/raw_data/fit\walmart_patchmixer_ab\A1_time_exog\seed_55
-55,A2,quantile(q50),71835.984375,111054.265625,0.06021488830447197,C:/Users/USER/PycharmProjects/ts_forecaster_lib/raw_data/fit\walmart_patchmixer_ab\A2_time_holiday\seed_55
+55,A0,point,83576.2265625,144911.21875,0.06936270743608475,C:/Users/USER/PycharmProjects/ts_forecaster_lib/raw_data/fit\walmart_patchmixer_ab\A0_y_only\seed_55
+55,A1,point,83555.8828125,146189.703125,0.06904253363609314,C:/Users/USER/PycharmProjects/ts_forecaster_lib/raw_data/fit\walmart_patchmixer_ab\A1_time_exog\seed_55
+55,A2,point,80834.21875,140435.0625,0.06678939610719681,C:/Users/USER/PycharmProjects/ts_forecaster_lib/raw_data/fit\walmart_patchmixer_ab\A2_time_holiday\seed_55
+55,A0,quantile(q50),253046096.0,752241088.0,1.9889545440673828,C:/Users/USER/PycharmProjects/ts_forecaster_lib/raw_data/fit\walmart_patchmixer_ab\A0_y_only\seed_55
+55,A1,quantile(q50),9298800.0,111304624.0,1.998854160308838,C:/Users/USER/PycharmProjects/ts_forecaster_lib/raw_data/fit\walmart_patchmixer_ab\A1_time_exog\seed_55
+55,A2,quantile(q50),230890000.0,848032640.0,1.9950940608978271,C:/Users/USER/PycharmProjects/ts_forecaster_lib/raw_data/fit\walmart_patchmixer_ab\A2_time_holiday\seed_55

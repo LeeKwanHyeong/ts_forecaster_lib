@@ -594,10 +594,6 @@ class PatchTSTDistModel(nn.Module):
             elif name == "-scale":
                 outs.append(scale_raw_for_loss)
             elif name == "-df":
-                # [수정된 부분]
-                # df는 RevIN denorm 대상은 아니지만, 양수 제약조건이 필수입니다.
-                # Linear 출력은 음수가 나올 수 있으므로 Softplus로 감싸야 합니다.
-                # + 2.0을 해주는 이유는 df <= 2 일 때 분산이 무한대가 되는 것을 막아 학습 안정성을 높이기 위함입니다.
                 df_val = F.softplus(df_raw_n) + 2.0
                 outs.append(df_val)
             else:

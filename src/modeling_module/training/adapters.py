@@ -126,14 +126,18 @@ class DefaultAdapter:
         """
         모델의 다양한 출력 형식(Tuple, List, Dict)에서 메인 텐서를 추출하여 반환 형식을 통일.
         """
-        # 1. Tuple/List: 첫 번째 텐서 요소 반환
+        # Distribution Parameter 그대로 통과
+        if isinstance(out, dict) and ('loc' in out) and (('scale' in out) or ('scale_raw' in out)):
+            return out
+
+        # Tuple/List: 첫 번째 텐서 요소 반환
         if isinstance(out, (tuple, list)):
             for item in out:
                 if torch.is_tensor(item):
                     return item
             raise TypeError(f"Model returned tuple/list without a Tensor: {type(out)}")
 
-        # 2. Dict: 우선순위 키(PREFERRED_KEYS) 또는 첫 번째 텐서 값 반환
+        # Dict: 우선순위 키(PREFERRED_KEYS) 또는 첫 번째 텐서 값 반환
         if isinstance(out, dict):
             for k in PREFERRED_KEYS:  # PREFERRED_KEYS는 외부 정의 가정 (예: 'pred', 'logits')
                 v = out.get(k, None)
@@ -144,7 +148,7 @@ class DefaultAdapter:
                     return v
             raise TypeError(f"Model returned dict without a Tensor value: keys={list(out.keys())}")
 
-        # 3. Tensor: 그대로 반환
+        # Tensor: 그대로 반환
         if torch.is_tensor(out):
             return out
         raise TypeError(f"Model output is not a Tensor/tuple/dict: {type(out)}")
@@ -160,7 +164,7 @@ class DefaultAdapter:
             past_exo_cat: Optional[torch.Tensor] = None,
             part_ids: Optional[List[str]] = None,
             mode: Optional[str] = None,
-    ) -> torch.Tensor:
+    ) -> Any:
         """
         어댑터의 메인 순전파(Forward) 진입점.
 

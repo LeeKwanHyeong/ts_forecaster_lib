@@ -12,7 +12,7 @@ from modeling_module.models.common_layers.RevIN import RevIN
 from modeling_module.models.common_layers.heads.quantile_heads.decomposition_quantile_head import DecompositionQuantileHead
 from modeling_module.utils.exogenous_utils import apply_exo_shift_linear
 from modeling_module.utils.temporal_expander import TemporalExpander
-
+import torch.nn.functional as F
 # -------------------------
 # helpers
 # -------------------------
@@ -552,9 +552,154 @@ class PatchMixerQuantileModel(_ExoMixin):
             q_raw = torch.clamp_min(q_raw, 0.0)
 
         return {"q": q_raw}
+
+class PatchMixerDistributionModel(_ExoMixin):
+    """
+    Distribution forecasting for PatchMixer.
+    - outputs packed tensor: [B, H, out_mult]
+      e.g. Normal:   [loc, scale_raw]
+           StudentT: [loc, scale_raw, df_raw]
+    """
+
+    def __init__(self, cfg: PatchMixerConfig):
+        super().__init__()
+        self.config = cfg
+        self.horizon = int(cfg.horizon)
+        self.f_out = int(getattr(cfg, "f_out", 128))
+        self.final_nonneg = bool(getattr(cfg, "final_nonneg", True))
+
+        # runner에서 주입받은 loss_fn 기준
+        self.loss = cfg.loss
+        self.param_names = list(self.loss.param_names)
+        # param_names 참고용
+        self.out_mult = int(self.loss.outputsize_multiplier)
+        if "loc" not in self.param_names:
+            # 최소한 loc는 있어야 함
+            # (이 경우엔 0번을 loc로 가정)
+            self.loc_idx = 0
+        else:
+            self.loc_idx = self.param_names.index("loc")
+
+        print(f'loss: {self.loss} param_names: {self.param_names} out_mult: {self.out_mult}')
+
+        self.backbone = PatchMixerBackbone(configs=cfg)
+        z_dim = int(getattr(self.backbone, "out_dim", getattr(self.backbone, "patch_repr_dim", 0)))
+        if z_dim <= 0:
+            raise RuntimeError("Backbone must expose out_dim or patch_repr_dim")
+        self.z_dim = z_dim
+
+        self.use_revin = bool(getattr(cfg, "use_revin", True))
+        self.revin = RevIN(int(getattr(cfg, "enc_in", 1)))
+
+        self.use_part_embedding = bool(getattr(cfg, "use_part_embedding", False))
+        self.part_emb = None
+        self.z_fuser = None
+        if self.use_part_embedding and int(getattr(cfg, "part_vocab_size", 0)) > 0:
+            p_dim = int(getattr(cfg, "part_embed_dim", 16))
+            self.part_emb = nn.Embedding(int(cfg.part_vocab_size), p_dim)
+            self.z_fuser = nn.Linear(z_dim + p_dim, z_dim)
+
+        self.expander = TemporalExpander(
+            d_in=z_dim,
+            horizon=self.horizon,
+            f_out=self.f_out,
+            dropout=float(getattr(cfg, "dropout", 0.1)),
+            use_sinus=True,
+            season_period=int(getattr(cfg, "expander_season_period", 52)),
+            max_harmonics=int(getattr(cfg, "expander_max_harmonics", getattr(cfg, "max_harmonics", 16))),
+            use_conv=True,
+        )
+
+        head_hidden = int(getattr(cfg, "head_hidden", self.f_out))
+        self.pre_ln = nn.LayerNorm(self.f_out)
+
+        self.head = nn.Sequential(
+            nn.Linear(self.f_out, head_hidden),
+            nn.GELU(),
+            nn.Linear(head_hidden, self.out_mult),  # (loc, scale_raw[, df_raw])
+        )
+
+        # loc 안정화 (PointModel과 동일)
+        self.learn_output_scale = bool(getattr(cfg, "learn_output_scale", True))
+        if self.learn_output_scale:
+            self.out_scale = nn.Parameter(torch.tensor(1.0))
+            self.out_bias = nn.Parameter(torch.tensor(0.0))
+        else:
+            self.register_buffer("out_scale", torch.tensor(1.0))
+            self.register_buffer("out_bias", torch.tensor(0.0))
+
+        self.learn_dw_gain = bool(getattr(cfg, "learn_dw_gain", True))
+        self.dw_head = nn.Conv1d(1, 1, kernel_size=3, padding=1)
+        if self.learn_dw_gain:
+            self.dw_gain = nn.Parameter(torch.tensor(1.0))
+        else:
+            self.register_buffer("dw_gain", torch.tensor(1.0))
+
+        self._init_exo(cfg, z_dim=z_dim)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        future_exo: Optional[torch.Tensor] = None,
+        *,
+        past_exo_cont: Optional[torch.Tensor] = None,
+        past_exo_cat: Optional[torch.Tensor] = None,
+        part_ids: Optional[torch.Tensor] = None,
+        exo_is_normalized: Optional[bool] = None,
+        **kwargs,
+    ):
+        if exo_is_normalized is None:
+            exo_is_normalized = self.exo_is_normalized_default
+
+        x_in = self.revin(x, "norm") if self.use_revin else x
+        z = self.backbone(x_in)
+        z = self._inject_past_exo_z_gate(z, past_exo_cont, past_exo_cat)
+
+        if self.part_emb is not None and part_ids is not None:
+            pe = self.part_emb(part_ids.long())
+            z = self.z_fuser(torch.cat([z, pe], dim=-1))
+
+        f = self.pre_ln(self.expander(z))      # (B,H,F)
+        out = self.head(f)                     # (B,H,out_mult)
+        loc = out[..., self.loc_idx:self.loc_idx + 1]  # (B,H,1)
+
+        # 미래 외생변수 shift는 loc에만 적용
+        ex = None
+        if future_exo is not None and self.exo_head is not None and self.exo_dim > 0:
+            fe = _pad_or_slice_last_dim(future_exo.float(), self.exo_dim, pad_value=0.0)
+            ex = apply_exo_shift_linear(
+                self.exo_head, fe, horizon=self.horizon,
+                out_dtype=loc.dtype, out_device=loc.device,
+            )
+            if exo_is_normalized:
+                loc = loc + ex.unsqueeze(-1)  # (B,H,1)
+
+        # loc 안정화
+        loc = loc * self.out_scale + self.out_bias
+        loc = loc + self.dw_gain * self.dw_head(loc.transpose(1, 2)).transpose(1, 2)
+
+
+        # RevIN denorm: loc는 denorm 가능
+        if self.use_revin:
+            loc = self.revin(loc, "denorm")   # (B,H,1)
+
+        if (ex is not None) and (not exo_is_normalized):
+            loc = loc + ex.unsqueeze(-1)
+
+        if self.final_nonneg and (not self.training):
+            loc = torch.clamp_min(loc, 0.0)
+
+        out = out.clone()
+        out[..., self.loc_idx:self.loc_idx + 1] = loc
+
+        return out
+
+
+
 # ---------------------------------------------------------------------
 # Backward-compatible aliases (if your builders import BaseModel/QuantileModel)
 # ---------------------------------------------------------------------
 
 BaseModel = PatchMixerPointModel
+DistModel = PatchMixerDistributionModel
 QuantileModel = PatchMixerQuantileModel
