@@ -27,6 +27,7 @@ EPS = 1e-12
 def _as_float_tensor(x: torch.Tensor) -> torch.Tensor:
     return x if x.is_floating_point() else x.float()
 
+
 def _normalize_quantile_pred(
     pred_q: torch.Tensor | dict,
     target: torch.Tensor,

@@ -171,3 +171,90 @@ def eval_on_loader_quantile(model, loader, device, prefer_q=0.5, future_exo_cb=N
         yhats.append(yhat_point.detach().cpu().numpy())
 
     return np.concatenate(ys), np.concatenate(yhats)
+
+import numpy as np
+import torch
+
+def _pick_q50_from_q(q: torch.Tensor, *, prefer_q=0.5, quantiles=(0.1,0.5,0.9), horizon=27) -> torch.Tensor:
+    """
+    q: (B,Q,H) or (B,H,Q)
+    return: (B,H) q50
+    """
+    qs = list(quantiles)
+    idx = int(min(range(len(qs)), key=lambda i: abs(qs[i]-prefer_q)))
+
+    if q.ndim != 3:
+        raise RuntimeError(f"q ndim={q.ndim}, shape={tuple(q.shape)}")
+
+    # normalize to (B,Q,H)
+    if q.shape[1] == horizon and q.shape[2] == len(qs):   # (B,H,Q)
+        q = q.transpose(1, 2)                              # -> (B,Q,H)
+    elif q.shape[1] == len(qs) and q.shape[2] == horizon:  # (B,Q,H)
+        pass
+    else:
+        raise RuntimeError(f"Unrecognized q shape={tuple(q.shape)} (H={horizon}, Q={len(qs)})")
+
+    return q[:, idx, :]  # (B,H)
+
+@torch.no_grad()
+def eval_on_loader_quantile_v2(
+    model, loader, device,
+    *,
+    prefer_q=0.5,
+    use_exo_inputs: bool,
+    quantiles_fallback=(0.1,0.5,0.9),
+    horizon: int = 27,
+):
+    model.eval()
+    ys, yhats = [], []
+
+    # 가능하면 model.configs.quantiles 사용
+    qs = getattr(getattr(model, "configs", None), "quantiles", None)
+    quantiles = tuple(qs) if qs is not None else tuple(quantiles_fallback)
+
+    for batch in loader:
+        # loader 포맷: (x, y, uid, fe, pe_cont, pe_cat)
+        x = batch[0].to(device)
+        y = batch[1].to(device)
+
+        future_exo = None
+        past_exo_cont = None
+        past_exo_cat  = None
+
+        if use_exo_inputs:
+            # future exo는 loader가 이미 batch[3]로 줌
+            if len(batch) > 3:
+                fe = batch[3].to(device)
+                # (B,H,0) 같은 경우 None 처리
+                if fe.ndim == 3 and fe.shape[-1] == 0:
+                    future_exo = None
+                else:
+                    future_exo = fe
+
+            if len(batch) > 4:
+                pe_cont = batch[4].to(device)
+                past_exo_cont = None if (pe_cont.ndim == 3 and pe_cont.shape[-1] == 0) else pe_cont
+
+            if len(batch) > 5:
+                pe_cat = batch[5].to(device)
+                past_exo_cat = None if (pe_cat.ndim == 3 and pe_cat.shape[-1] == 0) else pe_cat
+
+        out = model(
+            x,
+            future_exo=future_exo,
+            past_exo_cont=past_exo_cont,
+            past_exo_cat=past_exo_cat,
+        )
+
+        # PatchMixerQuantileModel: {"q": (B,Q,H)} 로 반환
+        if isinstance(out, dict) and "q" in out:
+            pred = _pick_q50_from_q(out["q"], prefer_q=prefer_q, quantiles=quantiles, horizon=horizon)  # (B,H)
+        else:
+            # PatchTST 등 기존 유틸과 호환이 필요하면 여기서 _extract_pred_from_output 사용
+            yhat_point, _ = _extract_pred_from_output(out, prefer_q=prefer_q)  # (B,H) 기대
+            pred = yhat_point
+
+        ys.append(y.squeeze(-1).detach().cpu().numpy())   # (B,H)
+        yhats.append(pred.detach().cpu().numpy())         # (B,H)
+
+    return np.concatenate(ys, axis=0), np.concatenate(yhats, axis=0)

@@ -78,6 +78,8 @@ class PatchMixerConfig(TrainingConfig):
     learn_output_scale: bool = True  # 출력 스케일 파라미터 학습 여부
     learn_dw_gain: bool = True  # Depthwise Conv 이득(Gain) 학습 여부
 
+    use_revin: bool = True
+
 
 # =========================
 # 프리셋: 월간/주간

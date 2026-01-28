@@ -12,7 +12,7 @@ from modeling_module.models.common_layers.RevIN import RevIN
 from modeling_module.models.common_layers.heads.quantile_heads.decomposition_quantile_head import DecompositionQuantileHead
 from modeling_module.utils.exogenous_utils import apply_exo_shift_linear
 from modeling_module.utils.temporal_expander import TemporalExpander
-import torch.nn.functional as F
+
 # -------------------------
 # helpers
 # -------------------------
@@ -387,7 +387,7 @@ class PatchMixerPointModel(_ExoMixin):
 
         # 8) 출력 제약 조건 적용
         # 추론 시 음수 예측 방지 (Clamp)
-        if self.final_nonneg and (not self.training):
+        if self.final_nonneg:
             y = torch.clamp_min(y, 0.0)
 
         return y
@@ -507,6 +507,11 @@ class PatchMixerQuantileModel(_ExoMixin):
         f = self.expander(z)  # (B, H, F)
         q = self.head(f)  # (B, Q, H) 또는 (B, H, Q) - 헤드 설정에 따라 상이
 
+        if self.use_revin:
+            clip = float(getattr(self.configs, "q_clip_norm", 15.0))  # 10~20 권장
+            # hard clamp보다 tanh clip이 학습 안정적
+            q = clip * torch.tanh(q / clip)
+
         # 4) 미래 외생 변수 보정 (Shift)
         ex = None
         if future_exo is not None and self.exo_head is not None and self.exo_dim > 0:
@@ -531,9 +536,15 @@ class PatchMixerQuantileModel(_ExoMixin):
         if q.dim() != 3:
             raise RuntimeError(f"Unexpected quantile tensor rank: {q.dim()}")
 
-        # (B, Q, H) 형태로 통일
-        if q.shape[1] == self.horizon:
-            q = q.transpose(1, 2)  # (B, H, Q) -> (B, Q, H)
+        Q = len(getattr(self.configs, "quantiles", (0.1, 0.5, 0.9)))
+
+        # (B,Q,H)로 통일
+        if q.shape[1] == self.horizon and q.shape[2] == Q:  # (B,H,Q)
+            q = q.transpose(1, 2).contiguous()  # -> (B,Q,H)
+        elif q.shape[1] == Q and q.shape[2] == self.horizon:  # (B,Q,H)
+            q = q.contiguous()
+        else:
+            raise RuntimeError(f"Unexpected q shape: {tuple(q.shape)}")
 
         # 각 분위수 채널별로 RevIN 역변환 적용
         qs: List[torch.Tensor] = []
@@ -548,17 +559,33 @@ class PatchMixerQuantileModel(_ExoMixin):
             q_raw = q_raw + ex.unsqueeze(1)
 
         # 7) 출력 제약 (Non-negative)
-        if self.final_nonneg and (not self.training):
-            q_raw = torch.clamp_min(q_raw, 0.0)
+        # if self.final_nonneg:
+        #     q_raw = torch.clamp_min(q_raw, 0.0)
 
         return {"q": q_raw}
+# ---------------------------------------------------------------------
+# Backward-compatible aliases (if your builders import BaseModel/QuantileModel)
+# ---------------------------------------------------------------------
 
+BaseModel = PatchMixerPointModel
+QuantileModel = PatchMixerQuantileModel
+
+
+
+# ============================================================
+# Distribution Model (Normal/StudentT/etc.)
+# ============================================================
 class PatchMixerDistributionModel(_ExoMixin):
-    """
-    Distribution forecasting for PatchMixer.
-    - outputs packed tensor: [B, H, out_mult]
-      e.g. Normal:   [loc, scale_raw]
-           StudentT: [loc, scale_raw, df_raw]
+    """Distribution forecasting for PatchMixer.
+
+    Outputs a packed tensor of shape [B, H, out_mult].
+    Example:
+      - Normal:   out_mult=2  -> [loc, scale_raw]
+      - StudentT: out_mult=3  -> [df_raw, loc, scale_raw] (or permuted via param_names)
+
+    NOTE:
+      - Positivity transforms (scale/df) are applied in LossComputer (DistributionLoss branch),
+        so the model can output raw unconstrained values for non-loc parameters.
     """
 
     def __init__(self, cfg: PatchMixerConfig):
@@ -568,21 +595,24 @@ class PatchMixerDistributionModel(_ExoMixin):
         self.f_out = int(getattr(cfg, "f_out", 128))
         self.final_nonneg = bool(getattr(cfg, "final_nonneg", True))
 
-        # runner에서 주입받은 loss_fn 기준
-        self.loss = cfg.loss
-        self.param_names = list(self.loss.param_names)
-        # param_names 참고용
-        self.out_mult = int(self.loss.outputsize_multiplier)
-        if "loc" not in self.param_names:
-            # 최소한 loc는 있어야 함
-            # (이 경우엔 0번을 loc로 가정)
-            self.loc_idx = 0
-        else:
-            self.loc_idx = self.param_names.index("loc")
+        self.loss = getattr(cfg, "loss", None)
 
-        print(f'loss: {self.loss} param_names: {self.param_names} out_mult: {self.out_mult}')
+        print(f"[PatchMixer] loss = {self.loss}")
+        print(f"[PatchMiixer] loss.distribution = {self.loss.distribution}")
+        print(f"[PatchMixer] param_names = {getattr(self.loss, 'param_names', 'no')}")
+        self.param_names = list(getattr(self.loss, "param_names", [])) if self.loss is not None else []
+        self.out_mult = int(getattr(self.loss, "outputsize_multiplier", 2)) if self.loss is not None else 2
 
-        self.backbone = PatchMixerBackbone(configs=cfg)
+        # locate loc index (fallback 0)
+        self.loc_idx = 0
+        for i, n in enumerate(self.param_names):
+            if str(n).lstrip("-") == "loc":
+                self.loc_idx = i
+                break
+
+        print(f"[PatchMixerDist] loss={type(self.loss).__name__} param_names={self.param_names} out_mult={self.out_mult}")
+
+        self.backbone = MultiScalePatchMixerBackbone(configs=cfg) if getattr(cfg, "use_multiscale", False) else PatchMixerBackbone(configs=cfg)
         z_dim = int(getattr(self.backbone, "out_dim", getattr(self.backbone, "patch_repr_dim", 0)))
         if z_dim <= 0:
             raise RuntimeError("Backbone must expose out_dim or patch_repr_dim")
@@ -612,14 +642,13 @@ class PatchMixerDistributionModel(_ExoMixin):
 
         head_hidden = int(getattr(cfg, "head_hidden", self.f_out))
         self.pre_ln = nn.LayerNorm(self.f_out)
-
         self.head = nn.Sequential(
             nn.Linear(self.f_out, head_hidden),
             nn.GELU(),
-            nn.Linear(head_hidden, self.out_mult),  # (loc, scale_raw[, df_raw])
+            nn.Linear(head_hidden, self.out_mult),
         )
 
-        # loc 안정화 (PointModel과 동일)
+        # loc stabilization
         self.learn_output_scale = bool(getattr(cfg, "learn_output_scale", True))
         if self.learn_output_scale:
             self.out_scale = nn.Parameter(torch.tensor(1.0))
@@ -661,9 +690,10 @@ class PatchMixerDistributionModel(_ExoMixin):
 
         f = self.pre_ln(self.expander(z))      # (B,H,F)
         out = self.head(f)                     # (B,H,out_mult)
+
         loc = out[..., self.loc_idx:self.loc_idx + 1]  # (B,H,1)
 
-        # 미래 외생변수 shift는 loc에만 적용
+        # future exogenous shift -> loc only
         ex = None
         if future_exo is not None and self.exo_head is not None and self.exo_dim > 0:
             fe = _pad_or_slice_last_dim(future_exo.float(), self.exo_dim, pad_value=0.0)
@@ -672,34 +702,23 @@ class PatchMixerDistributionModel(_ExoMixin):
                 out_dtype=loc.dtype, out_device=loc.device,
             )
             if exo_is_normalized:
-                loc = loc + ex.unsqueeze(-1)  # (B,H,1)
+                loc = loc + ex.unsqueeze(-1)
 
-        # loc 안정화
         loc = loc * self.out_scale + self.out_bias
         loc = loc + self.dw_gain * self.dw_head(loc.transpose(1, 2)).transpose(1, 2)
 
-
-        # RevIN denorm: loc는 denorm 가능
         if self.use_revin:
-            loc = self.revin(loc, "denorm")   # (B,H,1)
+            loc = self.revin(loc, "denorm")
 
         if (ex is not None) and (not exo_is_normalized):
             loc = loc + ex.unsqueeze(-1)
 
-        if self.final_nonneg and (not self.training):
+        if self.final_nonneg:
             loc = torch.clamp_min(loc, 0.0)
 
         out = out.clone()
         out[..., self.loc_idx:self.loc_idx + 1] = loc
-
         return out
 
-
-
-# ---------------------------------------------------------------------
-# Backward-compatible aliases (if your builders import BaseModel/QuantileModel)
-# ---------------------------------------------------------------------
-
-BaseModel = PatchMixerPointModel
+# alias for builders
 DistModel = PatchMixerDistributionModel
-QuantileModel = PatchMixerQuantileModel

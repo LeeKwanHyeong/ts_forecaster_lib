@@ -1,4 +1,5 @@
-"""losses.py
+"""
+losses.py
 
 Loss computation utilities.
 
@@ -6,26 +7,39 @@ Loss computation utilities.
 - Prefer using TrainingConfig.loss (a loss object) rather than string-based loss_mode/point_loss/dist_loss.
 - Keep backward compatibility: if cfg.loss is None, fall back to legacy fields.
 
-Also includes robust tensor-shape normalization for:
-- point: y_hat in [B,H] / [B,1,H] / [B,H,1]
-- quantile: y_hat in [B,H,Q] / [B,Q,H] / [B,H,1,Q] / [B,Q,H,1]
-- distribution (Normal etc.): y_hat in [B,H,2] (loc, scale_raw)
+Shape normalization (conservative):
+- y: [B,H] or [B,H,1]          -> [B,H,1]
+- point y_hat: [B,H] / [B,1,H] / [B,H,1] -> [B,H,1]
+- quantile y_hat:
+    [B,H,Q] / [B,Q,H] / [B,H,1,Q] / [B,Q,H,1] -> normalized for each loss type
+- distribution y_hat (packed):
+    [B,H,M] / [B,H,1,M] / [B,1,H,M] -> [B,H,M]
+    where M == loss.outputsize_multiplier
 
-This file intentionally stays conservative: it only normalizes shapes and delegates
-actual loss math to the provided loss objects in loss_module.py.
+This module only normalizes shapes and maps raw network outputs to valid distribution args.
+Actual loss math is delegated to loss objects in loss_module.py.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Optional, Any, Dict, Tuple
+from typing import Any, Optional, Tuple, List
 
 import torch
 import torch.nn as nn
-
-from modeling_module.training.model_losses.loss_module import MAE, Huber, QuantileLoss, MQLoss, DistributionLoss
 import torch.nn.functional as F
 
+from modeling_module.training.model_losses.loss_module import (
+    MAE,
+    Huber,
+    QuantileLoss,
+    MQLoss,
+    DistributionLoss,
+)
+
+
+# ---------------------------------------------------------------------
+# Basic helpers
+# ---------------------------------------------------------------------
 def _ensure_3d_y(y: torch.Tensor) -> torch.Tensor:
     """y -> [B,H,1]"""
     if y.dim() == 2:
@@ -35,54 +49,108 @@ def _ensure_3d_y(y: torch.Tensor) -> torch.Tensor:
     raise ValueError(f"y must be 2D/3D, got shape={tuple(y.shape)}")
 
 
-def _ensure_point_yhat(y_hat: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+def _mask_from_y(y_bh1: torch.Tensor) -> torch.Tensor:
+    """Finite mask: [B,H,1]"""
+    return torch.isfinite(y_bh1).float()
+
+
+def _ensure_point_yhat(y_hat: torch.Tensor, y_bh1: torch.Tensor) -> torch.Tensor:
     """point y_hat -> [B,H,1] aligned with y=[B,H,1]."""
     if y_hat.dim() == 2:
         y_hat = y_hat.unsqueeze(-1)
-    elif y_hat.dim() == 3:
-        pass
-    else:
+    elif y_hat.dim() != 3:
         raise ValueError(f"point y_hat must be 2D/3D, got {tuple(y_hat.shape)}")
 
     # [B,1,H] -> [B,H,1]
-    if y_hat.shape[1] == 1 and y_hat.shape[2] == y.shape[1]:
+    if y_hat.shape[1] == 1 and y_hat.shape[2] == y_bh1.shape[1]:
         y_hat = y_hat.permute(0, 2, 1).contiguous()
 
-    # [B,H] -> [B,H,1] already handled
+    # now should be [B,H,1] or [B,H,C] (C>1이면 point loss에서 에러 내는 게 맞음)
     return y_hat
 
 
-def _ensure_quantile_yhat(y_hat: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-    """quantile y_hat -> [B,H,1,Q] (for MQLoss) or [B,H,Q] (for QuantileLoss).
-
-    - If input is [B,Q,H], permute -> [B,H,Q]
-    - If input is [B,H,Q], keep
-    - If input is [B,H,1,Q], keep
+def _ensure_quantile_yhat(y_hat: torch.Tensor, y_bh1: torch.Tensor) -> torch.Tensor:
     """
-    if y_hat.dim() == 4:
-        # prefer [B,H,1,Q]
-        # if [B,Q,H,1] -> permute
-        if y_hat.shape[-1] == 1 and y_hat.shape[2] == y.shape[1]:
-            y_hat = y_hat.permute(0, 2, 3, 1).contiguous()  # [B,H,1,Q]
+    quantile y_hat -> [B,H,Q] or [B,H,1,Q].
+
+    Accept:
+    - [B,H,Q]
+    - [B,Q,H]       -> permute to [B,H,Q]
+    - [B,H,1,Q]
+    - [B,Q,H,1]     -> permute to [B,H,1,Q]
+    - [B,1,H,Q]     -> permute to [B,H,1,Q]
+    """
+    H = y_bh1.shape[1]
+
+    if y_hat.dim() == 3:
+        # [B,Q,H] -> [B,H,Q]
+        if y_hat.shape[1] != H and y_hat.shape[2] == H:
+            y_hat = y_hat.permute(0, 2, 1).contiguous()
         return y_hat
 
-    if y_hat.dim() != 3:
-        raise ValueError(f"quantile y_hat must be 3D/4D, got {tuple(y_hat.shape)}")
+    if y_hat.dim() == 4:
+        # [B,Q,H,1] -> [B,H,1,Q]
+        if y_hat.shape[2] == H and y_hat.shape[-1] == 1 and y_hat.shape[1] != H:
+            y_hat = y_hat.permute(0, 2, 3, 1).contiguous()
+            return y_hat
 
-    # [B,Q,H] -> [B,H,Q]
-    if y_hat.shape[1] != y.shape[1] and y_hat.shape[2] == y.shape[1]:
-        y_hat = y_hat.permute(0, 2, 1).contiguous()
+        # [B,1,H,Q] -> [B,H,1,Q]
+        if y_hat.shape[1] == 1 and y_hat.shape[2] == H:
+            y_hat = y_hat.permute(0, 2, 1, 3).contiguous()
+            return y_hat
 
-    return y_hat
+        # already [B,H,1,Q] (or [B,H,N,Q])
+        return y_hat
+
+    raise ValueError(f"quantile y_hat must be 3D/4D, got {tuple(y_hat.shape)}")
 
 
-def _mask_from_y(y: torch.Tensor) -> torch.Tensor:
-    # NaN/Inf 방지용 기본 mask
-    return torch.isfinite(y).float()
+def _ensure_dist_yhat_packed(y_hat: torch.Tensor, y_bh1: torch.Tensor) -> torch.Tensor:
+    """
+    distribution packed y_hat -> [B,H,M]
+
+    Accept:
+    - [B,H,M]
+    - [B,H,1,M] -> squeeze dim=2
+    - [B,1,H,M] -> permute to [B,H,M]
+    """
+    H = y_bh1.shape[1]
+
+    if y_hat.dim() == 3:
+        return y_hat
+
+    if y_hat.dim() == 4:
+        # [B,H,1,M] -> [B,H,M]
+        if y_hat.shape[1] == H and y_hat.shape[2] == 1:
+            return y_hat.squeeze(2)
+
+        # [B,1,H,M] -> [B,H,M]
+        if y_hat.shape[1] == 1 and y_hat.shape[2] == H:
+            return y_hat.permute(0, 2, 1, 3).contiguous().squeeze(2)
+
+    raise ValueError(f"distribution packed y_hat must be 3D/4D, got {tuple(y_hat.shape)}")
 
 
+def _strip_param_names(raw: List[Any]) -> List[str]:
+    return [str(x).lstrip("-").lower() for x in raw]
+
+
+def _positive(x: torch.Tensor, transform: str) -> torch.Tensor:
+    transform = (transform or "softplus").lower()
+    if transform in ("exp", "exponential"):
+        return torch.exp(x)
+    if transform in ("relu",):
+        return F.relu(x)
+    # default
+    return F.softplus(x)
+
+
+# ---------------------------------------------------------------------
+# LossComputer
+# ---------------------------------------------------------------------
 class LossComputer:
-    """Compute loss for a batch given TrainingConfig.
+    """
+    Compute loss for a batch given TrainingConfig.
 
     Preferred:
         cfg.loss: nn.Module
@@ -97,10 +165,9 @@ class LossComputer:
         # fallback: legacy
         if self.loss_fn is None:
             loss_mode = getattr(cfg, "loss_mode", "point")
-            if loss_mode == "dist":
+            if loss_mode in ("dist", "distribution"):
                 self.loss_fn = DistributionLoss("Normal")
             elif loss_mode == "quantile":
-                # default multi-quantile (0.1,0.5,0.9)
                 self.loss_fn = MQLoss(quantiles=[0.1, 0.5, 0.9])
             else:
                 point_loss = getattr(cfg, "point_loss", "mae")
@@ -109,141 +176,171 @@ class LossComputer:
                 else:
                     self.loss_fn = MAE()
 
-    def compute(self, y_hat: Any, y: torch.Tensor,is_val, *, y_insample: Optional[torch.Tensor] = None) -> torch.Tensor:
-        y3 = _ensure_3d_y(y)
-        mask = _mask_from_y(y3)
+    def compute(
+        self,
+        y_hat: Any,
+        y: torch.Tensor,
+        is_val: bool,
+        *,
+        y_insample: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        y_bh1 = _ensure_3d_y(y)
+        mask = _mask_from_y(y_bh1)
 
-        # handle dict outputs
+        # ------------------------------------------------------------
+        # Unwrap dict outputs (model may return dict)
+        # ------------------------------------------------------------
         if isinstance(y_hat, dict):
             if "y_hat" in y_hat:
                 y_hat = y_hat["y_hat"]
             elif "loc" in y_hat and ("scale_raw" in y_hat or "scale" in y_hat):
                 loc = y_hat["loc"]
                 scale_raw = y_hat.get("scale_raw", y_hat.get("scale"))
+                df_raw = y_hat.get("df_raw", y_hat.get("df", None))
+
                 if loc.dim() == 2:
                     loc = loc.unsqueeze(-1)
                 if scale_raw.dim() == 2:
                     scale_raw = scale_raw.unsqueeze(-1)
-                y_hat = torch.cat([loc, scale_raw], dim=-1)  # [B,H,2]
+                if df_raw is not None and df_raw.dim() == 2:
+                    df_raw = df_raw.unsqueeze(-1)
+
+                # pack to [B,H,M]
+                if df_raw is not None:
+                    y_hat = torch.cat([df_raw, loc, scale_raw], dim=-1)
+                else:
+                    y_hat = torch.cat([loc, scale_raw], dim=-1)
             else:
                 # first tensor-like
                 y_hat = next((v for v in y_hat.values() if torch.is_tensor(v)), y_hat)
 
-        # route by loss type
+
         name = self.loss_fn.__class__.__name__
 
-        # if name in ("DistributionLoss",):
-        #     if not torch.is_tensor(y_hat):
-        #         raise ValueError(f"DistributionLoss expects tensor y_hat, got {type(y_hat)}")
-        #     # y_hat: [B,H,2] for univariate
-        #     return self.loss_fn(y=y3, y_hat=y_hat, y_insample=y_insample, mask=mask)
-
-        if name in ("DistributionLoss",):
-            # 1) y_hat을 (loc, scale, ...) 튜플로 변환해야 함
-            #    - dict 형태면 loc/scale을 꺼내고
-            #    - tensor 형태면 마지막 차원을 split
-
-            distr_args = None
-
-            if isinstance(y_hat, dict):
-                # PatchTSTDistModel이 dict로 반환하는 케이스를 우선 지원
-                if "loc" in y_hat and ("scale" in y_hat or "scale_raw" in y_hat):
-                    loc = y_hat["loc"]
-                    scale = y_hat.get("scale", None)
-                    scale_raw = y_hat.get("scale_raw", None)
-
-                    # shape 정규화: [B,H] -> [B,H,1]
-                    if loc.dim() == 2:
-                        loc = loc.unsqueeze(-1)
-
-                    if scale is not None:
-                        if scale.dim() == 2:
-                            scale = scale.unsqueeze(-1)
-                    else:
-                        # scale_raw만 있으면 양수화(softplus)해서 scale로 만든다
-                        if scale_raw is None:
-                            raise ValueError("Distribution dict output requires 'scale' or 'scale_raw'.")
-                        if scale_raw.dim() == 2:
-                            scale_raw = scale_raw.unsqueeze(-1)
-                        scale = F.softplus(scale_raw) + 1e-6  # 최소 eps
-
-                    distr_args = (loc, scale)
-
-                elif "y_hat" in y_hat:
-                    # 혹시 y_hat key에 packed tensor가 들어오는 케이스
-                    y_hat = y_hat["y_hat"]
-
-                else:
-                    # dict에서 첫 텐서 pick (fallback)
-                    y_hat = next((v for v in y_hat.values() if torch.is_tensor(v)), y_hat)
-
-            if distr_args is None:
-                # 2) tensor 케이스: packed tensor -> tuple로 변환
-                if not torch.is_tensor(y_hat):
-                    raise ValueError(f"DistributionLoss expects tensor or dict, got {type(y_hat)}")
-
-                # 허용 shape 예:
-                #   [B,H,2] or [B,H,1,2] or [B,H,N,2]
-                # 마지막 차원이 multiplier(여기서는 2: loc, scale_raw/scale)라고 가정
-                if y_hat.dim() == 4:
-                    # [B,H,1,2] 같은 경우 N축이 1이면 squeeze
-                    if y_hat.shape[2] == 1:
-                        y_hat = y_hat.squeeze(2)  # -> [B,H,2]
-                    else:
-                        # 멀티채널이면 우선 첫 채널만 (univariate 학습 기준)
-                        # [B,H,N,2] -> [B,H,2] (N=0)
-                        y_hat = y_hat[:, :, 0, :]
-
-                if y_hat.dim() != 3:
-                    raise ValueError(
-                        f"DistributionLoss expects y_hat as [B,H,2] (or [B,H,1,2]), got {tuple(y_hat.shape)}")
-
-                # multiplier = loss_fn.outputsize_multiplier (Normal이면 2)
-                m = int(getattr(self.loss_fn, "outputsize_multiplier", 2))
-                if y_hat.shape[-1] != m:
-                    raise ValueError(
-                        f"DistributionLoss expects last dim == outputsize_multiplier={m}, got y_hat shape {tuple(y_hat.shape)}"
-                    )
-
-                parts = torch.tensor_split(y_hat, m, dim=-1)  # tuple of [B,H,1]
-                loc = parts[0]
-                scale_raw = parts[1]
-                scale = F.softplus(scale_raw) + 1e-6
-
-                if m == 2:
-                    distr_args = (loc, scale)
-                elif m == 3:
-                    df_raw = parts[2]
-                    # StudentT df는 양수 + 안정성 위해 보통 2 이상
-                    df = F.softplus(df_raw) + 2.0
-                    distr_args = (loc, scale, df)
-                else:
-                    raise ValueError(f"Unsupported outputsize_multiplier={m} for DistributionLoss")
-
-            # 3) DistributionLoss는 __call__(y, distr_args, mask) 시그니처
-            return self.loss_fn(y=y3, distr_args=distr_args, mask=mask)
-
-        if name in ("MQLoss",):
+        # ------------------------------------------------------------
+        # DistributionLoss (Normal/StudentT 등)
+        # ------------------------------------------------------------
+        if name == "DistributionLoss":
             if not torch.is_tensor(y_hat):
-                raise ValueError(f"MQLoss expects tensor y_hat, got {type(y_hat)}")
-            y_hat3 = _ensure_quantile_yhat(y_hat, y3)
-            if y_hat3.dim() == 3:
-                # [B,H,Q] -> [B,H,1,Q]
-                y_hat4 = y_hat3.unsqueeze(2)
+                raise TypeError(f"DistributionLoss expects tensor or dict output, got {type(y_hat)}")
+
+            # config knobs
+            eps = float(getattr(self.cfg, "dist_eps", 1e-8))
+            min_scale = float(getattr(self.cfg, "dist_min_scale", 0.0))
+            df_min = float(getattr(self.cfg, "dist_min_df", 2.0))
+            scale_is_positive = bool(getattr(self.cfg, "dist_scale_is_positive", True))
+            scale_transform = str(getattr(self.cfg, "dist_scale_transform", "softplus"))
+
+            # distribution name
+            distr_name = str(
+                getattr(self.loss_fn, "distribution", getattr(self.loss_fn, "dist_name", getattr(self.cfg, "dist_name", "normal")))
+            ).lower()
+
+            # expected multiplier
+            m = int(getattr(self.loss_fn, "outputsize_multiplier", 2))
+
+            y_hat_bhm = _ensure_dist_yhat_packed(y_hat, y_bh1)
+
+            if y_hat_bhm.shape[-1] != m:
+                raise ValueError(
+                    f"DistributionLoss expects last dim == outputsize_multiplier={m} "
+                    f"(dist={distr_name}), got y_hat shape {tuple(y_hat_bhm.shape)}. "
+                    f"→ 모델 head out_features(out_mult)와 loss.outputsize_multiplier가 불일치입니다."
+                )
+
+            parts = torch.tensor_split(y_hat_bhm, m, dim=-1)  # each [B,H,1]
+
+            raw_names = list(getattr(self.loss_fn, "param_names", []))
+            names = _strip_param_names(raw_names)
+
+            def _idx(key: str, default: Optional[int]) -> Optional[int]:
+                key = key.lower()
+                return names.index(key) if key in names else default
+
+            # default ordering (when param_names absent)
+            if m == 2:
+                loc_i = _idx("loc", 0)
+                scale_i = _idx("scale", 1)
+                df_i = None
             else:
-                y_hat4 = y_hat3
-            return self.loss_fn(y=y3, y_hat=y_hat4, y_insample=y_insample, mask=mask)
+                # StudentT commonly: [df, loc, scale]
+                df_i = _idx("df", 0)
+                loc_i = _idx("loc", 1)
+                scale_i = _idx("scale", 2)
 
-        if name in ("QuantileLoss",):
+            if loc_i is None or scale_i is None:
+                raise ValueError(f"Cannot infer loc/scale indices from param_names={raw_names} (m={m})")
+
+            loc = parts[loc_i]
+            scale_raw = parts[scale_i]
+
+            if scale_is_positive:
+                scale = _positive(scale_raw, scale_transform)
+            else:
+                scale = scale_raw
+            scale = scale + (min_scale + eps)
+
+            if df_i is not None and ("studentt" in distr_name or m >= 3):
+                df_raw = parts[df_i]
+                df = _positive(df_raw, scale_transform) + df_min
+                distr_args = (df, loc, scale)
+            else:
+                distr_args = (loc, scale)
+
+            # some implementations want [B,H] instead of [B,H,1]
+            try:
+                return self.loss_fn(y=y_bh1, distr_args=distr_args, mask=mask)
+            except TypeError:
+                y2 = y_bh1.squeeze(-1)
+                mask2 = mask.squeeze(-1) if mask is not None and mask.dim() == 3 else mask
+                distr_args2 = tuple(t.squeeze(-1) for t in distr_args)
+                return self.loss_fn(y=y2, distr_args=distr_args2, mask=mask2)
+
+        # ------------------------------------------------------------
+        # Quantile losses
+        # ------------------------------------------------------------
+        if name == "MQLoss":
             if not torch.is_tensor(y_hat):
-                raise ValueError(f"QuantileLoss expects tensor y_hat, got {type(y_hat)}")
-            y_hat3 = _ensure_quantile_yhat(y_hat, y3)
-            if y_hat3.dim() == 4 and y_hat3.shape[2] == 1:
-                y_hat3 = y_hat3.squeeze(2)
-            return self.loss_fn(y=y3, y_hat=y_hat3, y_insample=y_insample, mask=mask)
+                raise TypeError(f"MQLoss expects tensor y_hat, got {type(y_hat)}")
 
-        # default: point loss
+            qhat = _ensure_quantile_yhat(y_hat, y_bh1)
+            # MQLoss expects [B,H,N,Q] (your implementation uses N=1)
+            if qhat.dim() == 3:
+                qhat = qhat.unsqueeze(2)  # [B,H,1,Q]
+            return self.loss_fn(y=y_bh1, y_hat=qhat, y_insample=y_insample, mask=mask)
+
+        if name == "QuantileLoss":
+            if not torch.is_tensor(y_hat):
+                raise TypeError(f"QuantileLoss expects tensor y_hat, got {type(y_hat)}")
+
+            qhat = _ensure_quantile_yhat(y_hat, y_bh1)
+            # QuantileLoss typically expects [B,H,Q]
+            if qhat.dim() == 4 and qhat.shape[2] == 1:
+                qhat = qhat.squeeze(2)
+            return self.loss_fn(y=y_bh1, y_hat=qhat, y_insample=y_insample, mask=mask)
+
+        if name == "MultiQuantilePinball":
+            if not torch.is_tensor(y_hat):
+                raise TypeError(f"MultiQuantilePinball expects tensor y_hat, got {type(y_hat)}")
+
+            qhat = _ensure_quantile_yhat(y_hat, y_bh1)
+
+            # (선택) [B,H,1,Q] 같은 형태면 N=1 squeeze
+            if qhat.dim() == 4 and qhat.shape[2] == 1:
+                qhat = qhat.squeeze(2)  # -> [B,H,Q]
+            # print("[DBG] y    :", y_bh1.shape, y_bh1.min().item(), y_bh1.max().item(), y_bh1.mean().item())
+            # print("[DBG] y_hat:", qhat.shape, qhat.min().item(), qhat.max().item(), qhat.mean().item())
+            # y_insample은 필요 없을 수 있으니 try/except로 흡수
+            try:
+                return self.loss_fn(y=y_bh1, y_hat=qhat, y_insample=y_insample, mask=mask)
+            except TypeError:
+                return self.loss_fn(y=y_bh1, y_hat=qhat, mask=mask)
+
+        # ------------------------------------------------------------
+        # Default: point loss
+        # ------------------------------------------------------------
         if not torch.is_tensor(y_hat):
-            raise ValueError(f"Point loss expects tensor y_hat, got {type(y_hat)}")
-        y_hat3 = _ensure_point_yhat(y_hat, y3)
-        return self.loss_fn(y=y3, y_hat=y_hat3, y_insample=y_insample, mask=mask)
+            raise TypeError(f"Point loss expects tensor y_hat, got {type(y_hat)}")
+
+        phat = _ensure_point_yhat(y_hat, y_bh1)
+        return self.loss_fn(y=y_bh1, y_hat=phat, y_insample=y_insample, mask=mask)

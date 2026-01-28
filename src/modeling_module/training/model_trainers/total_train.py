@@ -244,7 +244,7 @@ def infer_supervised_mode(loss_obj) -> str:
         return "point"
     if bool(getattr(loss_obj, "is_distribution_output", False)) or (loss_obj.__class__.__name__ == "DistributionLoss"):
         return "dist"
-    if loss_obj.__class__.__name__ in ("QuantileLoss", "MQLoss", "QuantileAsPointLoss"):
+    if loss_obj.__class__.__name__ in ("QuantileLoss", "MQLoss", "QuantileAsPointLoss", "MultiQuantilePinball"):
         return "quantile"
     return "point"
 
@@ -259,16 +259,18 @@ def default_loss_quantile(quantiles=(0.1, 0.5, 0.9)):
 
 def coerce_quantile_loss(loss_quantile: Optional[nn.Module], *, quantiles=(0.1, 0.5, 0.9)) -> nn.Module:
     """loss_quantile이 None 또는 point loss일 때도 quantile 학습이 가능하도록 보정."""
+    print(f'[coerce_quantile_loss]: {loss_quantile.__class__.__name__}')
     if loss_quantile is None:
         return default_loss_quantile(quantiles)
 
     # 정석: multi-quantile loss
-    if loss_quantile.__class__.__name__ in ("MQLoss",):
+    if loss_quantile.__class__.__name__ in (
+            "MQLoss",
+            "QuantileLoss",
+            "MultiQuantileLoss",
+            "MultiQuantilePinball",
+    ):
         return loss_quantile
-    if loss_quantile.__class__.__name__ in ("QuantileLoss",):
-        # 단일 q 학습용. 모델이 multi-quantile 출력이면 불완전하지만 허용
-        return loss_quantile
-
     # 그 외는 point loss라고 보고 median(q_star)에만 적용
     return QuantileAsPointLoss(base_loss=loss_quantile, quantiles=quantiles, q_star=0.5)
 
@@ -367,6 +369,8 @@ def _build_common_train_configs(
     loss_quantile: Optional[nn.Module],
     use_exogenous_mode: bool,
     quantiles=(0.1, 0.5, 0.9),
+    use_intermittent: bool,
+    val_use_weights: bool
 ):
     """Build common TrainingConfig + StageConfig.
 
@@ -374,9 +378,12 @@ def _build_common_train_configs(
     - quantile_train_cfg.loss 는 loss_quantile(또는 기본 MQLoss)을 사용
     """
     base_lr = float(base_lr) if base_lr is not None else 1e-4
+    print(f'[build_common_train_configs] loss_quantile:: {loss_quantile}')
 
     loss_point_obj = loss_point if loss_point is not None else default_loss_point()
     loss_quantile_obj = coerce_quantile_loss(loss_quantile, quantiles=quantiles)
+
+    print(f'[build_common_train_configs] loss_quantile_obj:: {loss_quantile_obj}')
 
     point_train_cfg = TrainingConfig(
         device=device,
@@ -399,14 +406,14 @@ def _build_common_train_configs(
         Cu=2.0,
         Co=1.0,
 
-        use_intermittent=True,
+        use_intermittent=use_intermittent,
         alpha_zero=0.3,
         alpha_pos=1.0,
         gamma_run=0.5,
 
         use_horizon_decay=False,
         tau_h=1.0,
-        val_use_weights=True,
+        val_use_weights=val_use_weights,
 
         spike_loss=SpikeLossConfig(
             enabled=False,
@@ -444,14 +451,14 @@ def _build_common_train_configs(
         Cu=2.0,
         Co=1.0,
 
-        use_intermittent=True,
+        use_intermittent=use_intermittent,
         alpha_zero=0.3,
         alpha_pos=1.0,
         gamma_run=0.5,
 
         use_horizon_decay=False,
         tau_h=1.0,
-        val_use_weights=True,
+        val_use_weights=val_use_weights,
 
         spike_loss=SpikeLossConfig(enabled=False),
     )
@@ -518,6 +525,8 @@ def _run_patchtst(
     ssl_loss_type: str = "mse",
     ssl_freeze_encoder_before_ft: bool = False,
     ssl_pretrained_ckpt_path: Optional[str] = None,
+    use_intermittent: bool = False,
+    val_use_weights: bool = False,
 ):
     """PatchTST 모델 학습 파이프라인 실행."""
     use_ssl_mode = _validate_ssl_mode(use_ssl_mode)
@@ -591,10 +600,7 @@ def _run_patchtst(
     loss_point_obj = loss_point if loss_point is not None else point_train_cfg.loss
     mode = infer_supervised_mode(loss_point_obj)
 
-    pt_base_cfg = PatchTSTConfig(
-        **pt_kwargs, loss=loss_point_obj,
-        loss_mode=("dist" if mode == "dist" else "point")
-    )
+    pt_base_cfg = PatchTSTConfig(**pt_kwargs, loss=loss_point_obj, loss_mode=("dist" if mode == "dist" else "point"))
     print(f'[run_patchtst] mode:: {mode}')
     if mode == "dist":
         pt_base = build_patchTST_dist(pt_base_cfg)
@@ -833,7 +839,6 @@ def _run_patchmixer(
 ):
     """PatchMixer 모델(Base, Quantile) 학습 실행."""
     loss_point_obj = loss_point if loss_point is not None else (point_train_cfg.loss if point_train_cfg else default_loss_point())
-    mode = infer_supervised_mode(loss_point_obj)
     quantiles = (0.1, 0.5, 0.9)
     loss_q_obj = coerce_quantile_loss(loss_quantile, quantiles=quantiles)
     if quantile_train_cfg is not None:
@@ -861,16 +866,17 @@ def _run_patchmixer(
         f_out=128,
         head_hidden=128,
         exo_dim=exo_dim,
-        use_part_embedding=True,
+        use_part_embedding=False,
         part_vocab_size=_get_part_vocab_size_from_loader(train_loader),
         part_embed_dim=16,
         final_nonneg=True,
         use_eol_prior=False,
-        exo_is_normalized_default=False,
+        exo_is_normalized_default=True,
         expander_season_period=season_period,
         expander_n_harmonics=min(season_period // 2, 16),
         quantiles=quantiles,
         loss=loss_point_obj,
+        use_revin = True
     )
 
     # past exo dims inference
@@ -898,16 +904,15 @@ def _run_patchmixer(
     pm_base_cfg.past_exo_cat_dim = d_past_cat
     pm_base_cfg.past_exo_cat_vocab_sizes = (512, 128)
     pm_base_cfg.past_exo_cat_embed_dims = (16, 16)
+    pm_base_cfg.loss = loss_point_obj
 
+    mode = infer_supervised_mode(loss_point_obj)
     if mode == "dist":
         pm_base_model = build_patch_mixer_dist(pm_base_cfg)
-        name_base_model = "PatchMixer Dist"
+        name_base = "PatchMixer Dist"
     else:
         pm_base_model = build_patch_mixer_base(pm_base_cfg)
-        name_base_model = "PatchMixer Base"
-
-
-    print(f"PatchMixer Base ({freq.capitalize()})")
+        name_base = "PatchMixer Base"
     best_pm_base = train_patchmixer(
         pm_base_model,
         train_loader,
@@ -919,10 +924,10 @@ def _run_patchmixer(
         use_exogenous_mode=use_exogenous_mode,
     )
     if save_root:
-        ckpt_path = _make_ckpt_path(save_root, freq, name_base_model.replace(" ", ""), lookback, horizon)
+        ckpt_path = _make_ckpt_path(save_root, freq, name_base.replace(" ", ""), lookback, horizon)
         save_model(pm_base_model, pm_base_cfg, ckpt_path)
         best_pm_base["ckpt_path"] = str(ckpt_path)
-    results["PatchMixer Base"] = best_pm_base
+    results[name_base] = best_pm_base
 
     pm_q_cfg = PatchMixerConfig(**pm_kwargs, head_dropout = 0.02)
     pm_q_cfg.loss = loss_q_obj
@@ -991,6 +996,8 @@ def _run_total_train_generic(
     ssl_loss_type: str = "mse",
     ssl_freeze_encoder_before_ft: bool = False,
     ssl_pretrained_ckpt_path: Optional[str] = None,
+    use_intermittent: bool = True,
+    val_use_weights: bool = True,
 ):
     """전체 학습 프로세스 오케스트레이션 (Generic Runner)."""
     save_root = Path(save_dir) if save_dir is not None else None
@@ -1010,7 +1017,9 @@ def _run_total_train_generic(
         loss_quantile=loss_quantile,
         use_exogenous_mode=bool(use_exogenous_mode),
         quantiles=(0.1, 0.5, 0.9),
-    )
+        use_intermittent=use_intermittent,
+        val_use_weights=val_use_weights,
+)
 
     date_type_map = {"weekly": "W", "monthly": "M", "daily": "D", "hourly": "H"}
     dt_char = date_type_map.get(freq, "W")
@@ -1095,6 +1104,8 @@ def _run_total_train_generic(
                     ssl_loss_type=ssl_loss_type,
                     ssl_freeze_encoder_before_ft=ssl_freeze_encoder_before_ft,
                     ssl_pretrained_ckpt_path=ssl_pretrained_ckpt_path,
+        use_intermittent=use_intermittent,
+        val_use_weights=val_use_weights,
                 )
             )
 
@@ -1136,6 +1147,8 @@ def run_total_train_weekly(
     ssl_loss_type: str = "mse",
     ssl_freeze_encoder_before_ft: bool = False,
     ssl_pretrained_ckpt_path: Optional[str] = None,
+    use_intermittent: bool = True,
+    val_use_weights: bool = True,
 ):
     return _run_total_train_generic(
         train_loader,
@@ -1159,6 +1172,8 @@ def run_total_train_weekly(
         ssl_loss_type=ssl_loss_type,
         ssl_freeze_encoder_before_ft=ssl_freeze_encoder_before_ft,
         ssl_pretrained_ckpt_path=ssl_pretrained_ckpt_path,
+        use_intermittent=use_intermittent,
+        val_use_weights=val_use_weights,
     )
 
 
@@ -1184,6 +1199,8 @@ def run_total_train_monthly(
     ssl_loss_type: str = "mse",
     ssl_freeze_encoder_before_ft: bool = False,
     ssl_pretrained_ckpt_path: Optional[str] = None,
+    use_intermittent: bool = True,
+    val_use_weights: bool = True,
 ):
     return _run_total_train_generic(
         train_loader,
@@ -1207,6 +1224,8 @@ def run_total_train_monthly(
         ssl_loss_type=ssl_loss_type,
         ssl_freeze_encoder_before_ft=ssl_freeze_encoder_before_ft,
         ssl_pretrained_ckpt_path=ssl_pretrained_ckpt_path,
+        use_intermittent=use_intermittent,
+        val_use_weights=val_use_weights,
     )
 
 
@@ -1232,6 +1251,8 @@ def run_total_train_daily(
     ssl_loss_type: str = "mse",
     ssl_freeze_encoder_before_ft: bool = False,
     ssl_pretrained_ckpt_path: Optional[str] = None,
+    use_intermittent: bool = True,
+    val_use_weights: bool = True,
 ):
     return _run_total_train_generic(
         train_loader,
@@ -1255,6 +1276,8 @@ def run_total_train_daily(
         ssl_loss_type=ssl_loss_type,
         ssl_freeze_encoder_before_ft=ssl_freeze_encoder_before_ft,
         ssl_pretrained_ckpt_path=ssl_pretrained_ckpt_path,
+        use_intermittent=use_intermittent,
+        val_use_weights=val_use_weights,
     )
 
 
@@ -1280,6 +1303,8 @@ def run_total_train_hourly(
     ssl_loss_type: str = "mse",
     ssl_freeze_encoder_before_ft: bool = False,
     ssl_pretrained_ckpt_path: Optional[str] = None,
+    use_intermittent: bool = True,
+    val_use_weights: bool = True,
 ):
     return _run_total_train_generic(
         train_loader,
@@ -1303,4 +1328,6 @@ def run_total_train_hourly(
         ssl_loss_type=ssl_loss_type,
         ssl_freeze_encoder_before_ft=ssl_freeze_encoder_before_ft,
         ssl_pretrained_ckpt_path=ssl_pretrained_ckpt_path,
+        use_intermittent=use_intermittent,
+        val_use_weights=val_use_weights,
     )

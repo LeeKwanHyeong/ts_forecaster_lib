@@ -85,17 +85,51 @@ class CommonTrainer:
         return bool(getattr(sl, "enabled", False))
 
     def _clone_cfg_disable_spike(self):
-        """Spike Loss를 비활성화한 설정 복제본 생성 (비교 분석용)."""
-        cfg2 = copy.deepcopy(self.cfg)
-        if isinstance(cfg2, dict):
-            cfg2.setdefault("spike_loss", {})
-            cfg2["spike_loss"]["enabled"] = False
-        else:
-            if hasattr(cfg2, "spike_loss"):
-                if isinstance(cfg2.spike_loss, dict):
-                    cfg2.spike_loss["enabled"] = False
-                else:
+        """Spike Loss를 비활성화한 설정 복제본 생성 (비교 분석용).
+
+        NOTE:
+        - cfg 안에 nn.Module(loss 등) / Tensor가 들어갈 수 있어 deepcopy가 깨질 수 있음.
+        - 여기서는 'spike_loss.enabled'만 끄는 얕은 복제(shallow clone)로 충분함.
+        """
+        cfg = self.cfg
+
+        if isinstance(cfg, dict):
+            cfg2 = dict(cfg)
+            spike = dict(cfg2.get("spike_loss", {}))
+            spike["enabled"] = False
+            cfg2["spike_loss"] = spike
+            return cfg2
+
+        try:
+            import dataclasses
+            if dataclasses.is_dataclass(cfg) and hasattr(cfg, "spike_loss"):
+                sl = getattr(cfg, "spike_loss")
+                if isinstance(sl, dict):
+                    sl2 = dict(sl)
+                    sl2["enabled"] = False
+                    return dataclasses.replace(cfg, spike_loss=sl2)
+                cfg2 = dataclasses.replace(cfg)
+                try:
                     cfg2.spike_loss.enabled = False
+                except Exception:
+                    pass
+                return cfg2
+        except Exception:
+            pass
+
+        import copy as _copy
+        cfg2 = _copy.copy(cfg)
+        if hasattr(cfg2, "spike_loss"):
+            sl = getattr(cfg2, "spike_loss")
+            if isinstance(sl, dict):
+                sl2 = dict(sl)
+                sl2["enabled"] = False
+                setattr(cfg2, "spike_loss", sl2)
+            else:
+                try:
+                    sl.enabled = False
+                except Exception:
+                    pass
         return cfg2
 
     def _debug_spike_breakdown(self, pred, y, *, is_val: bool, tag: str):
@@ -417,6 +451,7 @@ class CommonTrainer:
             self.adapter.tta_reset(model)
 
         for epoch in range(self.cfg.epochs):
+
             # 1. 학습 루프 실행
             train_loss = self._run_epoch(model, train_loader, train=True)
 

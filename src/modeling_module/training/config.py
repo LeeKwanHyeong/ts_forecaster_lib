@@ -105,7 +105,7 @@ class TrainingConfig:
     dist_name: Literal['normal'] = 'normal'  # 현재 지원 분포 (확장 가능)
     dist_scale_transform: Literal['softplus', 'exp', 'none'] = 'softplus'  # scale 양수화 방식
     dist_min_scale: float = 1000   # 1e-3  # scale 하한(수치 안정성)
-    dist_use_weights: bool = True  # dist loss에서 intermittent/horizon 가중치 적용 여부
+    dist_use_weights: bool = False  # dist loss에서 intermittent/horizon 가중치 적용 여부
 
     # (alias) LossComputer expects the following names
     dist_family: Literal['normal'] = 'normal'

@@ -753,79 +753,59 @@ class AsymmetricMSE(BasePointLoss):
 # Quantile losses (multi-quantile pinball)
 # =========================================================
 class MultiQuantilePinball(nn.Module):
-    """
-    멀티-분위수 pinball.
-    - pred_q: (B,Q,H) or (B,H,Q) or {"q": ...}
-    - target: (B,H) or (B,1,H) or (B,H,1)
-    - mask:  (B,H) or (B,H,1)  (옵션)
-    - weights: (B,H)  (옵션)  -> horizon/간헐/스파이크 등 외부에서 합성 후 전달 가능
-
-    reduction:
-      - "mean": (각 quantile mean) 평균
-      - "weighted": weights로 [B,H] 가중평균(각 quantile마다 동일 weights 적용)
-      - "masked_lower": q<0.5 에만 weights 적용 (custom_loss_utils.pinball_loss_weighted_masked 대응)
-    """
-    def __init__(self, quantiles: Tuple[float, ...] = (0.1, 0.5, 0.9), reduction: str = "mean"):
+    def __init__(self, quantiles=(0.1, 0.5, 0.9), reduction="mean"):
         super().__init__()
         self.quantiles = tuple(float(q) for q in quantiles)
         self.reduction = str(reduction)
 
     def forward(
         self,
-        target: Tensor,
-        pred_q: Union[Tensor, Dict[str, Tensor]],
-        *,
+        y: Tensor,
+        y_hat: Union[Tensor, Dict[str, Tensor]],
         mask: Optional[Tensor] = None,
+        y_insample: Optional[Tensor] = None,
         weights: Optional[Tensor] = None,
+        **kwargs,
     ) -> Tensor:
-        pred_q, y, Q, H = _normalize_quantile_pred(pred_q, target, self.quantiles)  # (B,Q,H), (B,H)
-        B = y.size(0)
+        pred_q, y2, Q, H = _normalize_quantile_pred(y_hat, y, self.quantiles)  # pred_q:(B,Q,H), y2:(B,H)
 
-        # base mask -> [B,H]
         if mask is not None:
-            m = _to_bh(mask, name="mask").to(device=y.device, dtype=y.dtype)
+            m = _to_bh(mask, name="mask").to(device=y2.device, dtype=y2.dtype)
         else:
-            m = torch.ones_like(y)
+            m = torch.ones_like(y2)
 
-        # external weights -> [B,H]
         if weights is not None:
-            w = _as_float(weights).to(device=y.device)
-            if w.dim() != 2 or w.shape != y.shape:
-                raise RuntimeError(f"weights must be [B,H]={tuple(y.shape)}, got {tuple(w.shape)}")
-            # mask 반영
+            w = _as_float(weights).to(device=y2.device)
+            if w.dim() != 2 or w.shape != y2.shape:
+                raise RuntimeError(f"weights must be [B,H]={tuple(y2.shape)}, got {tuple(w.shape)}")
             w = w * m
         else:
             w = None
 
-        diff = y.unsqueeze(1) - pred_q  # (B,Q,H)
+        def _masked_mean(x: Tensor, ww: Tensor) -> Tensor:
+            denom = ww.sum().clamp_min(1.0)
+            return (x * ww).sum() / denom
+
+        diff = y2.unsqueeze(1) - pred_q  # (B,Q,H)
 
         losses_q = []
         for i, q in enumerate(self.quantiles):
             e = _pinball_elem(diff[:, i], float(q))  # (B,H)
 
             if self.reduction == "mean":
-                # mask만 적용한 mean
-                losses_q.append(_weighted_mean(e, m))
-                continue
-
-            if self.reduction == "weighted":
-                if w is None:
-                    losses_q.append(_weighted_mean(e, m))
-                else:
-                    losses_q.append(_weighted_mean(e, w))
-                continue
-
-            if self.reduction == "masked_lower":
-                # q<0.5 에만 weights 적용, 그 외는 mask mean
+                losses_q.append(_masked_mean(e, m))
+            elif self.reduction == "weighted":
+                losses_q.append(_masked_mean(e, (w if w is not None else m)))
+            elif self.reduction == "masked_lower":
                 if (w is not None) and (q < 0.5):
-                    losses_q.append(_weighted_mean(e, w))
+                    losses_q.append(_masked_mean(e, w))
                 else:
-                    losses_q.append(_weighted_mean(e, m))
-                continue
-
-            raise ValueError("reduction must be one of ['mean', 'weighted', 'masked_lower']")
+                    losses_q.append(_masked_mean(e, m))
+            else:
+                raise ValueError("reduction must be one of ['mean','weighted','masked_lower']")
 
         return sum(losses_q) / max(1, len(losses_q))
+
 
 def level_to_outputs(level):
     qs = sum([[50 - l / 2, 50 + l / 2] for l in level], [])
@@ -948,51 +928,74 @@ class MQLoss(BasePointLoss):
         return weights * mask
 
     def __call__(
-        self,
-        y: torch.Tensor,
-        y_hat: torch.Tensor,
-        y_insample: Union[torch.Tensor, None] = None,
-        mask: Union[torch.Tensor, None] = None,
+            self,
+            y: torch.Tensor,
+            y_hat: torch.Tensor,
+            y_insample: Union[torch.Tensor, None] = None,
+            mask: Union[torch.Tensor, None] = None,
     ) -> torch.Tensor:
-        """Computes the multi-quantile loss.
 
-        Args:
-            y (torch.Tensor): Actual values.
-            y_hat (torch.Tensor): Predicted values.
-            y_insample (Union[torch.Tensor, None], optional): In-sample values. Defaults to None.
-            mask (Union[torch.Tensor, None], optional): Specifies date stamps per serie to consider in loss. Defaults to None.
-
-        Returns:
-            torch.Tensor: Multi-quantile loss (single value).
-        """
-        # [B, h, N] -> [B, h, N, 1]
+        # -------------------------
+        # 1) y_hat shape normalize
+        # -------------------------
+        # 기대 형태: [B, H, N, Q]
         if y_hat.ndim == 3:
-            y_hat = y_hat.unsqueeze(-1)
-
-        y = y.unsqueeze(-1)
-        if mask is not None:
-            mask = mask.unsqueeze(-1)
+            # y_hat: [B,H,N*Q] 또는 [B,H,Q] (univariate)
+            # domain_map: [B,H,-1,Q] 로 reshape
+            y_hat = self.domain_map(y_hat)  # -> [B,H,N,Q]
+        elif y_hat.ndim == 4:
+            # 이미 [B,H,N,Q] 라고 가정
+            # 혹시 [B,H,Q,N] 같은 변종이면 여기서 교정 가능
+            if y_hat.shape[-1] != self.outputsize_multiplier and y_hat.shape[-2] == self.outputsize_multiplier:
+                y_hat = y_hat.transpose(-1, -2).contiguous()
         else:
-            mask = torch.ones_like(y, device=y.device)
+            raise ValueError(f"y_hat must be 3D/4D, got {y_hat.shape}")
 
-        error = y_hat - y
+        # -------------------------
+        # 2) y / mask normalize
+        # -------------------------
+        # y: [B,H] or [B,H,N] -> [B,H,N,1]
+        if y.ndim == 2:
+            y = y.unsqueeze(-1)  # [B,H,1]
+        if y.ndim == 3:
+            y = y.unsqueeze(-1)  # [B,H,N,1]
+        else:
+            raise ValueError(f"y must be 2D/3D, got {y.shape}")
 
-        sq = torch.maximum(-error, torch.zeros_like(error))
-        s1_q = torch.maximum(error, torch.zeros_like(error))
+        if mask is None:
+            mask = torch.ones_like(y, device=y.device)  # [B,H,N,1]
+        else:
+            if mask.ndim == 2:
+                mask = mask.unsqueeze(-1)  # [B,H,1]
+            if mask.ndim == 3:
+                mask = mask.unsqueeze(-1)  # [B,H,N,1]
+            else:
+                raise ValueError(f"mask must be 2D/3D, got {mask.shape}")
 
-        # quantiles = self.quantiles[None, None, None, :]
-        # losses = (1 / len(quantiles)) * (quantiles * sq + (1 - quantiles) * s1_q)
-        dev = error.device
-        dt = error.dtype
+        # -------------------------
+        # 3) pinball loss compute
+        # -------------------------
+        error = y_hat - y  # [B,H,N,Q] (broadcast y last dim 1 -> Q)
 
-        # self.quantiles가 list든 tensor든 상관없이, 항상 현재 device로 올림
-        q = torch.as_tensor(self.quantiles, device=dev, dtype=dt).view(1, 1, 1, -1)
+        sq = torch.clamp(-error, min=0.0)
+        s1_q = torch.clamp(error, min=0.0)
 
-        # len(quantiles) 대신 Q로 나누는게 의도라면 q.shape[-1] 사용
-        losses = (1.0 / q.shape[-1]) * (q * sq + (1.0 - q) * s1_q)
-        weights = self._compute_weights(y=losses, mask=mask)  # Use losses for extra dim
+        dev, dt = error.device, error.dtype
+        q = torch.as_tensor(self.quantiles, device=dev, dtype=dt).view(1, 1, 1, -1)  # [1,1,1,Q]
 
-        return _weighted_mean(losses=losses, weights=weights)
+        # 여기서 (1/Q)로 미리 나누지 마세요.
+        # 아래에서 weights.sum()으로 정상 mean을 만들면 자동으로 Q축까지 평균이 됩니다.
+        losses = q * sq + (1.0 - q) * s1_q  # [B,H,N,Q]
+
+        # -------------------------
+        # 4) weights + reduction (안전하게 직접 mean)
+        # -------------------------
+        w = self._compute_weights(y=y, mask=mask)  # [B,H,N,1]
+        w = w.expand_as(losses)  # [B,H,N,Q]
+
+        num = (losses * w).sum()
+        den = w.sum().clamp_min(1e-8)
+        return num / den
 
 
 class QuantileLayer(nn.Module):

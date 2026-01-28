@@ -1,7 +1,7 @@
 seed,variant,model_type,MAE,RMSE,SMAPE,save_root
-55,A0,point,83576.2265625,144911.21875,0.06936270743608475,C:/Users/USER/PycharmProjects/ts_forecaster_lib/raw_data/fit\walmart_patchmixer_ab\A0_y_only\seed_55
-55,A1,point,83555.8828125,146189.703125,0.06904253363609314,C:/Users/USER/PycharmProjects/ts_forecaster_lib/raw_data/fit\walmart_patchmixer_ab\A1_time_exog\seed_55
-55,A2,point,80834.21875,140435.0625,0.06678939610719681,C:/Users/USER/PycharmProjects/ts_forecaster_lib/raw_data/fit\walmart_patchmixer_ab\A2_time_holiday\seed_55
-55,A0,quantile(q50),253046096.0,752241088.0,1.9889545440673828,C:/Users/USER/PycharmProjects/ts_forecaster_lib/raw_data/fit\walmart_patchmixer_ab\A0_y_only\seed_55
-55,A1,quantile(q50),9298800.0,111304624.0,1.998854160308838,C:/Users/USER/PycharmProjects/ts_forecaster_lib/raw_data/fit\walmart_patchmixer_ab\A1_time_exog\seed_55
-55,A2,quantile(q50),230890000.0,848032640.0,1.9950940608978271,C:/Users/USER/PycharmProjects/ts_forecaster_lib/raw_data/fit\walmart_patchmixer_ab\A2_time_holiday\seed_55
+55,A0,point,83905.796875,146139.671875,0.06917507946491241,C:/Users/USER/PycharmProjects/ts_forecaster_lib/raw_data/fit\walmart_patchmixer_ab\A0_y_only\seed_55
+55,A1,point,85202.5234375,149030.28125,0.07026613503694534,C:/Users/USER/PycharmProjects/ts_forecaster_lib/raw_data/fit\walmart_patchmixer_ab\A1_time_exog\seed_55
+55,A2,point,91169.890625,164462.34375,0.07523175328969955,C:/Users/USER/PycharmProjects/ts_forecaster_lib/raw_data/fit\walmart_patchmixer_ab\A2_time_holiday\seed_55
+55,A0,quantile(q50),279319.78125,414372.75,0.28038489818573,C:/Users/USER/PycharmProjects/ts_forecaster_lib/raw_data/fit\walmart_patchmixer_ab\A0_y_only\seed_55
+55,A1,quantile(q50),2537694.25,2859875.0,1.0121983289718628,C:/Users/USER/PycharmProjects/ts_forecaster_lib/raw_data/fit\walmart_patchmixer_ab\A1_time_exog\seed_55
+55,A2,quantile(q50),2537015.0,2859112.75,1.0120667219161987,C:/Users/USER/PycharmProjects/ts_forecaster_lib/raw_data/fit\walmart_patchmixer_ab\A2_time_holiday\seed_55
