@@ -152,6 +152,7 @@ def train_patchtst(
         model,
         train_loader,
         val_loader,
+        device,
         *,
         stages: list[StageConfig] | None = None,
         train_cfg: Optional[TrainingConfig] = None,
@@ -247,7 +248,8 @@ def train_patchtst(
             logger=print,
             autocast_input=autocast_input,
             extra_loss_fn=None,
-            use_exogenous_mode=use_exogenous_mode
+            use_exogenous_mode=use_exogenous_mode,
+            device = device
         )
         model = trainer.fit(model, tl_i, val_loader, tta_steps=0)
         best = {"model": model, "cfg": cfg_i}

@@ -68,7 +68,7 @@ class PatchMixerConfig(TrainingConfig):
 
     # ---------- 과거 외생 변수 (Past Exogenous) ----------
     # 주의: 체크포인트 저장/로드 시 누락 방지를 위해 타입 어노테이션 필수
-    past_exo_mode: str = "none"  # 과거 외생 처리 모드 ('none' | 'z_gate')
+    past_exo_mode: str = "z_gate"  # 과거 외생 처리 모드 ('none' | 'z_gate')
     past_exo_cont_dim: int = 0  # 연속형 과거 외생 변수 차원 (B, L, E_p)
     past_exo_cat_dim: int = 0  # 범주형 과거 외생 변수 차원 (B, L, K)
     past_exo_cat_vocab_sizes: Tuple[int, ...] = ()  # 범주형 변수별 어휘(Vocab) 크기
@@ -79,6 +79,7 @@ class PatchMixerConfig(TrainingConfig):
     learn_dw_gain: bool = True  # Depthwise Conv 이득(Gain) 학습 여부
 
     use_revin: bool = True
+    q_clip_norm = 10.0
 
 
 # =========================

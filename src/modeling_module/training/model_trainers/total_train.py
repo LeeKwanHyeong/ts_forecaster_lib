@@ -1,22 +1,3 @@
-"""total_train.py
-
-High-level training runner for the LTB forecasting engine.
-
-기능:
-1) 다양한 모델(PatchTST, Titan, PatchMixer)과 주기(Hourly/Daily/Weekly/Monthly)에 대한 통합 학습 실행.
-2) 외생 변수(Exogenous Variable) 주입 방식(Loader vs Callback) 자동 제어.
-3) 2-Stage 학습(Warmup -> Spike Loss) 및 Self-Supervised Learning(SSL) 파이프라인 오케스트레이션.
-
-[Refactor - 권장안 2]
-- Point/Dist(분포) 학습과 Quantile 학습의 Loss를 분리하여 주입:
-    - loss_point: Point 또는 Distribution 학습용 (예: MAE, Huber, DistributionLoss)
-    - loss_quantile: Quantile 학습용 (예: MQLoss, QuantileLoss, 또는 PointLoss를 median(q=0.5)에 적용하는 Wrapper)
-- 단일 loss 인자로 모든 모델/헤드를 자동 처리하려는 시도는,
-  (1) 모델 출력 스키마(예: [B,H,2], [B,Q,H], dict) 불일치,
-  (2) loss 별 기대 입력 텐서 차원 불일치
-  로 인해 디버깅 비용이 급격히 증가하므로, runner 레벨에서 명시적으로 분리합니다.
-"""
-
 import os
 from dataclasses import asdict, is_dataclass, replace
 from pathlib import Path
@@ -585,6 +566,7 @@ def _run_patchtst(
             loss_type=ssl_loss_type,
             save_dir=str(pretrain_dir),
             ckpt_name="patchtst_pretrain_best.pt",
+            device = device
         )
 
     if use_ssl_mode == "ssl_only":
@@ -623,6 +605,7 @@ def _run_patchtst(
             pretrain_ckpt_path=pretrain_ckpt_path,
             load_strict=False,
             freeze_encoder_before_ft=ssl_freeze_encoder_before_ft,
+            device = device
         )
     else:
         best_pt_base = train_patchtst(
@@ -633,6 +616,7 @@ def _run_patchtst(
             stages=list(stages),
             future_exo_cb=future_exo_cb,
             use_exogenous_mode=use_exogenous_mode,
+            device = device
         )
 
     if save_root:
@@ -655,7 +639,6 @@ def _run_patchtst(
 
     print(f"PatchTST Quantile ({freq.capitalize()})")
 
-    # ---- [핵심] Quantile도 pretrain_ckpt_path 적용 (encoder만 안전 로드) ----
     if (use_ssl_mode == "full") and (pretrain_ckpt_path is not None):
         best_pt_q = train_patchtst_finetune(
             pt_q,
@@ -668,6 +651,7 @@ def _run_patchtst(
             pretrain_ckpt_path=pretrain_ckpt_path,
             load_strict=False,  # head mismatch를 허용 (매우 중요)
             freeze_encoder_before_ft=ssl_freeze_encoder_before_ft,
+            device = device
         )
     else:
         best_pt_q = train_patchtst(
@@ -678,6 +662,7 @@ def _run_patchtst(
             stages=list(stages),
             future_exo_cb=future_exo_cb,
             use_exogenous_mode=use_exogenous_mode,
+            device = device
         )
 
     if save_root:
@@ -685,7 +670,6 @@ def _run_patchtst(
         save_model(pt_q, pt_q_cfg, ckpt_path_q)
         best_pt_q["ckpt_path"] = str(ckpt_path_q)
 
-        # (선택) 어떤 pretrain을 썼는지 결과에 기록
         if (use_ssl_mode == "full") and (pretrain_ckpt_path is not None):
             best_pt_q["pretrain_ckpt_path"] = str(pretrain_ckpt_path)
 
@@ -769,6 +753,7 @@ def _run_titan(
         ti_base,
         train_loader,
         val_loader,
+        device = device,
         train_cfg=point_train_cfg,
         stages=list(stages),
         future_exo_cb=(future_exo_cb if use_exogenous_mode else None),
@@ -787,6 +772,7 @@ def _run_titan(
         ti_lmm,
         train_loader,
         val_loader,
+        device = device,
         train_cfg=point_train_cfg,
         stages=list(stages),
         future_exo_cb=(future_exo_cb if use_exogenous_mode else None),
@@ -917,6 +903,7 @@ def _run_patchmixer(
         pm_base_model,
         train_loader,
         val_loader,
+        device = device,
         train_cfg=point_train_cfg,
         stages=list(stages),
         future_exo_cb=(future_exo_cb if use_exogenous_mode else None),
@@ -946,6 +933,7 @@ def _run_patchmixer(
         pm_q_model,
         train_loader,
         val_loader,
+        device=device,
         train_cfg=quantile_train_cfg,
         stages=list(stages),
         future_exo_cb=(future_exo_cb if use_exogenous_mode else None),

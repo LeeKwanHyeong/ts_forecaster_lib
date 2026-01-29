@@ -105,7 +105,8 @@ def train_titan(
         stages: list[StageConfig] | None = None,
         train_cfg: Optional[TrainingConfig] = None,
         future_exo_cb=None,
-        use_exogenous_mode: bool = True
+        use_exogenous_mode: bool = True,
+        device
 ):
     """
     Titan 모델의 학습 파이프라인 실행 (Runner).
@@ -188,8 +189,8 @@ def train_titan(
             future_exo_cb=future_exo_cb,
             autocast_input=autocast_input,
             extra_loss_fn=None,
-            use_exogenous_mode=use_exogenous_mode
-
+            use_exogenous_mode=use_exogenous_mode,
+            device = device
         )
         model = trainer.fit(model, tl_i, val_loader, tta_steps=2)
         best = {"model": model, "cfg": cfg_i}

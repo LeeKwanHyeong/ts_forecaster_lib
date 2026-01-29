@@ -204,6 +204,7 @@ def eval_on_loader_quantile_v2(
     use_exo_inputs: bool,
     quantiles_fallback=(0.1,0.5,0.9),
     horizon: int = 27,
+    future_exo_cb=None,
 ):
     model.eval()
     ys, yhats = [], []
@@ -223,13 +224,17 @@ def eval_on_loader_quantile_v2(
 
         if use_exo_inputs:
             # future exo는 loader가 이미 batch[3]로 줌
-            if len(batch) > 3:
-                fe = batch[3].to(device)
-                # (B,H,0) 같은 경우 None 처리
-                if fe.ndim == 3 and fe.shape[-1] == 0:
-                    future_exo = None
-                else:
-                    future_exo = fe
+            start_idx = batch[2]  # <-- 여기! 실제 batch 포맷에 맞게 수정 (현재 batch[2]가 part_ids일 수도 있음)
+            if future_exo_cb is not None:
+                # start_idx가 tensor면 python int로
+                if torch.is_tensor(start_idx):
+                    start_idx = int(start_idx[0].item()) if start_idx.numel() > 0 else int(start_idx.item())
+                fe = future_exo_cb(start_idx, model.horizon, device=device)  # [H, D] 또는 [B,H,D] 규약 확인 필요
+                if fe.dim() == 2:
+                    fe = fe.unsqueeze(0).expand(x.size(0), -1, -1)  # [B,H,D]
+                future_exo = fe.to(device)
+            else:
+                future_exo = None
 
             if len(batch) > 4:
                 pe_cont = batch[4].to(device)

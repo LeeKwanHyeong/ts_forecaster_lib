@@ -64,99 +64,40 @@ def compose_exo_calendar_cb(date_type: str = "weekly", *, sincos: bool = True) -
 
     return cb
 
-# def compose_exo_calendar_cb(date_type: str = "weekly", *, sincos: bool = True) -> Callable:
-#     """
-#     date_type에 따른 주기적 외생변수 생성 콜백 반환.
-#
-#     지원 date_type:
-#       - 'monthly' (Monthly): 12개월 주기
-#       - 'weekly' (Weekly) : 52주 주기
-#       - 'daily' (Daily)  : 7일(요일) + 365.25일(연간) 주기 (E=4 if sincos)
-#       - 'hourly' (Hourly) : 24시간(일간) + 168시간(주간) 주기 (E=4 if sincos)
-#
-#     Returns:
-#         cb(start_idx, H, device) -> Tensor shape [H, E]
-#     """
-#     date_type = date_type.upper()
-#
-#     # 주기 설정 (List of periods)
-#     # 딥러닝 모델은 절대적인 날짜보다 '반복되는 주기성'을 학습하는 것이 중요.
-#     if date_type == 'M':
-#         periods = [12.0]
-#     elif date_type == 'W':
-#         periods = [52.0]
-#     elif date_type == 'D':
-#         # Day of Week (7), Day of Year (365.25)
-#         periods = [7.0, 365.25]
-#     elif date_type == 'H':
-#         # Hour of Day (24), Hour of Week (24*7=168)
-#         periods = [24.0, 168.0]
-#     else:
-#         # 기본값 (주간 가정)
-#         periods = [52.0]
-#
-#     def cb(start_idx: int, H: int, device='cuda' if torch.cuda.is_available() else 'mps'):
-#         # t: [start_idx, ..., start_idx + H - 1]
-#         t = torch.arange(start_idx, start_idx + H, device=device, dtype=torch.float32)
-#
-#         feats = []
-#         if sincos:
-#             for p in periods:
-#                 # 각 주기별 sin, cos 쌍 추가 -> (H, 2)
-#                 feats.append(calendar_sin_cos(t, p))
-#
-#             # (H, 2 * len(periods))
-#             exo = torch.cat(feats, dim=-1)
-#         else:
-#             # Normalized linear ramp [0, 1) for each period
-#             for p in periods:
-#                 # (t % p) / p -> (H, 1)
-#                 feat = ((t % p) / p).unsqueeze(-1)
-#                 feats.append(feat)
-#             exo = torch.cat(feats, dim=-1)
-#
-#         return exo  # [H, E]
-#
-#     return cb
+def apply_exo_shift_linear(
+    head: nn.Module,
+    future_exo: torch.Tensor,  # (B,H,E) or (H,E)
+    *,
+    horizon: int,
+    out_dtype=None,
+    out_device=None,
+) -> torch.Tensor:  # (B,H)
 
+    # head 기준 device/dtype (학습 안정성 때문에 head dtype으로 계산)
+    p = next(head.parameters(), None)
+    head_device = p.device if p is not None else future_exo.device
+    head_dtype  = p.dtype  if p is not None else future_exo.dtype
 
-# ===== 공용 유틸 =====
-@torch.no_grad()
-def apply_exo_shift_linear(head: nn.Module,
-                           future_exo: torch.Tensor,  # (B,H,E) or (H,E)
-                           *,
-                           horizon: int,
-                           out_dtype=None,
-                           out_device=None) -> torch.Tensor:  # -> (B,H)
-    # 1) head/device/dtype 결정
-    if out_device is None:
-        try:
-            out_device = next(head.parameters()).device
-        except StopIteration:
-            out_device = future_exo.device
-    if out_dtype is None:
-        out_dtype = future_exo.dtype
-
-    # 2) 배치 차원 보정
     ex = future_exo
     if ex.dim() == 2:  # (H,E) -> (1,H,E)
         ex = ex.unsqueeze(0)
 
-    # 3) 디바이스/타입 정렬 + head 이동
-    ex = ex.to(device=out_device, dtype=out_dtype, non_blocking=True)
-    if isinstance(head, nn.Module):
-        head = head.to(out_device)
+    # (중요) head.to(...)를 여기서 하지 마세요. model.to(device)로 한번에 맞추는 게 정석입니다.
+    ex = ex.to(device=head_device, dtype=head_dtype, non_blocking=True)
 
-    # 4) 선형 head 적용
     ex = head(ex).squeeze(-1)  # (B,H)
 
-    # 5) H 길이 정합 (pad/trim)
-    B, Hx = ex.shape[0], ex.shape[1]
+    # pad/trim
+    B, Hx = ex.shape
     if Hx < horizon:
-        pad = torch.full((B, horizon - Hx), 0.0, device=ex.device, dtype=ex.dtype)
-        ex = torch.cat([ex, pad], dim=1)
+        ex = torch.cat([ex, ex.new_zeros((B, horizon - Hx))], dim=1)
     elif Hx > horizon:
         ex = ex[:, :horizon]
+
+    # 출력 dtype/device로 정렬 (필요할 때만)
+    if (out_device is not None) or (out_dtype is not None):
+        ex = ex.to(device=(out_device or ex.device), dtype=(out_dtype or ex.dtype), non_blocking=True)
+
     return ex
 
 

@@ -70,7 +70,6 @@ class TrainingConfig:
     # ------------Loader (데이터 로딩 및 연산 환경)------------
     device: str = 'cuda' if torch.cuda.is_available() else 'mps'  # 학습 연산 장치 (Mac MPS 지원 포함)
     log_every: int = 100  # 로그 출력 주기 (Step 단위)
-    use_amp: bool = torch.cuda.is_available()  # 자동 혼합 정밀도(AMP) 사용 여부
     lookback: int = 54  # 모델 입력(과거) 시퀀스 길이
     horizon: int = 27  # 모델 예측(미래) 시퀀스 길이
 
@@ -81,7 +80,8 @@ class TrainingConfig:
     t_max: int = 10  # CosineAnnealingLR 스케줄러의 주기
     patience: int = 50  # 조기 종료(Early Stopping) 허용 횟수
     max_grad_norm: float = 30.0  # 그라디언트 클리핑 임계값
-    amp_device: str = 'cuda'  # AMP 수행 장치 유형
+    amp_device: str = 'cuda' if torch.cuda.is_available() else 'cpu'  # AMP 수행 장치 유형
+    use_amp: bool = torch.cuda.is_available()  # 자동 혼합 정밀도(AMP) 사용 여부
 
     # --- New unified loss object (preferred) ---
     # Any torch.nn.Module that can be called as loss(y, y_hat, mask=..., y_insample=...)

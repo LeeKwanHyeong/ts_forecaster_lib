@@ -128,6 +128,7 @@ def train_patchtst_pretrain(
         train_loader: DataLoader,
         val_loader: Optional[DataLoader] = None,
         *,
+        device,
         stages: list[StageConfig] | None = None,
         train_cfg: Optional[TrainingConfig] = None,
         # Self-supervised 설정

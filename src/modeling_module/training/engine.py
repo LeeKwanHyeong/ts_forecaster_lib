@@ -6,6 +6,53 @@ from typing import Optional, Tuple
 import torch
 from torch.amp import autocast, GradScaler
 
+# -----------------------------------------------------------------------------
+# Device / AMP helpers (robust to str | torch.device)
+# -----------------------------------------------------------------------------
+def _normalize_device_type(x) -> str:
+    """Normalize 'cuda:0' / torch.device('cuda:0') / 'CUDA' -> 'cuda'."""
+    if x is None:
+        return "cpu"
+    s = str(x).lower()
+    if s.startswith("cuda"):
+        return "cuda"
+    if s.startswith("cpu"):
+        return "cpu"
+    if s.startswith("mps"):
+        return "mps"
+    return s
+
+def _resolve_device(device_like) -> torch.device:
+    """Resolve a device-like input into torch.device, falling back to CPU."""
+    if isinstance(device_like, torch.device):
+        return device_like
+    if device_like is None:
+        return torch.device("cpu")
+    try:
+        return torch.device(device_like)
+    except Exception:
+        return torch.device("cpu")
+
+def _resolve_autocast_dtype(dtype_like, device_type: str) -> torch.dtype:
+    """Resolve autocast dtype from str | torch.dtype. CPU autocast defaults to bfloat16."""
+    if isinstance(dtype_like, torch.dtype):
+        dt = dtype_like
+    elif dtype_like is None:
+        dt = torch.float16
+    else:
+        s = str(dtype_like).lower()
+        mapping = {
+            "float16": torch.float16, "fp16": torch.float16,
+            "bfloat16": torch.bfloat16, "bf16": torch.bfloat16,
+            "float32": torch.float32, "fp32": torch.float32,
+        }
+        dt = mapping.get(s, torch.float16)
+
+    # CPU autocast: float16 is often unsupported/inefficient; prefer bfloat16.
+    if device_type == "cpu" and dt == torch.float16:
+        dt = torch.bfloat16
+    return dt
+
 from modeling_module.training.adapters import DefaultAdapter
 from modeling_module.training.model_losses.losses import LossComputer
 
@@ -32,6 +79,7 @@ class CommonTrainer:
             autocast_input=None,
             extra_loss_fn=None,
             use_exogenous_mode=False,
+            device
     ):
         """
         학습 트레이너 초기화 및 필수 컴포넌트 구성.
@@ -48,16 +96,44 @@ class CommonTrainer:
         self.metrics_fn = metrics_fn
         self.future_exo_cb = future_exo_cb
 
-        # AMP(Mixed Precision) 활성화 여부 결정 (CUDA 가용성 확인 포함)
-        self.amp_enabled = (self.cfg.amp_device == "cuda" and torch.cuda.is_available())
+        # AMP / device canonicalization (robust to str | torch.device)
+        # - `config.device` is kept as-is to minimize ripple effects.
+        # - `self.device` becomes the single source of truth inside the trainer.
+        self.device = _resolve_device(device if device is not None else getattr(self.cfg, "device", "cpu"))
+        self.device_type = self.device.type
+
+        # Extra hooks / flags
         self.autocast_input = autocast_input or {}
         self.extra_loss_fn = extra_loss_fn
-        self.use_exogenous_mode = use_exogenous_mode
 
-        # Autocast 실행을 위한 세부 옵션(장치, 활성화 여부, 데이터 타입) 파싱
-        self.amp_device = self.autocast_input.get("device_type", self.cfg.amp_device)
-        self.enabled = self.autocast_input.get("enabled", self.amp_enabled)
-        self.dtype = self.autocast_input.get("dtype", None)
+        # Exogenous mode: keep backward-compat (explicit arg overrides cfg)
+        cfg_exo = bool(getattr(self.cfg, "use_exogenous_mode", False))
+        self.use_exogenous_mode = bool(use_exogenous_mode or cfg_exo)
+
+        # Autocast (AMP) settings
+        # - device_type: explicit override > cfg.amp_device > resolved device.type
+        amp_device_req = self.autocast_input.get("device_type", getattr(self.cfg, "amp_device", self.device_type))
+        self.amp_device = _normalize_device_type(amp_device_req)
+
+        # - dtype: explicit override > cfg.autocast_dtype
+        dtype_req = self.autocast_input.get("dtype", getattr(self.cfg, "autocast_dtype", "float16"))
+        self.dtype = _resolve_autocast_dtype(dtype_req, self.amp_device)
+
+        # - enabled: explicit override > cfg.use_amp
+        requested_amp = bool(self.autocast_input.get("enabled", getattr(self.cfg, "use_amp", False)))
+
+        # 실제로 AMP를 켤 수 있는지 최종 결정:
+        #   1) 요청(enabled)이 True
+        #   2) amp_device == 실제 device.type (mismatch 방지)
+        #   3) CUDA일 경우 CUDA 가용성 확인
+        self.enabled = bool(
+            requested_amp
+            and (self.amp_device == self.device_type)
+            and (self.amp_device != "cuda" or torch.cuda.is_available())
+        )
+
+        # Legacy alias (기존 코드 호환)
+        self.amp_enabled = self.enabled
 
         # Spike Loss 효과 분석 및 디버깅을 위한 내부 카운터/비교군 초기화
         self._dbg_spike_seen = 0
@@ -83,6 +159,7 @@ class CommonTrainer:
         if isinstance(sl, dict):
             return bool(sl.get("enabled", False))
         return bool(getattr(sl, "enabled", False))
+
 
     def _clone_cfg_disable_spike(self):
         """Spike Loss를 비활성화한 설정 복제본 생성 (비교 분석용).
@@ -335,7 +412,7 @@ class CommonTrainer:
         - AMP(Mixed Precision) 기반 순전파 및 손실 계산.
         - 역전파 및 가중치 업데이트 (Train 모드 시).
         """
-        device = self.cfg.device
+        device = self.device
         total = 0.0
         # 모델 모드(학습/평가) 전환
         model.train() if train else model.eval()
@@ -362,11 +439,12 @@ class CommonTrainer:
                     future_exo = None
 
                 # 3. AMP(Mixed Precision) 컨텍스트 내 순전파 및 손실 계산
-                with autocast(
-                        device_type=self.cfg.amp_device,
-                        enabled=self.amp_enabled,
-                        dtype=self.dtype if self.dtype is not None else "fp32",
-                ):
+                _ac_kwargs = {"device_type": self.amp_device, "enabled": self.enabled}
+
+                if self.dtype is not None:
+                    _ac_kwargs["dtype"] = self.dtype
+
+                with autocast(**_ac_kwargs):
                     # 어댑터를 경유한 모델 순전파 실행
                     pred = self._forward_with_adapter(
                         model,
@@ -433,14 +511,13 @@ class CommonTrainer:
         - 에폭 반복 및 조기 종료(Early Stopping) 체크.
         - 검증 루프 및 TTA(Test-Time Adaptation) 수행.
         """
-        device = self.cfg.device
+        device = self.device
         model.to(device)
         from modeling_module.training.optim import build_optimizer_and_scheduler
 
         # 최적화 도구 및 스케줄러 빌드
         self.opt, self.sched = build_optimizer_and_scheduler(model, self.cfg)
-        self.scaler = GradScaler(self.cfg.amp_device)
-
+        self.scaler = GradScaler(device="cuda", enabled=(self.enabled and self.amp_device == "cuda"))
         # 조기 종료(Early Stopping) 추적 변수 초기화
         best_loss = float("inf")
         best_state = copy.deepcopy(model.state_dict())
@@ -451,7 +528,6 @@ class CommonTrainer:
             self.adapter.tta_reset(model)
 
         for epoch in range(self.cfg.epochs):
-
             # 1. 학습 루프 실행
             train_loss = self._run_epoch(model, train_loader, train=True)
 
@@ -475,11 +551,12 @@ class CommonTrainer:
                         loss = self.adapter.tta_adapt(model, x_val, y_val, steps=tta_steps)
 
                         if loss is None:  # TTA 실패 또는 지원 안함 -> 일반 평가로 전환
-                            with autocast(
-                                    device_type=self.cfg.amp_device,
-                                    enabled=self.amp_enabled,
-                                    dtype=self.dtype if self.dtype is not None else "fp32",
-                            ):
+                            _ac_kwargs = {"device_type": self.amp_device, "enabled": self.enabled}
+
+                            if self.dtype is not None:
+                                _ac_kwargs["dtype"] = self.dtype
+
+                            with autocast(**_ac_kwargs):
                                 pred = self._forward_with_adapter(
                                     model,
                                     x_val,
@@ -496,11 +573,12 @@ class CommonTrainer:
                         val_total += loss
                     else:
                         # 일반 평가 (Standard Validation)
-                        with autocast(
-                                device_type=self.cfg.amp_device,
-                                enabled=self.amp_enabled,
-                                dtype=self.dtype if self.dtype is not None else "fp32",
-                        ):
+                        _ac_kwargs = {"device_type": self.amp_device, "enabled": self.enabled}
+
+                        if self.dtype is not None:
+                            _ac_kwargs["dtype"] = self.dtype
+
+                        with autocast(**_ac_kwargs):
                             pred = self._forward_with_adapter(
                                 model,
                                 x_val,

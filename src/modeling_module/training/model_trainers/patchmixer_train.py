@@ -120,8 +120,8 @@ def train_patchmixer(
         # 외생 변수 관련 인자
         future_exo_cb: Optional[Callable[[int, int], "torch.Tensor"]] = None,
         exo_is_normalized: bool = False,
-        use_exogenous_mode: bool = True
-
+        use_exogenous_mode: bool = True,
+        device
 ):
     """
     PatchMixer 모델 학습 진입점(Entry Point).
@@ -213,8 +213,8 @@ def train_patchmixer(
             future_exo_cb=future_exo_cb,
             autocast_input=autocast_input,
             extra_loss_fn=None,
-            use_exogenous_mode=use_exogenous_mode
-
+            use_exogenous_mode=use_exogenous_mode,
+            device = device
         )
         model = trainer.fit(model, tl_i, val_loader, tta_steps=0)
         best = {"model": model, "cfg": cfg_i}

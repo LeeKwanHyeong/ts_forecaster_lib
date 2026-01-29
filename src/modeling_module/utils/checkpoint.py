@@ -58,42 +58,6 @@ _REBUILDERS_BY_CLS = {
     "TitanConfig": _rebuild_titan,
 }
 
-
-# ------------------------------------------------------------------
-# 1) 저장 유틸
-#    (참고) 현재 load는 다음 ckpt 형태 모두 호환:
-#      - 신규(회사식): {"model_state","model_class","config"}
-#      - 신규(본 파일 save_model): {"state_dict","cfg","cfg_state","cfg_cls"}
-#      - 구버전: {"model_state","config"} 또는 {"state_dict","cfg_state","cfg_cls"} 등
-# ------------------------------------------------------------------
-# def save_model(model, cfg, path: str):
-#     """
-#     단일 모델 저장.
-#
-#     ckpt 포맷:
-#       {
-#         "cfg":        cfg 객체 (pickle),
-#         "cfg_state":  dict(asdict(cfg)) or cfg.__dict__,
-#         "cfg_cls":    cfg 클래스 이름(str),
-#         "state_dict": model.state_dict(),
-#       }
-#     """
-#     if is_dataclass(cfg):
-#         cfg_state = asdict(cfg)
-#     else:
-#         cfg_state = getattr(cfg, "__dict__", None)
-#
-#     ckpt = {
-#         "cfg": cfg,
-#         "cfg_state": cfg_state,
-#         "cfg_cls": type(cfg).__name__,
-#         "state_dict": model.state_dict(),
-#     }
-#     os.makedirs(os.path.dirname(path), exist_ok=True)
-#     torch.save(ckpt, path)
-#     print(f"[save] model saved to: {path}")
-
-
 # -----------------------------
 # helpers: primitive sanitize
 # -----------------------------
@@ -225,7 +189,7 @@ def _canonical_model_key(name: str) -> str:
 
     # 이미 builders가 snake_case로 들어오는 경우
     if sl in {
-        "patchmixer_base", "patchmixer_quantile",
+        "patchmixer_base", "patchmixer_quantile", "patchmixer_dist"
         "titan_base", "titan_lmm", "titan_seq2seq",
         "patchtst_base", "patchtst_quantile",
     }:
@@ -236,10 +200,16 @@ def _canonical_model_key(name: str) -> str:
         return "patchtst_quantile"
     if "patchtst" in sl and ("base" in sl or "point" in sl):
         return "patchtst_base"
+    if "patchtst" in sl and "dist" in sl:
+        return "patchtst_dist"
+
     if "patchmixer" in sl and "quant" in sl:
         return "patchmixer_quantile"
-    if "patchmixer" in sl:
+    if "patchmixer" in sl and "dist" in sl:
+        return "patchmixer_dist"
+    if "patchmixer" in sl and ("base" in sl or "point" in sl):
         return "patchmixer_base"
+
     if "titan" in sl and "lmm" in sl:
         return "titan_lmm"
     if "titan" in sl and "seq" in sl:
@@ -383,7 +353,9 @@ def load_model_dict(
     models = {}
 
     for builder_key, build_fn in builders.items():
+        print(f"[load_model_dict] Building {builder_key}")
         canonical_key = _canonical_model_key(builder_key)
+        print(f"[load_model_dict] Canonical {canonical_key}")
         path = _find_ckpt_path(save_dir, canonical_key)
 
         if path is None or (not os.path.exists(path)):

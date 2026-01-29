@@ -64,7 +64,7 @@ class RevIN(nn.Module):
         """
         if self.subtract_last:
             # 마지막 시점의 값 추출 (Trend 제거용)
-            self.last = x[:, -1:, :]
+            self.last = x[:, -1:, :].detach()
         else:
             # 시간 축(dim=1) 기준 평균 계산
             self.mean = x.mean(dim=1, keepdim=True).detach()
@@ -88,7 +88,7 @@ class RevIN(nn.Module):
 
         # Scaling: 표준편차로 나눔
         if self.use_std:
-            x_n = x_n / (self.std + self.eps)
+            x_n = x_n / self.std
 
         # Affine Transformation: 학습 가능한 파라미터 적용
         if self.affine:
@@ -110,7 +110,7 @@ class RevIN(nn.Module):
 
         # Scaling 역연산
         if self.use_std:
-            y = y * (self.std + self.eps)
+            y = y * self.std
 
         # Centering 역연산
         if self.subtract_last:
@@ -145,6 +145,6 @@ class RevIN(nn.Module):
 
         # 2) std 역스케일
         if self.use_std:
-            y = y * (self.std + self.eps)
+            y = y * self.std
 
         return y.squeeze(-1) if s.dim() == 2 else y
