@@ -61,11 +61,3 @@ class TitanConfig:
     clamp_min: Optional[float] = 0.0
     clamp_max: Optional[float] = None
 
-    # -------------------------
-    # Baseline + residual (optional; 현재는 OFF 기본)
-    # -------------------------
-    baseline_seasonal_lag: int = 0     # 0이면 baseline 사용 안함
-    baseline_offset: int = 0           # baseline에 더할 offset (normalized space)
-    baseline_use_trend: bool = False
-    baseline_trend_k: int = 4
-    baseline_detach: bool = True

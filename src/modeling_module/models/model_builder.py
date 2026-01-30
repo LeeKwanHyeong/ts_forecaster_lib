@@ -3,7 +3,9 @@ from typing import Union, Any, Optional
 
 from modeling_module.models.PatchMixer.common.configs import PatchMixerConfig
 from modeling_module.models.PatchTST.common.configs import PatchTSTConfig
+from modeling_module.models.Titan import TitanBaseModel, TitanLMMModel, TitanSeq2SeqModel
 from modeling_module.models.Titan.common.configs import TitanConfig
+from modeling_module.training.model_losses.loss_module import DistributionLoss
 
 
 # -----------------------------
@@ -94,26 +96,22 @@ def _ensure_titan_config(cfg: Union[TitanConfig, dict, Any]) -> TitanConfig:
     return TitanConfig(**d)
 
 
-def build_titan_base(cfg):
-    """Titan 기본 모델(BaseModel) 인스턴스 생성."""
-    from modeling_module.models.Titan.Titans import TitanBaseModel
+def _get_out_mult_from_loss(loss_obj) -> int:
+    if loss_obj is None:
+        return 1
+    return int(getattr(loss_obj, "outputsize_multiplier", 1))
+
+def build_titan_base(cfg: TitanConfig, *, out_mult: int = 1, param_names=None):
     cfg = _ensure_titan_config(cfg)
-    return TitanBaseModel.from_config(cfg)
+    return TitanBaseModel(cfg, out_mult=out_mult, param_names=param_names)
 
-
-def build_titan_lmm(cfg):
-    """Titan LMM(Large Multi-modal Model) 변형 모델 생성."""
-    from modeling_module.models.Titan.Titans import TitanLMMModel
+def build_titan_lmm(cfg: TitanConfig, *, out_mult: int = 1, param_names=None):
     cfg = _ensure_titan_config(cfg)
-    return TitanLMMModel.from_config(cfg)
+    return TitanLMMModel(cfg, out_mult=out_mult, param_names=param_names)
 
-
-def build_titan_seq2seq(cfg):
-    """Titan Seq2Seq 변형 모델 생성."""
-    from modeling_module.models.Titan.Titans import TitanSeq2SeqModel
+def build_titan_seq2seq(cfg: TitanConfig, *, out_mult: int = 1, param_names=None):
     cfg = _ensure_titan_config(cfg)
-    return TitanSeq2SeqModel.from_config(cfg)
-
+    return TitanSeq2SeqModel(cfg, out_mult=out_mult, param_names=param_names)
 
 # -----------------------------
 # PatchTST: dict/Namespace → PatchTSTConfig

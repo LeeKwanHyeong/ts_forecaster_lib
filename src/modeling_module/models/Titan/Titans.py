@@ -144,9 +144,20 @@ class _TitanBase(nn.Module):
         # h_dec is [B, H, D], so projecting per step is correct.
         self.head = nn.Linear(self.d_model, self.out_mult)
 
+        # proj out_features를 out_mult로
+        self.proj = nn.Linear(self.d_model, self.out_mult)
+
         # Clamp
         self.clamp_min = getattr(cfg, "clamp_min", 0.0)
         self.clamp_max = getattr(cfg, "clamp_max", None)
+
+    def _inv_softplus(self, y: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+        """
+            Stable inverse of softplus.
+            For large y, expm1(-y) -> -1 (stable), so no overflow.
+            """
+        y = torch.clamp(y, min=eps)
+        return y + torch.log(-torch.expm1(-y))  # <-- 핵심: expm1(-y)
 
     def _maybe_revin_norm(self, x: torch.Tensor):
         if self.revin is None:
@@ -212,11 +223,43 @@ class _TitanBase(nn.Module):
 
         out = self.head(h_dec)
 
+        # RevIN 통계: mean/stdev는 norm 호출 때 내부 저장됨
+        # shape: [B,1,C], 여기서 C=1
+        stdev = self.revin.std.clamp_min(1e-6)  # 0 방지 [B,1,1]
+
         # 6) denorm / clamp
         if self.out_mult == 1:
             out = self._maybe_revin_denorm(out)  # out: [B,H,1]
             out = self._clamp(out)
             return out.squeeze(-1)  # [B, H]
+
+        elif self.out_mult == 2:
+            loc = out[..., 0:1]
+            scale_raw = out[..., 1:2]
+
+            # loc denorm
+            loc = self._maybe_revin_denorm(loc)
+            # scale_raw를 "loss의 softplus 이후 scale"이 raw 스케일이 되게 변환:
+            # scale = softplus(scale_raw_norm)  (norm 스케일)
+            # raw_scale = scale * stdev
+            # -> scale_raw_out = inv_softplus(raw_scale)
+            scale = F.softplus(scale_raw)
+            raw_scale = (scale * stdev).clamp(min=1e-6, max=1e6)  # broadcast to [B,H,1]
+            scale_raw = self._inv_softplus(raw_scale)
+            return torch.cat([loc, scale_raw], dim = -1) # [B, H, 2]
+
+        elif self.out_mult == 3:
+            df_raw = out[..., 0:1]
+            loc = out[..., 1:2]
+            scale_raw = out[..., 2:3]
+
+            loc = self._maybe_revin_denorm(loc)
+            scale = F.softplus(scale_raw)
+            raw_scale = (scale * stdev).clamp(min=1e-6, max=1e6)
+            scale_raw = self._inv_softplus(raw_scale)
+
+            return torch.cat([df_raw, loc, scale_raw], dim = -1) # [B, H, 3]
+
         else:
             # distribution/packed outputs: do not denorm here
             return out

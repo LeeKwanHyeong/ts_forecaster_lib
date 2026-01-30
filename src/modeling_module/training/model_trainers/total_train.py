@@ -18,7 +18,7 @@ from modeling_module.models.model_builder import (
     build_patch_mixer_quantile,
     build_patchTST_base,
     build_patchTST_quantile,
-    build_patchTST_dist, build_patch_mixer_dist,
+    build_patchTST_dist, build_patch_mixer_dist
 )
 from modeling_module.training.config import SpikeLossConfig, TrainingConfig, StageConfig
 from modeling_module.training.model_losses.loss_module import (
@@ -506,8 +506,6 @@ def _run_patchtst(
     ssl_loss_type: str = "mse",
     ssl_freeze_encoder_before_ft: bool = False,
     ssl_pretrained_ckpt_path: Optional[str] = None,
-    use_intermittent: bool = False,
-    val_use_weights: bool = False,
 ):
     """PatchTST 모델 학습 파이프라인 실행."""
     use_ssl_mode = _validate_ssl_mode(use_ssl_mode)
@@ -689,16 +687,9 @@ def _run_titan(
     future_exo_cb,
     exo_dim: int,
     loss_point: Optional[nn.Module] = None,
-    patch_len: int,
-    stride: int,
     point_train_cfg,
     stages,
     device: str,
-    baseline_seasonal_lag,
-    baseline_offset,
-    baseline_use_trend,
-    baseline_trend_k,
-    baseline_detach,
 ):
     """Titan 계열 모델(Base, LMM, Seq2Seq) 학습 실행."""
     loss_point_obj = loss_point if loss_point is not None else point_train_cfg.loss
@@ -720,9 +711,8 @@ def _run_titan(
         print(f"[DBG-ti_kwargs] failed to infer past_exo dims: {repr(e)}")
         d_past_cont, d_past_cat = 0, 0
 
-    cat_vocab_sizes = tuple([512] * d_past_cat)
     cat_embed_dims = tuple([16] * d_past_cat)
-    past_dim_total = d_past_cont + sum(cat_embed_dims)
+    d_past_cont + sum(cat_embed_dims)
 
     ti_config = TitanConfig(
         lookback=lookback,
@@ -737,11 +727,6 @@ def _run_titan(
         exo_dim=(int(exo_dim) if use_exogenous_mode else 0),
         past_exo_cont_dim=d_past_cont,
         use_revin=True,
-        baseline_seasonal_lag=baseline_seasonal_lag,
-        baseline_offset=1,
-        baseline_use_trend=False,
-        baseline_trend_k=4,
-        baseline_detach=True,
         final_clamp_nonneg=False,
 
     )
@@ -750,30 +735,17 @@ def _run_titan(
 
     name_suffix = " Dist" if mode == "dist" else ""
 
-    ti_base = build_titan_base(ti_config)
-    name_base = f"Titan Base{name_suffix}"
-    ckpt_name_base = "TitanBaseDist" if mode == "dist" else "TitanBase"
-    print(f"{name_base} ({freq.capitalize()})")
-    best_ti_base = train_titan(
-        ti_base,
-        train_loader,
-        val_loader,
-        device = device,
-        train_cfg=point_train_cfg,
-        stages=list(stages),
-        future_exo_cb=(future_exo_cb if use_exogenous_mode else None),
-        use_exogenous_mode=use_exogenous_mode,
-    )
-    if save_root:
-        ckpt_path = _make_ckpt_path(save_root, freq, ckpt_name_base, lookback, horizon)
-        save_model(ti_base, ti_config, ckpt_path)
-        best_ti_base["ckpt_path"] = str(ckpt_path)
-    results[name_base] = best_ti_base
+    loss_point_obj = loss_point if loss_point is not None else point_train_cfg.loss
+    mode = infer_supervised_mode(loss_point_obj)
+    out_mult = int(getattr(loss_point_obj, 'outputsize_multiplier', 2)) if mode == 'dist' else 1
+    param_names = getattr(loss_point_obj, 'param_names', None) if mode == 'dist' else None
 
-    ti_lmm = build_titan_lmm(ti_config)
+    print(f'[_run_titan] mode: {mode} out_mult: {out_mult}, param_names: {param_names}')
+
     name_lmm = f"Titan LMM{name_suffix}"
     ckpt_name_lmm = "TitanLMMDist" if mode == "dist" else "TitanLMM"
     print(f"{name_lmm} ({freq.capitalize()})")
+    ti_lmm = build_titan_lmm(ti_config, out_mult=out_mult, param_names=param_names)
     best_ti_lmm = train_titan(
         ti_lmm,
         train_loader,
@@ -790,10 +762,10 @@ def _run_titan(
         best_ti_lmm["ckpt_path"] = str(ckpt_path)
     results[name_lmm] = best_ti_lmm
 
-    ti_seq2seq = build_titan_seq2seq(ti_config)
     name_s2s = f"Titan Seq2Seq{name_suffix}"
     ckpt_name_s2s = "TitanSeq2SeqDist" if mode == "dist" else "TitanSeq2Seq"
     print(f"{name_s2s} ({freq.capitalize()})")
+    ti_seq2seq = build_titan_seq2seq(ti_config, out_mult = out_mult, param_names = param_names)
     best_ti_s2s = train_titan(
         ti_seq2seq,
         train_loader,
@@ -824,6 +796,7 @@ def _run_patchmixer(
     exo_dim: int,
     patch_len: int,
     stride: int,
+    season_period: int,
     loss_point: Optional[nn.Module] = None,
     loss_quantile: Optional[nn.Module] = None,
     use_exogenous_mode: bool = True,
@@ -838,16 +811,6 @@ def _run_patchmixer(
     loss_q_obj = coerce_quantile_loss(loss_quantile, quantiles=quantiles)
     if quantile_train_cfg is not None:
         quantile_train_cfg = replace(quantile_train_cfg, loss=loss_q_obj)
-
-    # freq별 patch 추천값
-    if freq == "hourly":
-        patch_len, stride, season_period = 24, 12, 24
-    elif freq == "daily":
-        patch_len, stride, season_period = 14, 7, 7
-    elif freq == "weekly":
-        patch_len, stride, season_period = 12, 8, 52
-    else:
-        patch_len, stride, season_period = 6, 3, 12
 
     pm_kwargs = dict(
         lookback=lookback,
@@ -1052,16 +1015,16 @@ def _run_total_train_generic(
     # freq별 patch_len/stride
     if freq == "hourly":
         patch_len, stride = 24, 12
-        baseline_seasonal_lag = 24
+        season_period = 24
     elif freq == "daily":
         patch_len, stride = 14, 7
-        baseline_seasonal_lag = 7
+        season_period = 7
     elif freq == "weekly":
         patch_len, stride = 12, 8
-        baseline_seasonal_lag = 52
+        season_period = 52
     else:
         patch_len, stride = 6, 3
-        baseline_seasonal_lag = 12
+        season_period = 12
 
     selected = _norm_list(models_to_run)
     if not selected:
@@ -1085,8 +1048,6 @@ def _run_total_train_generic(
             horizon=horizon,
             future_exo_cb=(future_exo_cb if use_exogenous_mode else None),
             exo_dim=exo_dim,
-            patch_len=patch_len,
-            stride=stride,
             point_train_cfg=point_train_cfg,
             quantile_train_cfg=quantile_train_cfg,
             stages=stages,
@@ -1105,8 +1066,17 @@ def _run_total_train_generic(
                     ssl_loss_type=ssl_loss_type,
                     ssl_freeze_encoder_before_ft=ssl_freeze_encoder_before_ft,
                     ssl_pretrained_ckpt_path=ssl_pretrained_ckpt_path,
-                    use_intermittent=use_intermittent,
-                    val_use_weights=val_use_weights,
+                    patch_len=patch_len,
+                    stride=stride,
+                )
+            )
+
+        if m == 'patchmixer':
+            kwargs.update(
+                dict(
+                    season_period = season_period,
+                    patch_len = patch_len,
+                    stride = stride,
                 )
             )
 
@@ -1114,16 +1084,6 @@ def _run_total_train_generic(
             # titan runner does not use quantile_train_cfg
             kwargs.pop("quantile_train_cfg", None)
             kwargs.pop("loss_quantile", None)
-            kwargs.update(
-                dict(
-                    baseline_seasonal_lag = baseline_seasonal_lag,
-                    baseline_offset = 1,
-                    baseline_use_trend = False,
-                    baseline_trend_k = 4,
-                    baseline_detach = True,
-                )
-            )
-
         MODEL_REGISTRY[m](**kwargs)
 
     return results
