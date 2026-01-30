@@ -3292,6 +3292,44 @@ class NBMM(torch.nn.Module):
 
         return weighted_average(loss_values, weights=loss_weights)
 
+class SpikeWeightedHuberLoss(nn.Module):
+    def __init__(self, delta: float, alpha: float = 2.0, z0: float = 2.0, eps: float = 1e-6, reduction: str = "mean"):
+        super().__init__()
+        self.delta = float(delta)
+        self.alpha = float(alpha)
+        self.z0 = float(z0)
+        self.eps = float(eps)
+        self.reduction = reduction
+
+    def forward(self,
+                y: torch.Tensor,
+                y_hat: torch.Tensor,
+                mask,
+                y_insample: Union[torch.Tensor, None] = None,
+                ) -> torch.Tensor:
+        # y_true, y_pred: [B, H]
+        mu = y.mean(dim=1, keepdim=True)
+        sd = y.std(dim=1, keepdim=True).clamp_min(self.eps)
+        z = (y - mu) / sd
+
+        w = 1.0 + self.alpha * torch.relu(z - self.z0)  # [B,H]
+
+        e = y - y_hat
+        abs_e = e.abs()
+        delta = self.delta
+
+        # huber per-element
+        quad = 0.5 * (e ** 2)
+        lin = delta * (abs_e - 0.5 * delta)
+        hub = torch.where(abs_e <= delta, quad, lin)  # [B,H]
+
+        loss = w * hub
+        if self.reduction == "mean":
+            return loss.mean()
+        if self.reduction == "sum":
+            return loss.sum()
+        return loss
+
 
 class HuberLoss(BasePointLoss):
     r""" Huber Loss

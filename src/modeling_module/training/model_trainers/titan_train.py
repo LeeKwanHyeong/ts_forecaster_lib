@@ -40,33 +40,45 @@ def _infer_exo_dim_from_cb(future_exo_cb, horizon: int, device: str = "cpu") -> 
 
 
 def _ensure_model_exo_head(model, exo_dim: int):
-    """
-    콜백 기반 외생 변수 모드일 때, 추론된 차원에 맞춰 모델의 `exo_head`를 동적으로 생성 또는 갱신함.
+    """콜백 기반 외생 변수 모드일 때, 추론된 차원에 맞춰 Titan의 decoder exogenous projection을 갱신함.
+
+    Titan 계열은 `model.exo_head`를 사용하지 않고, `TitanDecoder.exo_proj`를 통해
+    future_exo ([B,H,E])를 d_model로 투영하여 디코더 입력에 더합니다.
 
     특징:
-    - exo_dim이 0 이하일 경우 모델을 변경하지 않음 (의도치 않은 삭제 방지).
-    - 기존 차원과 다를 경우 MLP(Linear-GELU-Linear) 구조의 헤드를 재생성함.
+    - exo_dim <= 0이면 변경하지 않음 (의도치 않은 삭제 방지)
+    - 기존 exo_dim과 다를 경우 decoder.exo_proj를 재생성
     """
-    if not hasattr(model, "exo_dim"):
-        return model
-
     if exo_dim <= 0:
-        # Do not touch model (prevents accidental removal when loader provides future_exo).
         return model
 
-    current = int(getattr(model, "exo_dim", 0))
-    has_head = getattr(model, "exo_head", None) is not None
+    # model-level meta
+    if hasattr(model, "exo_dim"):
+        model.exo_dim = int(exo_dim)
+    if hasattr(model, "use_exogenous_mode"):
+        model.use_exogenous_mode = True
 
-    if current == exo_dim and has_head:
+    dec = getattr(model, "decoder", None)
+    if dec is None:
         return model
 
-    model.exo_head = nn.Sequential(
-        nn.Linear(exo_dim, 64),
-        nn.GELU(),
-        nn.Linear(64, 1),
-    )
-    model.exo_dim = int(exo_dim)
-    print(f"[train_titan] exo_head rebuilt with exo_dim={exo_dim}")
+    d_model = getattr(model, "d_model", None)
+    if d_model is None:
+        qe = getattr(dec, "query_embed", None)
+        if isinstance(qe, torch.Tensor):
+            d_model = int(qe.size(-1))
+        else:
+            return model
+
+    current = int(getattr(dec, "exo_dim", 0) or 0)
+    has_proj = getattr(dec, "exo_proj", None) is not None
+    if current == int(exo_dim) and has_proj:
+        return model
+
+    device = next(model.parameters()).device if any(True for _ in model.parameters()) else torch.device("cpu")
+    dec.exo_dim = int(exo_dim)
+    dec.exo_proj = nn.Linear(int(exo_dim), int(d_model)).to(device)
+    print(f"[train_titan] decoder.exo_proj rebuilt: exo_dim={exo_dim} -> d_model={d_model}")
     return model
 
 
@@ -131,13 +143,13 @@ def train_titan(
         print(
             "[EXO-setup] (callback) "
             f"inferred E={E}, model.exo_dim={getattr(model, 'exo_dim', None)}, "
-            f"has_head={getattr(model, 'exo_head', None) is not None}"
+            f"has_exo_proj={getattr(getattr(model, 'decoder', None), 'exo_proj', None) is not None}"
         )
     else:
         print(
-            "[EXO-setup] (loader) future_exo_cb=None → skip exo_head setup. "
+            "[EXO-setup] (loader) future_exo_cb=None → skip decoder.exo_proj setup. "
             f"model.exo_dim={getattr(model, 'exo_dim', None)}, "
-            f"has_head={getattr(model, 'exo_head', None) is not None}"
+            f"has_exo_proj={getattr(getattr(model, 'decoder', None), 'exo_proj', None) is not None}"
         )
 
     # 2. AMP (Mixed Precision) 설정
@@ -172,7 +184,7 @@ def train_titan(
     for i, stg in enumerate(stages, 1):
         # 현재 스테이지 설정 적용
         cfg_i = apply_stage(train_cfg, stg)
-        print(f"\n[train_patchmixer] ===== Stage {i}/{len(stages)} =====")
+        print(f"\n[train_titan] ===== Stage {i}/{len(stages)} =====")
         print(f"  - spike: {'ON' if cfg_i.spike_loss.enabled else 'OFF'}")
         print(f"  - epochs: {cfg_i.epochs} | lr={cfg_i.lr} | horizon_decay={cfg_i.use_horizon_decay}")
         _dump_cfg(cfg_i)

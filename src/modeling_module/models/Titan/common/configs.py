@@ -1,60 +1,71 @@
-# configs.py
 from __future__ import annotations
-from dataclasses import dataclass
-from typing import Tuple
+
+from dataclasses import dataclass, field
+from typing import Optional, List
 
 
 @dataclass
 class TitanConfig:
+    # -------------------------
+    # Data / IO
+    # -------------------------
     lookback: int = 52
     horizon: int = 27
+
+    # past exogenous
+    past_exo_cont_dim: int = 0
+    past_exo_cat_dims: Optional[List[int]] = None
+    past_exo_cat_embed_dims: Optional[List[int]] = None
+
+    final_clamp_nonneg: bool = False
+
+    # future exogenous
+    exo_dim: int = 0  # future exo dim
+
+    # -------------------------
+    # Model dims
+    # -------------------------
     d_model: int = 256
-    input_dim: int = 1
-    n_layers: int = 3
-    n_heads: int = 4
+    n_layers: int = 4
+    n_heads: int = 8
     d_ff: int = 512
     dropout: float = 0.1
 
-    # LMM(메모리)
-    use_lmm: bool = False
-    contextual_mem_size: int = 256
-    persistent_mem_size: int = 64
+    # -------------------------
+    # Memory (attention-side)
+    # -------------------------
+    contextual_mem_size: int = 32
+    persistent_mem_size: int = 32
+    use_context_update: bool = False
 
+    # -------------------------
+    # Positional embedding (encoder)
+    # -------------------------
+    use_pos_emb: bool = True
+    max_len: int = 512
+
+    # -------------------------
+    # LMM (local memory matching)
+    # -------------------------
+    mem_size: int = 128
+    mem_topk: int = 8
+
+    # -------------------------
     # RevIN
+    # -------------------------
     use_revin: bool = True
-    revin_use_std: bool = False
-    revin_subtract_last: bool = True
-    revin_affine: bool = True
 
-    # Expander 옵션(계절/저주파 강화)
-    use_temporal_expander: bool = True
-    expander_f_out: int = 32
-    expander_max_harmonics: int = 6
-    expander_n_harmonics: int = 6
-    expander_use_conv: bool = True
+    # -------------------------
+    # Output / head
+    # -------------------------
+    clamp_min: Optional[float] = 0.0
+    clamp_max: Optional[float] = None
 
-    # Exogenous
-    use_exogenous_mode: bool = True
-    exo_dim: int = 2
-
-    # 출력 제약
-    final_clamp_nonneg: bool = True
-
-
-    # Head 유형: 'expander' | 'linear' | 'seq2seq'
-    head_type: str = 'expander'
-
-
-
-    # Seq2Seq 디코더 옵션
-    dec_n_layers: int = 2
-    dec_n_heads: int = 4
-    dec_d_ff: int = 512
-    dec_dropout: float = 0.1
-
-    # Past Exogenous (Encoder side)
-    past_exo_cont_dim: int = 0  # pe_cont last-dim
-    past_exo_cat_dim: int = 0  # pe_cat last-dim (K)
-    past_exo_cat_vocab_sizes: Tuple[int, ...] = ()  # length K
-    past_exo_cat_embed_dims: Tuple[int, ...] = ()  # length K
-    past_exo_mode: str = "concat"  # 현재는 concat만 지원(확장 여지)
+    # -------------------------
+    # Baseline + residual (optional; 현재는 OFF 기본)
+    # -------------------------
+    baseline_seasonal_lag: int = 0     # 0이면 baseline 사용 안함
+    baseline_offset: int = 0           # baseline에 더할 offset (normalized space)
+    baseline_use_trend: bool = False
+    baseline_trend_k: int = 4
+    baseline_detach: bool = True

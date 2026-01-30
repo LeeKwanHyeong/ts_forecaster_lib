@@ -486,7 +486,7 @@ class CommonTrainer:
                     if torch.isnan(loss_t):
                         self.logger("[Warn] NaN loss. step skipped.")
                         continue
-
+                    torch.autograd.set_detect_anomaly(True)
                     # Scaler를 이용한 역전파 (Gradient Scaling)
                     self.scaler.scale(loss_t).backward()
 
@@ -537,6 +537,7 @@ class CommonTrainer:
             with torch.no_grad():
                 for batch in val_loader:
                     x, y, part_ids, fe_cont, pe_cont, pe_cat = self._unpack_batch(batch)
+
                     x_val, y_val = x.to(device), y.to(device)
 
                     # 외생 변수 처리
@@ -597,6 +598,7 @@ class CommonTrainer:
                     # 메트릭 계산 (선택 사항)
                     if self.metrics_fn:
                         _ = self.metrics_fn(pred, y_val)
+
 
             # 에폭별 검증 손실 집계 및 스케줄러 갱신
             val_loss = val_total / max(1, len(val_loader))

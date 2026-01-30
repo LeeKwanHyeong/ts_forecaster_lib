@@ -694,9 +694,15 @@ def _run_titan(
     point_train_cfg,
     stages,
     device: str,
+    baseline_seasonal_lag,
+    baseline_offset,
+    baseline_use_trend,
+    baseline_trend_k,
+    baseline_detach,
 ):
     """Titan 계열 모델(Base, LMM, Seq2Seq) 학습 실행."""
     loss_point_obj = loss_point if loss_point is not None else point_train_cfg.loss
+    mode = infer_supervised_mode(loss_point_obj)
 
     # past exo dims
     d_past_cont = 0
@@ -721,34 +727,33 @@ def _run_titan(
     ti_config = TitanConfig(
         lookback=lookback,
         horizon=horizon,
-        input_dim=1 + past_dim_total,
         d_model=256,
         n_layers=3,
         n_heads=4,
-        d_ff=512,
+        d_ff=4 * 256,
         dropout=0.1,
         contextual_mem_size=256,
         persistent_mem_size=64,
-        use_exogenous_mode=use_exogenous_mode,
         exo_dim=(int(exo_dim) if use_exogenous_mode else 0),
         past_exo_cont_dim=d_past_cont,
-        past_exo_cat_dim=d_past_cat,
-        past_exo_cat_vocab_sizes=cat_vocab_sizes,
-        past_exo_cat_embed_dims=cat_embed_dims,
-        past_exo_mode="concat",
-        final_clamp_nonneg=True,
         use_revin=True,
-        revin_use_std=True,
-        revin_subtract_last=False,
-        revin_affine=True,
-        use_lmm=False,
-        loss=loss_point_obj,
+        baseline_seasonal_lag=baseline_seasonal_lag,
+        baseline_offset=1,
+        baseline_use_trend=False,
+        baseline_trend_k=4,
+        baseline_detach=True,
+        final_clamp_nonneg=False,
+
     )
     if freq == "hourly":
         ti_config.contextual_mem_size = 512
 
+    name_suffix = " Dist" if mode == "dist" else ""
+
     ti_base = build_titan_base(ti_config)
-    print(f"Titan Base ({freq.capitalize()})")
+    name_base = f"Titan Base{name_suffix}"
+    ckpt_name_base = "TitanBaseDist" if mode == "dist" else "TitanBase"
+    print(f"{name_base} ({freq.capitalize()})")
     best_ti_base = train_titan(
         ti_base,
         train_loader,
@@ -760,14 +765,15 @@ def _run_titan(
         use_exogenous_mode=use_exogenous_mode,
     )
     if save_root:
-        ckpt_path = _make_ckpt_path(save_root, freq, "TitanBase", lookback, horizon)
+        ckpt_path = _make_ckpt_path(save_root, freq, ckpt_name_base, lookback, horizon)
         save_model(ti_base, ti_config, ckpt_path)
         best_ti_base["ckpt_path"] = str(ckpt_path)
-    results["Titan Base"] = best_ti_base
+    results[name_base] = best_ti_base
 
-    ti_config_lmm = replace(ti_config, use_lmm=True)
-    ti_lmm = build_titan_lmm(ti_config_lmm)
-    print(f"Titan LMM ({freq.capitalize()})")
+    ti_lmm = build_titan_lmm(ti_config)
+    name_lmm = f"Titan LMM{name_suffix}"
+    ckpt_name_lmm = "TitanLMMDist" if mode == "dist" else "TitanLMM"
+    print(f"{name_lmm} ({freq.capitalize()})")
     best_ti_lmm = train_titan(
         ti_lmm,
         train_loader,
@@ -779,27 +785,30 @@ def _run_titan(
         use_exogenous_mode=use_exogenous_mode,
     )
     if save_root:
-        ckpt_path = _make_ckpt_path(save_root, freq, "TitanLMM", lookback, horizon)
-        save_model(ti_lmm, ti_config_lmm, ckpt_path)
+        ckpt_path = _make_ckpt_path(save_root, freq, ckpt_name_lmm, lookback, horizon)
+        save_model(model = ti_lmm, cfg = ti_config, path = ckpt_path)
         best_ti_lmm["ckpt_path"] = str(ckpt_path)
-    results["Titan LMM"] = best_ti_lmm
+    results[name_lmm] = best_ti_lmm
 
     ti_seq2seq = build_titan_seq2seq(ti_config)
-    print(f"Titan Seq2Seq ({freq.capitalize()})")
+    name_s2s = f"Titan Seq2Seq{name_suffix}"
+    ckpt_name_s2s = "TitanSeq2SeqDist" if mode == "dist" else "TitanSeq2Seq"
+    print(f"{name_s2s} ({freq.capitalize()})")
     best_ti_s2s = train_titan(
         ti_seq2seq,
         train_loader,
         val_loader,
+        device = device,
         train_cfg=point_train_cfg,
         stages=list(stages),
         future_exo_cb=(future_exo_cb if use_exogenous_mode else None),
         use_exogenous_mode=use_exogenous_mode,
     )
     if save_root:
-        ckpt_path = _make_ckpt_path(save_root, freq, "TitanSeq2Seq", lookback, horizon)
+        ckpt_path = _make_ckpt_path(save_root, freq, ckpt_name_s2s, lookback, horizon)
         save_model(ti_seq2seq, ti_config, ckpt_path)
         best_ti_s2s["ckpt_path"] = str(ckpt_path)
-    results["Titan Seq2Seq"] = best_ti_s2s
+    results[name_s2s] = best_ti_s2s
 
 
 def _run_patchmixer(
@@ -1043,12 +1052,16 @@ def _run_total_train_generic(
     # freq별 patch_len/stride
     if freq == "hourly":
         patch_len, stride = 24, 12
+        baseline_seasonal_lag = 24
     elif freq == "daily":
         patch_len, stride = 14, 7
+        baseline_seasonal_lag = 7
     elif freq == "weekly":
         patch_len, stride = 12, 8
+        baseline_seasonal_lag = 52
     else:
         patch_len, stride = 6, 3
+        baseline_seasonal_lag = 12
 
     selected = _norm_list(models_to_run)
     if not selected:
@@ -1092,8 +1105,8 @@ def _run_total_train_generic(
                     ssl_loss_type=ssl_loss_type,
                     ssl_freeze_encoder_before_ft=ssl_freeze_encoder_before_ft,
                     ssl_pretrained_ckpt_path=ssl_pretrained_ckpt_path,
-        use_intermittent=use_intermittent,
-        val_use_weights=val_use_weights,
+                    use_intermittent=use_intermittent,
+                    val_use_weights=val_use_weights,
                 )
             )
 
@@ -1101,6 +1114,15 @@ def _run_total_train_generic(
             # titan runner does not use quantile_train_cfg
             kwargs.pop("quantile_train_cfg", None)
             kwargs.pop("loss_quantile", None)
+            kwargs.update(
+                dict(
+                    baseline_seasonal_lag = baseline_seasonal_lag,
+                    baseline_offset = 1,
+                    baseline_use_trend = False,
+                    baseline_trend_k = 4,
+                    baseline_detach = True,
+                )
+            )
 
         MODEL_REGISTRY[m](**kwargs)
 
