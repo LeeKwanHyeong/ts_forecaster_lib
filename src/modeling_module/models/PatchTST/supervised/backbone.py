@@ -20,7 +20,7 @@ class SupervisedBackbone(PatchBackboneBase):
     출력: [Batch, Num_Patches, d_model]
     """
 
-    def __init__(self, cfg, attn_core=None):
+    def __init__(self, cfg, attn_type=None):
         super().__init__(cfg)
         self.cfg = cfg
 
@@ -28,37 +28,41 @@ class SupervisedBackbone(PatchBackboneBase):
         # 1. Attention Core 자동 선택
         # -----------------------------------
         # 설정된 어텐션 타입에 따라 적절한 모듈 초기화
-        if attn_core is None:
-            attn_type = getattr(cfg.attn, "type", "full").lower()
 
-            if attn_type == "full":
-                # 표준 O(L^2) 어텐션
-                attn_core = FullAttention(
-                    mask_flag=cfg.attn.causal,
-                    attention_dropout=cfg.attn.attn_dropout,
-                    output_attention=cfg.attn.output_attention,
-                )
-            elif attn_type == "probsparse":
-                # Informer 스타일의 O(L log L) 희소 어텐션
-                attn_core = ProbAttention(
-                    mask_flag=cfg.attn.causal,
-                    factor=cfg.attn.factor,
-                    attention_dropout=cfg.attn.attn_dropout,
-                    output_attention=cfg.attn.output_attention,
-                    # residual=cfg.attn.residual_logits,
-                )
-            elif attn_type == 'full_logits':
-                # Logit 반환을 지원하는 확장형 어텐션
-                attn_core = FullAttentionWithLogits(
-                    mask_flag=True,
-                    attention_dropout=0.1,
-                    output_attention=False,
-                    return_logits=True,
-                    use_realformer_residual=True
-                )
-            else:
-                raise ValueError(f"Invalid attention type: {attn_type}")
+        if attn_type == "full":
+            # 표준 O(L^2) 어텐션
+            attn_core = FullAttention(
+                mask_flag=cfg.attn.causal,
+                attention_dropout=cfg.attn.attn_dropout,
+                output_attention=cfg.attn.output_attention,
+            )
+        elif attn_type == "prob_sparse":
+            # Informer 스타일의 O(L log L) 희소 어텐션
+            attn_core = ProbAttention(
+                mask_flag=cfg.attn.causal,
+                factor=cfg.attn.factor,
+                attention_dropout=cfg.attn.attn_dropout,
+                output_attention=cfg.attn.output_attention,
+                # residual=cfg.attn.residual_logits,
+            )
+        elif attn_type == 'full_logits':
+            # Logit 반환을 지원하는 확장형 어텐션
+            attn_core = FullAttentionWithLogits(
+                mask_flag=True,
+                attention_dropout=0.1,
+                output_attention=False,
+                return_logits=True,
+                use_realformer_residual=True
+            )
+        else:
+            # 표준 O(L^2) 어텐션
+            attn_core = FullAttention(
+                mask_flag=cfg.attn.causal,
+                attention_dropout=cfg.attn.attn_dropout,
+                output_attention=cfg.attn.output_attention,
+            )
         self.attn_core = attn_core
+        print(f'[SupervisedBackbone] attn_core: {self.attn_core} type: {type(attn_core)}')
 
         # -----------------------------------
         # 2. Encoder Layer Stack 구성
@@ -96,20 +100,23 @@ class SupervisedBackbone(PatchBackboneBase):
     # -----------------------------------
     # 3. Forward (Patchify → Encoder)
     # -----------------------------------
-    def forward(self, x: torch.Tensor, p_cont: torch.Tensor = None, p_cat: torch.Tensor = None) -> torch.Tensor:
+    def forward(self,
+                x: torch.Tensor,
+                past_exo_cont: torch.Tensor = None,
+                past_exo_cat: torch.Tensor = None) -> torch.Tensor:
         """
         순전파 수행.
 
         Args:
             x: 타겟 시계열 [B, L, C] (RevIN 적용됨)
-            p_cont: 과거 연속형 외생 변수 [B, L, d_past_cont]
-            p_cat: 과거 범주형 외생 변수 [B, L, d_past_cat]
+            past_exo_cont: 과거 연속형 외생 변수 [B, L, d_past_cont]
+            past_exo_cat: 과거 범주형 외생 변수 [B, L, d_past_cat]
         Returns:
             z: 인코딩된 잠재 벡터 [B, N, d_model]
         """
         # 1) 패치화 및 임베딩 (부모 클래스 메서드 활용)
         # 입력 데이터들을 결합하여 패치 단위 임베딩 생성
-        z = self._patchify_and_embed(x, p_cont, p_cat)  # [B, N, d_model]
+        z = self._patchify_and_embed(x, past_exo_cont, past_exo_cat)  # [B, N, d_model]
 
         # 2) 트랜스포머 인코더 통과
         # 패치 간의 시간적 관계 및 문맥 학습

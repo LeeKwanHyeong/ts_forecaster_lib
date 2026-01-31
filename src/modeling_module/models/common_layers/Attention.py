@@ -533,7 +533,7 @@ class MultiHeadAttention(nn.Module):
 # ---------------------------------------------------------------------
 def build_attention(cfg) -> MultiHeadAttention:
     # Attention Core 선택
-    core_name = cfg.type.lower()
+    core_name = cfg.attn_core.lower()
     if core_name == 'full' and getattr(cfg, 'residual_logits', False):
         # FullAttention인데 residual logits 사용 시, 전용 core로 변경
         core_name = 'fullwithlogits'

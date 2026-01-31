@@ -1,4 +1,4 @@
-from typing import Optional, Literal, Tuple
+from typing import Optional, Literal, Tuple, List
 from dataclasses import dataclass, field
 
 from modeling_module.training.config import TrainingConfig, DecompositionConfig
@@ -80,6 +80,7 @@ class PatchMixerConfig(TrainingConfig):
 
     use_revin: bool = True
     q_clip_norm = 10.0
+
 
 
 # =========================

@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field, replace
-from typing import Tuple, Optional, Literal, Any
+from typing import Tuple, Optional, Literal, Any, List
 import torch
 
 
@@ -85,7 +85,6 @@ class TrainingConfig:
 
     # --- New unified loss object (preferred) ---
     # Any torch.nn.Module that can be called as loss(y, y_hat, mask=..., y_insample=...)
-    loss: Any = None
 
     # --- Legacy loss routing fields (kept for backward compatibility) ---
 
@@ -98,13 +97,16 @@ class TrainingConfig:
     Cu: float = 1.0
     Co: float = 1.0  # 언더/오버 예측에 대한 비용 가중치 (Cost Under/Over)
     quantiles: Tuple[float, ...] = (0.1, 0.5, 0.9)  # 확률 예측 시 타겟 분위수 목록
+    loss: Any = None
+    out_mul: int = 1
+    param_names: List[str] = None
     # ------------Distribution Loss (분포 기반 NLL)-------------
     # NOTE:
     # - loss_mode='dist'일 때, 모델 출력이 dist 파라미터(예: loc/scale)를 포함해야 합니다.
     # - 기본은 Normal NLL (Gaussian negative log-likelihood) 입니다.
-    dist_name: Literal['normal'] = 'normal'  # 현재 지원 분포 (확장 가능)
+    dist_name: Literal['normal', 'bernoulli', 'poisson', 'studentt', 'negativebinomial', 'tweedie', 'isqf'] = 'normal'  # 현재 지원 분포 (확장 가능)
     dist_scale_transform: Literal['softplus', 'exp', 'none'] = 'softplus'  # scale 양수화 방식
-    dist_min_scale: float = 1000   # 1e-3  # scale 하한(수치 안정성)
+    dist_min_scale: float = 10   # 1e-3  # scale 하한(수치 안정성) # 기존 1000
     dist_use_weights: bool = False  # dist loss에서 intermittent/horizon 가중치 적용 여부
 
     # (alias) LossComputer expects the following names

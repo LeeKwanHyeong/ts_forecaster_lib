@@ -232,178 +232,6 @@ class _ExoMixin(nn.Module):
 
         return y, ex
 
-
-# =====================================================================
-# Point model
-# =====================================================================
-class PatchMixerPointModel(_ExoMixin):
-    """
-    PatchMixer 기반의 점 추정(Point Forecasting) 모델.
-
-    구조:
-    1. RevIN: 입력 데이터 정규화 (Distribution Shift 완화).
-    2. Backbone: 패치 단위 믹싱을 통해 시계열의 잠재 특징(Latent z) 추출.
-    3. Exogenous/Embedding Injection: 과거 외생 변수 및 ID 임베딩 정보 주입.
-    4. Expander: 정적 잠재 벡터를 미래 예측 기간(Horizon)으로 시간적 확장.
-    5. Head: 최종 예측값 산출.
-    6. Refinement: 스케일 보정 및 잔차 학습을 통한 출력 안정화.
-    """
-
-    def __init__(self, cfg: PatchMixerConfig):
-        super().__init__()
-        self.configs = cfg
-        self.horizon = int(cfg.horizon)
-        self.f_out = int(getattr(cfg, "f_out", 128))
-        self.final_nonneg = bool(getattr(cfg, "final_nonneg", True))
-
-        # 1. 백본 네트워크 초기화 및 잠재 벡터(z) 차원 설정
-        self.backbone = PatchMixerBackbone(configs=cfg)
-        # 백본의 출력 차원 감지 (설정값 혹은 계산된 차원)
-        z_dim = int(getattr(self.backbone, "out_dim", getattr(self.backbone, "patch_repr_dim", 0)))
-        if z_dim <= 0:
-            raise RuntimeError("Backbone must expose out_dim or patch_repr_dim")
-        self.z_dim = z_dim
-
-        # 2. RevIN (Reversible Instance Normalization) 모듈 설정
-        self.use_revin = bool(getattr(cfg, "use_revin", True))
-        self.revin = RevIN(int(getattr(cfg, "enc_in", 1)), affine = False)
-
-        # 3. 파트(ID) 임베딩 설정 (선택 사항)
-        self.use_part_embedding = bool(getattr(cfg, "use_part_embedding", False))
-        self.part_emb: Optional[nn.Embedding] = None
-        self.z_fuser: Optional[nn.Linear] = None
-
-        if self.use_part_embedding and int(getattr(cfg, "part_vocab_size", 0)) > 0:
-            pdim = int(getattr(cfg, "part_embed_dim", 16))
-            self.part_emb = nn.Embedding(int(cfg.part_vocab_size), pdim)
-            # 잠재 벡터(z)와 임베딩을 결합(Concat) 후 원래 차원으로 압축하는 레이어
-            self.z_fuser = nn.Linear(z_dim + pdim, z_dim)
-
-        # 4. Temporal Expander (시간적 확장 모듈)
-        # 백본의 정적 출력(Vector)을 시계열(Sequence) 형태로 변환
-        self.expander = TemporalExpander(
-            d_in=z_dim,
-            horizon=self.horizon,
-            f_out=self.f_out,
-            dropout=float(getattr(cfg, "dropout", 0.1)),
-            use_sinus=True,
-            season_period=int(getattr(cfg, "expander_season_period", 52)),
-            max_harmonics=int(getattr(cfg, "expander_max_harmonics", getattr(cfg, "max_harmonics", 16))),
-            use_conv=True,
-        )
-
-        # 5. 예측 헤드 (Prediction Head)
-        # 확장된 특징을 최종 예측값으로 변환 (MLP 구조)
-        head_hidden = int(getattr(cfg, "head_hidden", self.f_out))
-        self.pre_ln = nn.LayerNorm(self.f_out)
-        self.head = nn.Sequential(
-            nn.Linear(self.f_out, head_hidden),
-            nn.GELU(),
-            nn.Linear(head_hidden, 1),
-        )
-
-        # 6. 출력 스케일 안정화 모듈 (Scale Stabilizers)
-        # 학습 초반 불안정성을 완화하고 스케일을 보정하는 파라미터
-        self.learn_output_scale = bool(getattr(cfg, "learn_output_scale", True))
-        if self.learn_output_scale:
-            self.out_scale = nn.Parameter(torch.tensor(1.0))
-            self.out_bias = nn.Parameter(torch.tensor(0.0))
-        else:
-            self.register_buffer("out_scale", torch.tensor(1.0))
-            self.register_buffer("out_bias", torch.tensor(0.0))
-
-        # Depthwise Conv를 이용한 지역적 평활화(Smoothing) 및 잔차 보정
-        self.learn_dw_gain = bool(getattr(cfg, "learn_dw_gain", True))
-        self.dw_head = nn.Conv1d(1, 1, kernel_size=3, padding=1)
-        if self.learn_dw_gain:
-            self.dw_gain = nn.Parameter(torch.tensor(1.0))
-        else:
-            self.register_buffer("dw_gain", torch.tensor(1.0))
-
-        # 7. 외생 변수 처리 믹스인 초기화
-        # (반드시 z_dim 확정 후 호출 필요)
-        self._init_exo(cfg, z_dim=z_dim)
-        # ---- 안정화(권장): z/f LayerNorm ----
-        self.use_z_ln = bool(getattr(cfg, "use_z_ln", True))
-        self.use_f_ln = bool(getattr(cfg, "use_f_ln", True))
-        self.z_ln = nn.LayerNorm(self.z_dim) if self.use_z_ln else nn.Identity()
-        self.f_ln = nn.LayerNorm(self.f_out) if self.use_f_ln else nn.Identity()
-
-        self.exo_scale = float(getattr(cfg, "exo_scale", 1.0))
-
-    def forward(
-            self,
-            x: torch.Tensor,
-            future_exo: Optional[torch.Tensor] = None,
-            *,
-            past_exo_cont: Optional[torch.Tensor] = None,
-            past_exo_cat: Optional[torch.Tensor] = None,
-            part_ids: Optional[torch.Tensor] = None,
-            exo_is_normalized: Optional[bool] = None,
-            **kwargs,
-    ):
-        # NOTE:
-        # - future exo shift는 항상 "denorm 이후(out-space)"에 더합니다.
-        # - exo_is_normalized는 호환용으로만 받고, 실제 로직에서는 쓰지 않는 것을 권장합니다.
-
-        # 1) norm + backbone
-        x_in = self.revin(x, "norm") if self.use_revin else x
-        z = self.backbone(x_in)
-        if z.dim() != 2 or z.size(-1) != self.z_dim:
-            raise RuntimeError(f"Unexpected backbone output shape: {tuple(z.shape)} expected (*, {self.z_dim})")
-
-        # 2) past exo gate (+ part embedding)
-        z = self._inject_past_exo_z_gate(z, past_exo_cont, past_exo_cat)
-
-        if self.part_emb is not None and part_ids is not None:
-            pe = self.part_emb(part_ids.long())
-            z = self.z_fuser(torch.cat([z, pe], dim=-1))
-
-        # 안정화
-        z = self.z_ln(z)
-
-        # 3) expander + point head
-        f = self.expander(z)  # (B,H,F)
-        f = self.f_ln(f)
-
-        y_pre = self.head(f)  # (B,H) 또는 (B,H,1) 등 구현에 맞게
-        if y_pre.dim() == 3 and y_pre.size(-1) == 1:
-            y_pre = y_pre.squeeze(-1)  # -> (B,H)
-
-        # 레벨 앵커링 (normalized-space)
-        # - univariate 기준: target channel=0
-        base_last = x_in[:, -1, 0]  # (B,)
-        y = y_pre + base_last[:, None]  # (B,H)
-
-        # 4) clip policy
-        # - 학습 중 tanh/clip은 포화로 grad를 죽일 수 있으므로 비권장
-        if not self.training:
-            c = getattr(self, "y_clip_eval", None)
-            if (c is not None) and (c > 0):
-                y = c * torch.tanh(y / c)
-
-        # 5) denorm (한 번만)
-        if self.use_revin:
-            y_raw = self.revin(y.unsqueeze(-1), "denorm").squeeze(-1)  # (B,H)
-        else:
-            y_raw = y
-
-        # 6) future exo shift (out-space add)  trainable 함수 사용
-        if (future_exo is not None) and (self.exo_head is not None) and (self.exo_dim > 0):
-            fe = _pad_or_slice_last_dim(future_exo.float(), self.exo_dim, pad_value=0.0)
-            ex = apply_exo_shift_linear_trainable(
-                self.exo_head,
-                fe,
-                horizon=self.horizon,
-                out_dtype=y_raw.dtype,
-                out_device=y_raw.device,
-            )  # (B,H)
-            y_raw = y_raw + (self.exo_scale * ex)  # (B,H)
-
-        # 반환 키는 러너/평가 유틸과 맞추세요.
-        return y_raw
-
-
 # =====================================================================
 # Quantile model
 # =====================================================================
@@ -556,7 +384,7 @@ class PatchMixerQuantileModel(_ExoMixin):
 
         # RevIN
         self.use_revin = bool(getattr(cfg, "use_revin", True))
-        self.revin = RevIN(int(getattr(cfg, "enc_in", 1)), affine = False)
+        self.revin_layer = RevIN(num_features=int(getattr(cfg, "enc_in", 1)), affine = False, subtract_last = True, use_std = True)
 
         # (optional) part embedding
         self.use_part_embedding = bool(getattr(cfg, "use_part_embedding", False))
@@ -646,7 +474,7 @@ class PatchMixerQuantileModel(_ExoMixin):
         # 따라서 exo_is_normalized는 사실상 사용하지 않습니다(호환용으로만 받음).
 
         # 1) norm + backbone
-        x_in = self.revin(x, "norm") if self.use_revin else x
+        x_in = self.revin_layer(x, "norm") if self.use_revin else x
         z = self.backbone(x_in)
         z = self._inject_past_exo_z_gate(z, past_exo_cont, past_exo_cat)
         if self.part_emb is not None and part_ids is not None:
@@ -679,7 +507,7 @@ class PatchMixerQuantileModel(_ExoMixin):
             qs = []
             for i in range(q.size(1)):
                 qi = q[:, i, :]  # (B,H)
-                qi = self.revin(qi.unsqueeze(-1), "denorm").squeeze(-1)
+                qi = self.revin_layer(qi.unsqueeze(-1), "denorm").squeeze(-1)
                 qs.append(qi.unsqueeze(1))
             q_raw = torch.cat(qs, dim=1)  # (B,Q,H)
         else:
@@ -699,77 +527,80 @@ class PatchMixerQuantileModel(_ExoMixin):
             q_raw = q_raw + (self.exo_scale * ex).unsqueeze(1)  # (B,Q,H)
 
         return {"q": q_raw}
-# ---------------------------------------------------------------------
-# Backward-compatible aliases (if your builders import BaseModel/QuantileModel)
-# ---------------------------------------------------------------------
 
-BaseModel = PatchMixerPointModel
-QuantileModel = PatchMixerQuantileModel
+class PatchMixerModel(_ExoMixin):
+    """
+    Unified PatchMixer model for both point and distribution forecasting.
 
+    Output:
+      - out_mult == 1 : (B, H) point forecast
+      - out_mult  > 1 : (B, H, out_mult) packed distribution params
 
+    Convention (default):
+      - Normal:   out_mult=2  -> [loc, scale_raw]
+      - StudentT: out_mult=3  -> [df_raw, loc, scale_raw]
+    If `param_names` is given, 'loc' index is detected from it.
+    """
 
-# ============================================================
-# Distribution Model (Normal/StudentT/etc.)
-# ============================================================
-class PatchMixerDistributionModel(_ExoMixin):
-
-    def __init__(self, cfg: PatchMixerConfig):
+    def __init__(
+        self,
+        cfg: PatchMixerConfig,
+    ):
         super().__init__()
-        self.config = cfg
+        self.configs = cfg
         self.horizon = int(cfg.horizon)
         self.f_out = int(getattr(cfg, "f_out", 128))
         self.final_nonneg = bool(getattr(cfg, "final_nonneg", True))
+        self.out_mul = int(getattr(cfg, "out_mul", 1))
+        print(f'[PatchMixerModel] out_mul:: {self.out_mul}')
+        if self.out_mul > 1:
+            self.param_names = list(getattr(cfg, "param_names", None))
+            print(f'[PatchMixerModel] param_names:: {self.param_names}')
+            # ---- dist param safety clip (NaN 방지; 특히 AMP에서 expm1 터지는 케이스 방지) ----
+            # LossComputer에서 softplus/transform을 적용할 때 raw가 너무 크면 overflow로 NaN이 납니다.
+            self.dist_param_clip = float(getattr(cfg, "dist_param_clip", 15.0))  # 권장: 10~20
 
-        # DistributionLoss instance (expected) – used only for param ordering / multiplier.
-        self.loss = getattr(cfg, "loss", None)
-        self.param_names = list(getattr(self.loss, "param_names", [])) if self.loss is not None else []
-        self.out_mult = int(getattr(self.loss, "outputsize_multiplier", 0)) if self.loss is not None else 0
-        if self.out_mult <= 0:
-            # fallback: infer from param_names, else default to Normal(loc, scale)
-            self.param_names = self.param_names or ["-loc", "-scale"]
-            self.out_mult = len(self.param_names)
+            self.loc_idx = 0
+            self.scale_idx = None
+            self.df_idx = None
+            for i, n in enumerate(self.param_names):
+                nnm = str(n).lstrip("-")
+                if nnm == "loc":
+                    self.loc_idx = i
+                elif nnm == "scale":
+                    self.scale_idx = i
+                elif nnm == "df":
+                    self.df_idx = i
 
-        # indices in packed output
-        self.loc_idx = 0
-        self.scale_idx = None
-        self.df_idx = None
-        for i, n in enumerate(self.param_names):
-            nnm = str(n).lstrip("-")
-            if nnm == "loc":
-                self.loc_idx = i
-            elif nnm == "scale":
-                self.scale_idx = i
-            elif nnm == "df":
-                self.df_idx = i
+            # DistributionLoss transform settings (must match LossComputer)
+            self.dist_scale_transform = str(getattr(cfg, "dist_scale_transform", "softplus"))
+            self.dist_eps = float(getattr(cfg, "dist_eps", 1e-8))
+            self.dist_min_scale = float(getattr(cfg, "dist_min_scale", 0.0))
+        # self.out_mult = int(out_mult)
+        # self.param_names = list(param_names) if param_names is not None else None
 
-        # DistributionLoss transform settings (must match LossComputer)
-        self.dist_scale_transform = str(getattr(cfg, "dist_scale_transform", "softplus"))
-        self.dist_eps = float(getattr(cfg, "dist_eps", 1e-8))
-        self.dist_min_scale = float(getattr(cfg, "dist_min_scale", 0.0))
-
-        self.backbone = (
-            MultiScalePatchMixerBackbone(configs=cfg)
-            if getattr(cfg, "use_multiscale", False)
-            else PatchMixerBackbone(configs=cfg)
-        )
+        # 1) backbone
+        self.backbone = PatchMixerBackbone(configs=cfg)
         z_dim = int(getattr(self.backbone, "out_dim", getattr(self.backbone, "patch_repr_dim", 0)))
         if z_dim <= 0:
             raise RuntimeError("Backbone must expose out_dim or patch_repr_dim")
         self.z_dim = z_dim
 
-        self.z_ln = nn.LayerNorm(z_dim)
-
+        # 2) RevIN
         self.use_revin = bool(getattr(cfg, "use_revin", True))
-        self.revin = RevIN(int(getattr(cfg, "enc_in", 1)), affine=False)
+        self.revin_layer = RevIN(num_features=int(getattr(cfg, "enc_in", 1)), affine = False, subtract_last = True, use_std = True)
 
+        # 3) part embedding (optional)
         self.use_part_embedding = bool(getattr(cfg, "use_part_embedding", False))
-        self.part_emb = None
-        self.z_fuser = None
-        if self.use_part_embedding and int(getattr(cfg, "part_vocab_size", 0)) > 0:
-            p_dim = int(getattr(cfg, "part_embed_dim", 16))
-            self.part_emb = nn.Embedding(int(cfg.part_vocab_size), p_dim)
-            self.z_fuser = nn.Linear(z_dim + p_dim, z_dim)
+        self.part_emb: Optional[nn.Embedding] = None
+        self.z_fuser: Optional[nn.Linear] = None
 
+        if self.use_part_embedding and int(getattr(cfg, "part_vocab_size", 0)) > 0:
+            pdim = int(getattr(cfg, "part_embed_dim", 16))
+            self.part_emb = nn.Embedding(int(cfg.part_vocab_size), pdim)
+            self.z_fuser = nn.Linear(z_dim + pdim, z_dim)
+
+        # 4) Temporal Expander
         self.expander = TemporalExpander(
             d_in=z_dim,
             horizon=self.horizon,
@@ -781,15 +612,16 @@ class PatchMixerDistributionModel(_ExoMixin):
             use_conv=True,
         )
 
+        # 5) head (unified)
         head_hidden = int(getattr(cfg, "head_hidden", self.f_out))
-        self.f_ln = nn.LayerNorm(self.f_out)
+        self.pre_ln = nn.LayerNorm(self.f_out)
         self.head = nn.Sequential(
             nn.Linear(self.f_out, head_hidden),
             nn.GELU(),
-            nn.Linear(head_hidden, self.out_mult),
+            nn.Linear(head_hidden, self.out_mul),
         )
 
-        # loc stabilization (optional)
+        # 6) point-mode stabilizers (kept for compatibility; only used when out_mult==1)
         self.learn_output_scale = bool(getattr(cfg, "learn_output_scale", True))
         if self.learn_output_scale:
             self.out_scale = nn.Parameter(torch.tensor(1.0))
@@ -805,8 +637,46 @@ class PatchMixerDistributionModel(_ExoMixin):
         else:
             self.register_buffer("dw_gain", torch.tensor(1.0))
 
-        # Exogenous head / gate
+        # 7) exogenous mixin init
         self._init_exo(cfg, z_dim=z_dim)
+
+        # ---- 안정화(권장): z/f LayerNorm ----
+        self.use_z_ln = bool(getattr(cfg, "use_z_ln", True))
+        self.use_f_ln = bool(getattr(cfg, "use_f_ln", True))
+        self.z_ln = nn.LayerNorm(self.z_dim) if self.use_z_ln else nn.Identity()
+        self.f_ln = nn.LayerNorm(self.f_out) if self.use_f_ln else nn.Identity()
+
+        self.exo_scale = float(getattr(cfg, "exo_scale", 1.0))
+
+
+
+    def _loc_index(self) -> int:
+        if self.param_names is not None and "loc" in self.param_names:
+            return int(self.param_names.index("loc"))
+        # default convention
+        if self.out_mul == 3:
+            return 1  # [df_raw, loc, scale_raw]
+        return 0      # [loc, scale_raw] or others
+
+    def _clip_nonloc_params_(self, out: torch.Tensor) -> torch.Tensor:
+        """
+        out: (B,H,out_mult)
+        loc 제외 나머지 raw 파라미터를 clip 하여 overflow/NaN 위험을 줄입니다.
+        """
+        if self.out_mul <= 1:
+            return out
+        loc_i = self._loc_index()
+        if self.dist_param_clip is None or self.dist_param_clip <= 0:
+            return out
+
+        # clone to avoid in-place on autograd graph unexpectedly
+        o = out
+        # non-loc indices
+        for j in range(self.out_mul):
+            if j == loc_i:
+                continue
+            o[..., j] = o[..., j].clamp(min=-self.dist_param_clip, max=self.dist_param_clip)
+        return o
 
     # -----------------------------
     # stable inverse transforms
@@ -847,7 +717,6 @@ class PatchMixerDistributionModel(_ExoMixin):
         if t == "square":
             return torch.sqrt(x)
         return self._inv_softplus_stable(x)
-
     def forward(
         self,
         x: torch.Tensor,
@@ -856,33 +725,67 @@ class PatchMixerDistributionModel(_ExoMixin):
         past_exo_cont: Optional[torch.Tensor] = None,
         past_exo_cat: Optional[torch.Tensor] = None,
         part_ids: Optional[torch.Tensor] = None,
-        exo_is_normalized: Optional[bool] = None,
+        exo_is_normalized: Optional[bool] = None,  # 호환용
         **kwargs,
-    ) -> torch.Tensor:
-        if exo_is_normalized is None:
-            exo_is_normalized = self.exo_is_normalized_default
-
-        # 1) RevIN normalize input (stores mean/std for later denorm)
-        x_in = self.revin(x, "norm") if self.use_revin else x
-
-        # 2) backbone + past exo injection
+    ):
+        # 1) norm + backbone
+        x_in = self.revin_layer(x, "norm") if (self.use_revin and self.revin_layer is not None) else x
         z = self.backbone(x_in)
+        if z.dim() != 2 or z.size(-1) != self.z_dim:
+            raise RuntimeError(f"Unexpected backbone output shape: {tuple(z.shape)} expected (*, {self.z_dim})")
+
+        # 2) past exo gate (+ part embedding)
         z = self._inject_past_exo_z_gate(z, past_exo_cont, past_exo_cat)
 
-        # 3) optional part embedding
         if self.part_emb is not None and part_ids is not None:
             pe = self.part_emb(part_ids.long())
             z = self.z_fuser(torch.cat([z, pe], dim=-1))
 
         z = self.z_ln(z)
 
-        # 4) temporal expansion + head
-        f = self.f_ln(self.expander(z))  # (B,H,F)
-        out = self.head(f)               # (B,H,out_mult)
+        # 3) expander + head
+        f = self.expander(z)               # (B,H,F)
+        f = self.f_ln(f)
+        f = self.pre_ln(f)
+        out = self.head(f)                 # (B,H,out_mult)
+        # ---- Point mode ----
+        if self.out_mul == 1:
+            y_pre = out.squeeze(-1)  # (B,H)
 
-        # -----------------------------
-        # loc path (norm-space -> out-space)
-        # -----------------------------
+            # 레벨 앵커링 (normalized-space)
+            base_last = x_in[:, -1, 0]          # (B,)
+            y = y_pre + base_last[:, None]      # (B,H)
+
+            # eval clip (optional)
+            if not self.training:
+                c = getattr(self, "y_clip_eval", None)
+                if (c is not None) and (c > 0):
+                    y = c * torch.tanh(y / c)
+
+            # denorm
+            if self.use_revin:
+                y_raw = self.revin_layer(y.unsqueeze(-1), "denorm").squeeze(-1)  # (B,H)
+            else:
+                y_raw = y
+
+            # future exo shift (out-space add)
+            if (future_exo is not None) and (self.exo_head is not None) and (self.exo_dim > 0):
+                fe = _pad_or_slice_last_dim(future_exo.float(), self.exo_dim, pad_value=0.0)
+                ex = apply_exo_shift_linear_trainable(
+                    self.exo_head,
+                    fe,
+                    horizon=self.horizon,
+                    out_dtype=y_raw.dtype,
+                    out_device=y_raw.device,
+                )  # (B,H)
+                y_raw = y_raw + (self.exo_scale * ex)
+
+            # nonneg policy (optional)
+            if self.final_nonneg:
+                y_raw = F.softplus(y_raw)
+
+            return y_raw  # (B,H)
+
         loc = out[..., self.loc_idx:self.loc_idx + 1].clone()  # (B,H,1)
 
         base_last = x_in[:, -1:, 0:1]     # (B,1,1)
@@ -892,7 +795,7 @@ class PatchMixerDistributionModel(_ExoMixin):
         loc = loc + self.dw_gain * self.dw_head(loc.transpose(1, 2)).transpose(1, 2)
 
         if self.use_revin:
-            loc = self.revin(loc, "denorm")  # (B,H,1)
+            loc = self.revin_layer(loc, "denorm")  # (B,H,1)
 
         if (future_exo is not None) and (self.exo_head is not None) and (self.exo_dim > 0):
             fe = _pad_or_slice_last_dim(future_exo.float(), self.exo_dim, pad_value=0.0)
@@ -914,7 +817,7 @@ class PatchMixerDistributionModel(_ExoMixin):
             scale_pos_norm = self._scale_pos_from_raw(scale_raw_norm)             # (B,H,1)
 
             # RevIN has denorm_scale() in your codebase (important!)
-            scale_pos_out = self.revin.denorm_scale(scale_pos_norm)
+            scale_pos_out = self.revin_layer.denorm_scale(scale_pos_norm)
 
             if self.dist_min_scale and self.dist_min_scale > 0:
                 scale_pos_out = torch.clamp_min(scale_pos_out, self.dist_min_scale)
@@ -926,7 +829,7 @@ class PatchMixerDistributionModel(_ExoMixin):
         # re-pack output (replace loc/scale only)
         # -----------------------------
         parts = []
-        for i in range(self.out_mult):
+        for i in range(self.out_mul):
             if i == self.loc_idx:
                 parts.append(loc)
             elif (scale_raw_out is not None) and (i == self.scale_idx):
@@ -937,5 +840,11 @@ class PatchMixerDistributionModel(_ExoMixin):
         out2 = torch.cat(parts, dim=-1)
         return out2
 
-# alias for builders
-DistModel = PatchMixerDistributionModel
+class PatchMixerPointModel(PatchMixerModel):
+    def __init__(self, cfg: PatchMixerConfig):
+        super().__init__(cfg)
+
+
+class PatchMixerDistributionModel(PatchMixerModel):
+    def __init__(self, cfg: PatchMixerConfig):
+        super().__init__(cfg)

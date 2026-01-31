@@ -205,10 +205,8 @@ def _canonical_model_key(name: str) -> str:
 
     if "patchmixer" in sl and "quant" in sl:
         return "patchmixer_quantile"
-    if "patchmixer" in sl and "dist" in sl:
-        return "patchmixer_dist"
-    if "patchmixer" in sl and ("base" in sl or "point" in sl):
-        return "patchmixer_base"
+    if "patchmixer" in sl:
+        return 'patchmixer'
 
     if "titan" in sl and "lmm" in sl:
         return "titan_lmm"
@@ -383,6 +381,7 @@ def load_model_dict(
             )
 
         # 3) 모델 build
+        print(f'[checkpoint] cfg_obj={cfg_obj}')
         model = build_fn(cfg_obj)
         if not isinstance(model, torch.nn.Module):
             raise TypeError(

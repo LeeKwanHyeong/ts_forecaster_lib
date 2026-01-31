@@ -3381,7 +3381,34 @@ class HuberLoss(BasePointLoss):
         Returns:
             float: Huber loss.
         """
-        losses = F.huber_loss(y, y_hat, reduction="none", delta=self.delta)
+        # losses = F.huber_loss(y, y_hat, reduction="none", delta=0.01 * torch.median(y))
+        # weights = self._compute_weights(y=y, mask=mask)
+        # return _weighted_mean(losses=losses, weights=weights)
+        # 1) mask 적용: 학습에 포함할 값만 뽑기
+        if mask is not None:
+            # mask shape이 (B,H) or (B,H,1) 가정
+            m = mask
+            if m.dim() == 3 and m.size(-1) == 1:
+                m = m[..., 0]
+            y_sel = y
+            if y_sel.dim() == 3 and y_sel.size(-1) == 1:
+                y_sel = y_sel[..., 0]
+            y_sel = y_sel[m.bool()]
+            if y_sel.numel() == 0:
+                y_sel = y.reshape(-1)
+        else:
+            y_sel = y.reshape(-1)
+
+        # 2) abs + median
+        med = torch.median(y_sel.abs())
+
+        # 3) delta 안정화(클램프)
+        # - 너무 작은 delta는 거의 MAE가 되어 학습 둔해질 수 있음
+        # - 너무 큰 delta는 거의 MSE가 되어 상향 바이어스가 다시 생길 수 있음
+        delta = 0.01 * med
+        delta = torch.clamp(delta, min=1.0, max=1e6)  # 스케일에 맞게 max는 조정 가능
+
+        losses = F.huber_loss(y, y_hat, reduction="none", delta=float(delta))
         weights = self._compute_weights(y=y, mask=mask)
         return _weighted_mean(losses=losses, weights=weights)
 

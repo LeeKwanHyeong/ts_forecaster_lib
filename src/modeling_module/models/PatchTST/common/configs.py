@@ -17,13 +17,13 @@ class AttentionConfig(TrainingConfig):
     - 멀티 헤드 구조 및 차원 설정.
     - 드롭아웃 및 인과적 마스킹(Causal Masking) 제어.
     """
-    type: Literal['full', 'probsparse'] = 'full'  # 어텐션 연산 방식 ('full': 표준, 'probsparse': 효율적 희소 어텐션)
+    attn_core: Literal['full', 'prob_sparse', 'full_logits'] = 'full'  # 어텐션 연산 방식 ('full': 표준, 'probsparse': 효율적 희소 어텐션)
     n_heads: int = 16  # 멀티 헤드(Multi-head) 개수 (d_model의 약수 권장)
-    d_model: int = 128  # 모델 내부 은닉 차원 (Token Embedding Dimension)
+    d_model: int = 256  # 모델 내부 은닉 차원 (Token Embedding Dimension)
     d_k: Optional[int] = None  # 헤드별 Query/Key 차원 (None: d_model // n_heads 자동 설정)
     d_v: Optional[int] = None  # 헤드별 Value 차원 (None: d_model // n_heads 자동 설정)
-    attn_dropout: float = 0.0  # 어텐션 스코어(Score)에 적용할 드롭아웃 비율
-    proj_dropout: float = 0.0  # 어텐션 출력 투영(Projection) 시 적용할 드롭아웃 비율
+    attn_dropout: float = 0.1  # 어텐션 스코어(Score)에 적용할 드롭아웃 비율
+    proj_dropout: float = 0.1  # 어텐션 출력 투영(Projection) 시 적용할 드롭아웃 비율
     causal: bool = True  # 인과적 마스킹 사용 여부 (미래 시점 정보 차단)
     residual_logits: bool = True  # Logit 단계의 잔차 연결(RealFormer 스타일) 사용 여부
     output_attention: bool = False  # 어텐션 가중치 맵 반환 여부 (시각화/디버깅용)
@@ -44,9 +44,9 @@ class HeadConfig:
     - 'flatten'    : 평탄화 후 선형 변환 (일반적인 회귀/분류).
     - 'pretrain'   : 자기지도 학습(Self-supervised Learning)용 재구성 헤드.
     """
-    type: Literal['prediction', 'flatten', 'pretrain'] = 'flatten'
+    type: Literal['prediction', 'flatten', 'pretrain'] = 'prediction'
     individual: bool = False  # 변수별 독립적 헤드(Individual Head) 사용 여부
-    head_dropout: float = 0.0  # 헤드 레이어 드롭아웃 비율
+    head_dropout: float = 0.1  # 헤드 레이어 드롭아웃 비율
     y_range: Optional[Tuple[float, float]] = None  # 출력값 범위 제한 (Sigmoid Scaling) 설정
 
 
@@ -94,8 +94,6 @@ class PatchTSTConfig(TrainingConfig):
     pe: str = 'zeros'  # 위치 임베딩(Positional Embedding) 유형 ('zeros', 'learned' 등)
     learn_pe: bool = True  # 위치 임베딩 파라미터 학습 여부
     use_revin: bool = True  # RevIN(분포 정규화) 모듈 사용 여부
-    affine: bool = True  # RevIN 내 Affine 파라미터(Scale/Shift) 학습 여부
-    subtract_last: bool = False  # RevIN 적용 시 마지막 시점 값 기준 보정 여부
     verbose: bool = False  # 상세 디버깅 로그 출력 여부
 
     # ---------- 헤드 기본 설정 ----------

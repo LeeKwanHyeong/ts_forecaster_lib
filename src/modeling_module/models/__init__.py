@@ -16,34 +16,31 @@ __all__ = [
     "list_available_models",
 
     # explicit builders (stable public surface)
-    "build_patch_mixer_base",
-    "build_patch_mixer_quantile",
+    "build_patch_mixer",
     "build_titan_base",
     "build_titan_lmm",
     "build_titan_seq2seq",
-    "build_patchTST_base",
+    "build_patchTST",
     "build_patchTST_quantile",
 ]
 
 if TYPE_CHECKING:
     from .model_builder import (
-        build_patch_mixer_base,
-        build_patch_mixer_quantile,
         build_titan_base,
         build_titan_lmm,
         build_titan_seq2seq,
-        build_patchTST_base,
-        build_patchTST_quantile,
-    )
+        build_patchTST,
+        build_patchTST_quantile, build_patch_mixer,
+)
 
 # Lazy import map: import modeling_module.models 시점에 heavy import 방지
 _LAZY = {
-    "build_patch_mixer_base": (".model_builder", "build_patch_mixer_base"),
+    "build_patch_mixer": (".model_builder", "build_patch_mixer"),
     "build_patch_mixer_quantile": (".model_builder", "build_patch_mixer_quantile"),
     "build_titan_base": (".model_builder", "build_titan_base"),
     "build_titan_lmm": (".model_builder", "build_titan_lmm"),
     "build_titan_seq2seq": (".model_builder", "build_titan_seq2seq"),
-    "build_patchTST_base": (".model_builder", "build_patchTST_base"),
+    "build_patchTST": (".model_builder", "build_patchTST"),
     "build_patchTST_quantile": (".model_builder", "build_patchTST_quantile"),
 }
 
@@ -73,7 +70,7 @@ def _resolve_builders() -> Dict[str, Callable[..., Any]]:
         "Titan_Base": build_titan_base,                     # noqa: F821
         "Titan_LMM": build_titan_lmm,                       # noqa: F821
         "Titan_Seq2Seq": build_titan_seq2seq,               # noqa: F821
-        "PatchTST_Base": build_patchTST_base,               # noqa: F821
+        "PatchTST_Base": build_patchTST,               # noqa: F821
         "PatchTST_Quantile": build_patchTST_quantile,       # noqa: F821
     }
 

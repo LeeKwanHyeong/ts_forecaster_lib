@@ -14,11 +14,10 @@ from modeling_module.models.model_builder import (
     build_titan_base,
     build_titan_lmm,
     build_titan_seq2seq,
-    build_patch_mixer_base,
     build_patch_mixer_quantile,
-    build_patchTST_base,
+    build_patchTST,
     build_patchTST_quantile,
-    build_patchTST_dist, build_patch_mixer_dist
+    build_patch_mixer,
 )
 from modeling_module.training.config import SpikeLossConfig, TrainingConfig, StageConfig
 from modeling_module.training.model_losses.loss_module import (
@@ -125,17 +124,56 @@ def _filter_state_dict_for_model(
 
     return filtered
 
+
+def _infer_dist_spec(loss_obj):
+    """
+    DistributionLoss(distribution=..., ...)에서 out_mul, param_names를 최대한 robust하게 추론.
+    - Nixtla DistributionLoss: outputsize_multiplier 속성이 존재하는 케이스가 많음
+    - distribution 문자열로 fallback
+    """
+    # 1) multiplier 우선
+    out_mul = int(getattr(loss_obj, "outputsize_multiplier", 0) or 0)
+
+    distr = getattr(loss_obj, "distribution", None)
+    if isinstance(distr, str):
+        distr_name = distr
+    else:
+        distr_name = None
+
+    # 2) param_names가 있으면 그대로 사용
+    pn = getattr(loss_obj, "param_names", None)
+    if pn is not None:
+        try:
+            param_names = list(pn)  # tuple/list 모두 처리
+        except Exception:
+            param_names = None
+    else:
+        param_names = None
+
+    # 3) fallback: distribution 기반
+    if out_mul <= 0:
+        if (distr_name or "").lower() in ("studentt", "student_t", "student-t"):
+            out_mul = 3
+        else:
+            out_mul = 2
+
+    if param_names is None:
+        if (distr_name or "").lower() in ("studentt", "student_t", "student-t"):
+            # 기본 관례: [df_raw, loc, scale_raw]
+            param_names = ["df", "loc", "scale"]
+        else:
+            # 기본 관례: [loc, scale_raw]
+            param_names = ["loc", "scale"]
+
+    return out_mul, param_names, distr_name
+
 def load_pretrained_encoder_only(
     model: torch.nn.Module,
     ckpt_path: str,
     *,
     include_prefixes: Tuple[str, ...] = ("backbone.", "revin_layer."),
     exclude_prefixes: Tuple[str, ...] = ("head.",),
-    mapping_rules: Iterable[Tuple[str, str]] = (
-        # (B)까지 커버: 혹시 ckpt가 encoder.*로 저장된 경우
-        ("encoder.", "backbone."),
-        # 필요시 추가: ("backbone.", "backbone.") 같은 것은 의미 없어서 생략
-    ),
+    mapping_rules: Iterable[Tuple[str, str]] = (("encoder.", "backbone."),),
     strict: bool = False,
 ) -> Dict[str, int]:
     """
@@ -259,7 +297,6 @@ def coerce_quantile_loss(loss_quantile: Optional[nn.Module], *, quantiles=(0.1, 
 # =============================================================================
 # Misc utils
 # =============================================================================
-
 def _validate_ssl_mode(use_ssl_mode: str) -> str:
     """SSL 모드 문자열 유효성 검증."""
     m = str(use_ssl_mode).strip().lower()
@@ -274,45 +311,6 @@ def _get_part_vocab_size_from_loader(loader) -> int:
         return len(getattr(loader.dataset, "part_vocab", {}))
     except Exception:
         return 0
-
-
-def _infer_future_exo_spec_from_loader(loader) -> tuple[bool, int]:
-    """
-    데이터 로더로부터 미래 외생 변수(fe_cont) 제공 여부 및 차원 추론.
-
-    반환:
-        (has_fe, fe_dim)
-    """
-    try:
-        b = next(iter(loader))
-        if not isinstance(b, (list, tuple)) or len(b) < 4:
-            return (False, 0)
-        fe = b[3]
-        if fe is None:
-            return (False, 0)
-        if hasattr(fe, "ndim") and fe.ndim == 3:
-            return (True, int(fe.shape[-1]))
-        if hasattr(fe, "ndim") and fe.ndim == 2:
-            # (H, E) 형태로 제공되는 경우도 방어
-            return (True, int(fe.shape[-1]))
-        return (True, 0)
-    except Exception:
-        return (False, 0)
-
-
-def _wrap_future_exo_cb(future_exo_cb):
-    """미래 외생 변수 콜백 함수 래핑 (device keyword 흡수)."""
-    if future_exo_cb is None:
-        return None
-
-    def _wrapped(t0, H, *args, **kwargs):
-        device = kwargs.pop("device", None)
-        out = future_exo_cb(t0, H)
-        if device is not None and isinstance(out, torch.Tensor):
-            out = out.to(device)
-        return out
-
-    return _wrapped
 
 
 def save_model(model: torch.nn.Module, cfg, path: str) -> None:
@@ -479,7 +477,6 @@ def _norm_list(xs: Optional[Iterable[str]]) -> List[str]:
 # =============================================================================
 # Model runners
 # =============================================================================
-
 def _run_patchtst(
     *,
     results: Dict[str, Dict],
@@ -518,11 +515,27 @@ def _run_patchtst(
         lookback=lookback,
         horizon=horizon,
         c_in=1,
-        d_model=256,
-        n_layers=3,
+
         patch_len=patch_len,
         stride=stride,
+        padding_patch='end',
+
         d_future=exo_dim,
+
+        d_model=256,
+        n_layers=4,
+        d_ff=1024,
+
+        norm="LayerNorm",
+        pre_norm=True,
+        dropout=0.1,
+        act="gelu",
+
+        use_revin=True,
+
+        pe="sincos",
+        learn_pe=True,
+
     )
 
     # ------------------------------------------------------------
@@ -578,16 +591,22 @@ def _run_patchtst(
     # 4) 지도학습 - Base (Point or Dist)
     # ============================================================
     loss_point_obj = loss_point if loss_point is not None else point_train_cfg.loss
-    mode = infer_supervised_mode(loss_point_obj)
-
-    pt_base_cfg = PatchTSTConfig(**pt_kwargs, loss=loss_point_obj, loss_mode=("dist" if mode == "dist" else "point"))
-    print(f'[run_patchtst] mode:: {mode}')
+    mode = infer_supervised_mode(loss_point_obj)  # "point" | "dist"
     if mode == "dist":
-        pt_base = build_patchTST_dist(pt_base_cfg)
-        name_base = "PatchTST Dist"
+        out_mul, param_names, distr_name = _infer_dist_spec(loss_point_obj)
     else:
-        pt_base = build_patchTST_base(pt_base_cfg)
-        name_base = "PatchTST Base"
+        out_mul, param_names, distr_name = 1, None, None
+
+    pt_train_cfg = PatchTSTConfig(**pt_kwargs,
+                                  loss = loss_point_obj,
+                                  loss_mode = mode,
+                                  out_mul = out_mul,
+                                  param_names = param_names,
+                                  dist_name = distr_name
+                                  )
+
+    pt_base = build_patchTST(pt_train_cfg)
+    name_base = 'PatchTST'
 
     print(f"{name_base} ({freq.capitalize()})")
 
@@ -619,7 +638,7 @@ def _run_patchtst(
 
     if save_root:
         ckpt_path = _make_ckpt_path(save_root, freq, name_base.replace(" ", ""), lookback, horizon)
-        save_model(pt_base, pt_base_cfg, ckpt_path)
+        save_model(pt_base, pt_train_cfg, ckpt_path)
         best_pt_base["ckpt_path"] = str(ckpt_path)
         if (use_ssl_mode == "full") and (pretrain_ckpt_path is not None):
             best_pt_base["pretrain_ckpt_path"] = str(pretrain_ckpt_path)
@@ -799,45 +818,54 @@ def _run_patchmixer(
     season_period: int,
     loss_point: Optional[nn.Module] = None,
     loss_quantile: Optional[nn.Module] = None,
+    loss: Optional[nn.Module] = None,
     use_exogenous_mode: bool = True,
     point_train_cfg=None,
     quantile_train_cfg=None,
     stages=None,
     device: str = "cuda",
 ):
-    """PatchMixer 모델(Base, Quantile) 학습 실행."""
-    loss_point_obj = loss_point if loss_point is not None else (point_train_cfg.loss if point_train_cfg else default_loss_point())
+    """
+    PatchMixer 모델(Base/Dist, Quantile) 학습 실행.
+
+    - Point(Base): out_mult=1 -> (B,H)
+    - Dist(Base):  out_mult>1 -> (B,H,out_mult) packed (DistributionLoss가 기대)
+    - Quantile:    기존 quantile head 유지
+    """
+
+    # ------------------------------------------------------------------
+    # 0) loss object 결정
+    # ------------------------------------------------------------------
+    if loss is not None:
+        loss_point_obj = loss
+    else:
+        loss_point_obj = (
+            loss_point
+            if loss_point is not None
+            else (point_train_cfg.loss if point_train_cfg else default_loss_point())
+        )
+
+    # quantile loss 구성
     quantiles = (0.1, 0.5, 0.9)
     loss_q_obj = coerce_quantile_loss(loss_quantile, quantiles=quantiles)
     if quantile_train_cfg is not None:
         quantile_train_cfg = replace(quantile_train_cfg, loss=loss_q_obj)
 
-    pm_kwargs = dict(
-        lookback=lookback,
-        horizon=horizon,
-        device=device,
-        enc_in=1,
-        d_model=64,
-        e_layers=3,
-        patch_len=patch_len,
-        stride=stride,
-        f_out=128,
-        head_hidden=128,
-        exo_dim=exo_dim,
-        use_part_embedding=False,
-        part_vocab_size=_get_part_vocab_size_from_loader(train_loader),
-        part_embed_dim=16,
-        final_nonneg=True,
-        use_eol_prior=False,
-        exo_is_normalized_default=True,
-        expander_season_period=season_period,
-        expander_n_harmonics=min(season_period // 2, 16),
-        quantiles=quantiles,
-        loss=loss_point_obj,
-        use_revin = True
-    )
+    # ------------------------------------------------------------------
+    # 1) supervised mode(dist/point) + dist spec(out_mult/param_names) 추론
+    # ------------------------------------------------------------------
+    mode = infer_supervised_mode(loss_point_obj)  # "point" | "dist"
 
-    # past exo dims inference
+
+    if mode == "dist":
+        out_mul, param_names, distr_name = _infer_dist_spec(loss_point_obj)
+    else:
+        out_mul, param_names, distr_name = 1, None, None
+
+
+    # ------------------------------------------------------------------
+    # 3) past exo dims inference (loader batch에서 추론)
+    # ------------------------------------------------------------------
     d_past_cont = 0
     d_past_cat = 0
     try:
@@ -853,54 +881,85 @@ def _run_patchmixer(
         print(f"[DBG-pm_kwargs] failed to infer past_exo dims: {repr(e)}")
         d_past_cont, d_past_cat = 0, 0
 
-    pm_base_cfg = PatchMixerConfig(**pm_kwargs, head_dropout=0.02)
-    pm_base_cfg.learn_output_scale = False
-    pm_base_cfg.learn_dw_gain = False
-    pm_base_cfg.exo_is_normalized_default = False
-    pm_base_cfg.past_exo_mode = "z_gate"
-    pm_base_cfg.past_exo_cont_dim = d_past_cont
-    pm_base_cfg.past_exo_cat_dim = d_past_cat
-    pm_base_cfg.past_exo_cat_vocab_sizes = (512, 128)
-    pm_base_cfg.past_exo_cat_embed_dims = (16, 16)
-    pm_base_cfg.loss = loss_point_obj
+    # ------------------------------------------------------------------
+    # 2) PatchMixerConfig 공통 kwargs
+    #    - 여기서 out_mult/param_names를 cfg에 심어두면 저장/로드에도 유리
+    # ------------------------------------------------------------------
+    pm_kwargs = dict(
+        lookback=lookback,
+        horizon=horizon,
+        device=device,
+        enc_in=1,
+        d_model=128,
+        e_layers=6,
+        patch_len=patch_len,
+        stride=stride,
+        # f_out=128,
+        f_out = 256,
+        head_hidden=256,
+        exo_dim=exo_dim,
+        use_part_embedding=False,
+        part_vocab_size=_get_part_vocab_size_from_loader(train_loader),
+        part_embed_dim=16,
+        final_nonneg=True,
+        use_eol_prior=False,
+        exo_is_normalized_default=True,
+        expander_season_period=season_period,
+        expander_n_harmonics=min(season_period // 2, 24),
+        quantiles=quantiles,
+        loss=loss_point_obj,
+        use_revin=True,
+        learn_output_scale = True,
+        learn_dw_gain = True,
+        past_exo_mode = 'z_gate',
+        past_exo_cont_dim = d_past_cont,
+        past_exo_cat_dim = d_past_cat,
+        past_exo_cat_vocab_sizes = (512, 128),
+        past_exo_cat_embed_dims = (16, 16),
+        out_mul = int(out_mul),
+        dist_name = distr_name,
+        param_names = param_names,
+        head_dropout = 0.02
+    )
 
-    mode = infer_supervised_mode(loss_point_obj)
-    if mode == "dist":
-        pm_base_model = build_patch_mixer_dist(pm_base_cfg)
-        name_base = "PatchMixer Dist"
-    else:
-        pm_base_model = build_patch_mixer_base(pm_base_cfg)
-        name_base = "PatchMixer Base"
+
+    # ------------------------------------------------------------------
+    # 4) Base/Dist 모델 학습
+    # ------------------------------------------------------------------
+    pm_base_cfg = PatchMixerConfig(**pm_kwargs)
+
+    # Stabilization Options
+    pm_base_cfg.loss = loss_point_obj
+    pm_base_model = build_patch_mixer(pm_base_cfg)
+
     best_pm_base = train_patchmixer(
         pm_base_model,
         train_loader,
         val_loader,
-        device = device,
+        device=device,
         train_cfg=point_train_cfg,
         stages=list(stages),
         future_exo_cb=(future_exo_cb if use_exogenous_mode else None),
         exo_is_normalized=pm_base_cfg.exo_is_normalized_default,
         use_exogenous_mode=use_exogenous_mode,
     )
+
     if save_root:
-        ckpt_path = _make_ckpt_path(save_root, freq, name_base.replace(" ", ""), lookback, horizon)
+        ckpt_path = _make_ckpt_path(save_root, freq, "PatchMixer", lookback, horizon)
         save_model(pm_base_model, pm_base_cfg, ckpt_path)
         best_pm_base["ckpt_path"] = str(ckpt_path)
-    results[name_base] = best_pm_base
 
-    pm_q_cfg = PatchMixerConfig(**pm_kwargs, head_dropout = 0.02)
+    results["PatchMixer"] = best_pm_base
+
+    # ------------------------------------------------------------------
+    # 5) Quantile 모델 학습
+    # ------------------------------------------------------------------
+    pm_q_cfg = PatchMixerConfig(**pm_kwargs)
     pm_q_cfg.loss = loss_q_obj
-    pm_q_cfg.learn_output_scale = False
-    pm_q_cfg.learn_dw_gain = False
-    pm_q_cfg.exo_is_normalized_default = False
-    pm_q_cfg.past_exo_mode = "z_gate"
-    pm_q_cfg.past_exo_cont_dim = d_past_cont
-    pm_q_cfg.past_exo_cat_dim = d_past_cat
-    pm_q_cfg.past_exo_cat_vocab_sizes = (512, 128)
-    pm_q_cfg.past_exo_cat_embed_dims = (16, 16)
 
     pm_q_model = build_patch_mixer_quantile(pm_q_cfg)
     print(f"PatchMixer Quantile ({freq.capitalize()})")
+
     best_pm_q = train_patchmixer(
         pm_q_model,
         train_loader,
@@ -912,10 +971,12 @@ def _run_patchmixer(
         exo_is_normalized=pm_q_cfg.exo_is_normalized_default,
         use_exogenous_mode=use_exogenous_mode,
     )
+
     if save_root:
         ckpt_path = _make_ckpt_path(save_root, freq, "PatchMixerQuantile", lookback, horizon)
         save_model(pm_q_model, pm_q_cfg, ckpt_path)
         best_pm_q["ckpt_path"] = str(ckpt_path)
+
     results["PatchMixer Quantile"] = best_pm_q
 
 
@@ -927,24 +988,83 @@ MODEL_REGISTRY: Dict[str, Callable] = {
 
 
 # =============================================================================
-# Generic runner
+# Orchestration (modular)
 # =============================================================================
 
-def _run_total_train_generic(
+# Frequency/Exogenous policies are split into dedicated modules for readability.
+try:
+    from .freq_policy import FreqSpec, get_freq_spec
+    from .exo_policy import ExoSpec, resolve_future_exogenous
+except Exception:  # pragma: no cover
+    from freq_policy import FreqSpec, get_freq_spec  # type: ignore
+    from exo_policy import ExoSpec, resolve_future_exogenous  # type: ignore
+
+# =============================================================================
+def _validate_models_to_run(models_to_run: Optional[Iterable[str]]) -> List[str]:
+    """Normalize & validate model list."""
+    selected = _norm_list(models_to_run)
+    if not selected:
+        selected = ["patchtst"]
+
+    unknown = [m for m in selected if m not in MODEL_REGISTRY]
+    if unknown:
+        raise ValueError(f"Unknown models_to_run={unknown}. allowed={list(MODEL_REGISTRY.keys())}")
+    return selected
+
+
+def _build_common_kwargs(
+    *,
+    results: Dict[str, Dict],
+    freq_spec: FreqSpec,
+    exo_spec: ExoSpec,
     train_loader,
     val_loader,
-    device: str,
+    save_root: Optional[Path],
     lookback: int,
     horizon: int,
-    freq: str,
-    save_dir: Optional[str],
+    point_train_cfg: TrainingConfig,
+    quantile_train_cfg: TrainingConfig,
+    stages: List[StageConfig],
+    device: str,
+    loss_point: Optional[nn.Module],
+    loss_quantile: Optional[nn.Module],
+) -> Dict[str, Any]:
+    """Kwargs shared across all model runners."""
+    return dict(
+        results=results,
+        freq=freq_spec.freq,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        save_root=save_root,
+        lookback=lookback,
+        horizon=horizon,
+        future_exo_cb=(exo_spec.future_exo_cb if exo_spec.use_exogenous_mode else None),
+        exo_dim=exo_spec.exo_dim,
+        point_train_cfg=point_train_cfg,
+        quantile_train_cfg=quantile_train_cfg,
+        stages=stages,
+        device=device,
+        use_exogenous_mode=exo_spec.use_exogenous_mode,
+        loss_point=loss_point,
+        loss_quantile=loss_quantile,
+    )
+
+
+def run_total_train(
+    train_loader,
+    val_loader,
     *,
-    use_exogenous_mode: Optional[bool] = False,
-    models_to_run: Optional[Iterable[str]] = None,
+    freq: str,
+    lookback: int,
+    horizon: int,
+    device: str = "cuda" if torch.cuda.is_available() else "cpu",
     warmup_epochs: Optional[int] = None,
     spike_epochs: Optional[int] = None,
     base_lr: Optional[float] = None,
-    # 권장안 2: loss 분리
+    save_dir: Optional[str] = None,
+    use_exogenous_mode: bool = False,
+    models_to_run: Optional[Iterable[str]] = None,
+    # loss routing (recommended)
     loss_point: Optional[nn.Module] = None,
     loss_quantile: Optional[nn.Module] = None,
     # backward compat
@@ -956,17 +1076,30 @@ def _run_total_train_generic(
     ssl_loss_type: str = "mse",
     ssl_freeze_encoder_before_ft: bool = False,
     ssl_pretrained_ckpt_path: Optional[str] = None,
+    # weights policy
     use_intermittent: bool = True,
     val_use_weights: bool = True,
-):
-    """전체 학습 프로세스 오케스트레이션 (Generic Runner)."""
+) -> Dict[str, Dict]:
+    """
+    Unified training entrypoint.
+
+    Notes
+    - This function keeps the public behavior of the older *_run_total_train_generic,
+      but isolates policies into:
+        - frequency policy (patch/stride/season_period)
+        - exogenous resolution (loader vs callback)
+        - common TrainingConfig/stage building
+        - per-model kwargs composition
+    """
+    freq_spec = get_freq_spec(freq)
     save_root = Path(save_dir) if save_dir is not None else None
 
-    # backward-compat: loss만 넘어오면 point loss로 취급
+    # backward-compat: loss -> point loss
     if loss_point is None and loss is not None:
         loss_point = loss
 
-    point_train_cfg, quantile_train_cfg, spike_cfg, stages = _build_common_train_configs(
+    # training configs + stages
+    point_train_cfg, quantile_train_cfg, _spike_cfg, stages = _build_common_train_configs(
         device=device,
         lookback=lookback,
         horizon=horizon,
@@ -979,118 +1112,81 @@ def _run_total_train_generic(
         quantiles=(0.1, 0.5, 0.9),
         use_intermittent=use_intermittent,
         val_use_weights=val_use_weights,
-)
+    )
 
-    date_type_map = {"weekly": "W", "monthly": "M", "daily": "D", "hourly": "H"}
-    dt_char = date_type_map.get(freq, "W")
+    # exogenous policy
+    exo_spec = resolve_future_exogenous(
+        train_loader,
+        freq_spec=freq_spec,
+        use_exogenous_mode=bool(use_exogenous_mode),
+    )
+    print(f"[total_train] future exo source={exo_spec.source} exo_dim={exo_spec.exo_dim} (freq={freq_spec.freq})")
 
-    # Exogenous policy
-    has_fe, fe_dim = _infer_future_exo_spec_from_loader(train_loader)
-    print(f"[total_train] use_exogenous_mode: {use_exogenous_mode} has_fe: {has_fe}, fe_dim: {fe_dim}")
+    # model selection
+    selected = _validate_models_to_run(models_to_run)
 
-    if use_exogenous_mode:
-        if has_fe:
-            if fe_dim <= 0:
-                raise RuntimeError(
-                    f"[total_train] use_exogenous_mode=True but loader fe_cont dim is {fe_dim}. "
-                    f"Check feature selection / exogenous datamodule wiring."
-                )
-            future_exo_cb = None
-            exo_dim = int(fe_dim)
-            print(f"[total_train] future exo from loader: fe_dim={exo_dim} (freq={freq})")
-        else:
-            future_exo_cb = compose_exo_calendar_cb(date_type=dt_char)
-            future_exo_cb = _wrap_future_exo_cb(future_exo_cb)
-            exo_dim = 4 if freq in ("daily", "hourly") else 2
-            print(f"[total_train] future exo from callback: exo_dim={exo_dim} (freq={freq}, dt={dt_char})")
-    else:
-        future_exo_cb = None
-        exo_dim = 0
-        if has_fe and fe_dim > 0:
-            print(
-                f"[total_train][WARN] use_exogenous_mode=False but loader provides fe_cont dim={fe_dim}. "
-                f"Ignoring future exo."
-            )
-
-    # freq별 patch_len/stride
-    if freq == "hourly":
-        patch_len, stride = 24, 12
-        season_period = 24
-    elif freq == "daily":
-        patch_len, stride = 14, 7
-        season_period = 7
-    elif freq == "weekly":
-        patch_len, stride = 12, 8
-        season_period = 52
-    else:
-        patch_len, stride = 6, 3
-        season_period = 12
-
-    selected = _norm_list(models_to_run)
-    if not selected:
-        selected = ["patchtst"]
-
-    unknown = [m for m in selected if m not in MODEL_REGISTRY]
-    if unknown:
-        raise ValueError(f"Unknown models_to_run: {unknown}. allowed={list(MODEL_REGISTRY.keys())}")
-
+    # run
     results: Dict[str, Dict] = {}
+    base_kwargs = _build_common_kwargs(
+        results=results,
+        freq_spec=freq_spec,
+        exo_spec=exo_spec,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        save_root=save_root,
+        lookback=lookback,
+        horizon=horizon,
+        point_train_cfg=point_train_cfg,
+        quantile_train_cfg=quantile_train_cfg,
+        stages=stages,
+        device=device,
+        loss_point=loss_point,
+        loss_quantile=loss_quantile,
+    )
 
     for m in selected:
-        print(f"\n[total_train] === RUN: {m} ({freq}) ===")
-        kwargs = dict(
-            results=results,
-            freq=freq,
-            train_loader=train_loader,
-            val_loader=val_loader,
-            save_root=save_root,
-            lookback=lookback,
-            horizon=horizon,
-            future_exo_cb=(future_exo_cb if use_exogenous_mode else None),
-            exo_dim=exo_dim,
-            point_train_cfg=point_train_cfg,
-            quantile_train_cfg=quantile_train_cfg,
-            stages=stages,
-            device=device,
-            use_exogenous_mode=bool(use_exogenous_mode),
-            loss_point=loss_point,
-            loss_quantile=loss_quantile,
-        )
+        print(f"\n[total_train] === RUN: {m} ({freq_spec.freq}) ===")
 
+        kwargs = dict(base_kwargs)
+
+        # per-model extras
         if m == "patchtst":
             kwargs.update(
                 dict(
+                    patch_len=freq_spec.patch_len,
+                    stride=freq_spec.stride,
                     use_ssl_mode=use_ssl_mode,
                     ssl_pretrain_epochs=ssl_pretrain_epochs,
                     ssl_mask_ratio=ssl_mask_ratio,
                     ssl_loss_type=ssl_loss_type,
                     ssl_freeze_encoder_before_ft=ssl_freeze_encoder_before_ft,
                     ssl_pretrained_ckpt_path=ssl_pretrained_ckpt_path,
-                    patch_len=patch_len,
-                    stride=stride,
                 )
             )
-
-        if m == 'patchmixer':
+        elif m == "patchmixer":
             kwargs.update(
                 dict(
-                    season_period = season_period,
-                    patch_len = patch_len,
-                    stride = stride,
+                    patch_len=freq_spec.patch_len,
+                    stride=freq_spec.stride,
+                    season_period=freq_spec.season_period,
                 )
             )
-
-        if m == "titan":
-            # titan runner does not use quantile_train_cfg
+        elif m == "titan":
+            # titan runner does not use quantile configs
             kwargs.pop("quantile_train_cfg", None)
             kwargs.pop("loss_quantile", None)
+
         MODEL_REGISTRY[m](**kwargs)
 
     return results
 
 
+# backward compatible alias (older code may import this symbol)
+_run_total_train_generic = run_total_train
+
+
 # =============================================================================
-# Exported wrappers
+# Exported wrappers (backward compatible)
 # =============================================================================
 
 def run_total_train_weekly(
@@ -1106,10 +1202,8 @@ def run_total_train_weekly(
     save_dir=None,
     use_exogenous_mode: bool = False,
     models_to_run=None,
-    # 권장안 2
     loss_point: Optional[nn.Module] = None,
     loss_quantile: Optional[nn.Module] = None,
-    # backward compat
     loss: Optional[nn.Module] = None,
     use_ssl_mode: SSLMode = "sl_only",
     ssl_pretrain_epochs: int = 10,
@@ -1120,18 +1214,18 @@ def run_total_train_weekly(
     use_intermittent: bool = True,
     val_use_weights: bool = True,
 ):
-    return _run_total_train_generic(
+    return run_total_train(
         train_loader,
         val_loader,
-        device,
-        lookback,
-        horizon,
-        "weekly",
-        save_dir,
-        use_exogenous_mode=use_exogenous_mode,
+        freq="weekly",
+        lookback=lookback,
+        horizon=horizon,
+        device=device,
         warmup_epochs=warmup_epochs,
         spike_epochs=spike_epochs,
         base_lr=base_lr,
+        save_dir=save_dir,
+        use_exogenous_mode=use_exogenous_mode,
         models_to_run=models_to_run,
         loss_point=loss_point,
         loss_quantile=loss_quantile,
@@ -1172,19 +1266,19 @@ def run_total_train_monthly(
     use_intermittent: bool = True,
     val_use_weights: bool = True,
 ):
-    return _run_total_train_generic(
+    return run_total_train(
         train_loader,
         val_loader,
-        device,
-        lookback,
-        horizon,
-        "monthly",
-        save_dir,
+        freq="monthly",
+        lookback=lookback,
+        horizon=horizon,
+        device=device,
         warmup_epochs=warmup_epochs,
         spike_epochs=spike_epochs,
         base_lr=base_lr,
-        models_to_run=models_to_run,
+        save_dir=save_dir,
         use_exogenous_mode=use_exogenous_mode,
+        models_to_run=models_to_run,
         loss_point=loss_point,
         loss_quantile=loss_quantile,
         loss=loss,
@@ -1224,19 +1318,19 @@ def run_total_train_daily(
     use_intermittent: bool = True,
     val_use_weights: bool = True,
 ):
-    return _run_total_train_generic(
+    return run_total_train(
         train_loader,
         val_loader,
-        device,
-        lookback,
-        horizon,
-        "daily",
-        save_dir,
+        freq="daily",
+        lookback=lookback,
+        horizon=horizon,
+        device=device,
         warmup_epochs=warmup_epochs,
         spike_epochs=spike_epochs,
         base_lr=base_lr,
-        models_to_run=models_to_run,
+        save_dir=save_dir,
         use_exogenous_mode=use_exogenous_mode,
+        models_to_run=models_to_run,
         loss_point=loss_point,
         loss_quantile=loss_quantile,
         loss=loss,
@@ -1276,19 +1370,19 @@ def run_total_train_hourly(
     use_intermittent: bool = True,
     val_use_weights: bool = True,
 ):
-    return _run_total_train_generic(
+    return run_total_train(
         train_loader,
         val_loader,
-        device,
-        lookback,
-        horizon,
-        "hourly",
-        save_dir,
+        freq="hourly",
+        lookback=lookback,
+        horizon=horizon,
+        device=device,
         warmup_epochs=warmup_epochs,
         spike_epochs=spike_epochs,
         base_lr=base_lr,
-        models_to_run=models_to_run,
+        save_dir=save_dir,
         use_exogenous_mode=use_exogenous_mode,
+        models_to_run=models_to_run,
         loss_point=loss_point,
         loss_quantile=loss_quantile,
         loss=loss,
