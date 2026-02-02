@@ -38,6 +38,21 @@ class ExoSpec:
     source: str  # "none" | "loader" | "callback"
 
 
+def infer_exo_dim_from_cb(future_exo_cb, horizon: int, device: str = "cpu") -> int:
+    """
+    콜백 함수(future_exo_cb) 실행을 통해 미래 외생 변수(Future Exo)의 차원(E)을 추론함.
+    반환값은 (Horizon, Exo_Dim) 텐서의 마지막 차원 크기임.
+    """
+    if future_exo_cb is None:
+        return 0
+    fe = future_exo_cb(0, horizon, device=device)  # (H,E) expected
+    if isinstance(fe, torch.Tensor):
+        return int(fe.size(-1))
+    try:
+        return int(fe.shape[-1])
+    except Exception:
+        return 0
+
 def infer_future_exo_spec_from_loader(loader) -> tuple[bool, int]:
     """Infer whether loader provides `fe_cont` (future exogenous) and its dimension.
 

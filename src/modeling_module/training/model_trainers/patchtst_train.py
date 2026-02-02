@@ -13,53 +13,12 @@ from torch.utils.data import DataLoader, WeightedRandomSampler
 from modeling_module.training.adapters import DefaultAdapter
 from modeling_module.training.config import TrainingConfig, StageConfig, apply_stage
 from modeling_module.training.engine import CommonTrainer
+from modeling_module.training.model_trainers.exo_policy import infer_future_exo_spec_from_loader, infer_exo_dim_from_cb
+from modeling_module.training.model_trainers.spike_policy import maybe_make_spike_loader
 from modeling_module.utils.exogenous_utils import calendar_sin_cos
 
 # PatchTST 내부 head 재구성에 필요
 from modeling_module.models.PatchTST.common.patching import compute_patch_num
-
-
-def _dump_cfg(cfg):
-    """학습 설정(Config) 내용 출력."""
-    data = asdict(cfg) if is_dataclass(cfg) else cfg.__dict__
-    print("[train_patchtst] Effective TrainingConfig:")
-    print(json.dumps(data, indent=2, ensure_ascii=False, default=str))
-
-
-def _infer_exo_dim_from_cb(future_exo_cb, horizon: int, device: str = "cpu") -> int:
-    """
-    콜백 함수 실행을 통한 미래 외생 변수 차원(E) 추론.
-    반환: (H, E) 텐서의 마지막 차원.
-    """
-    if future_exo_cb is None:
-        return 0
-    fe = future_exo_cb(0, horizon, device=device)  # (H,E) 또는 (B,H,E) 류를 가정
-    if isinstance(fe, torch.Tensor):
-        return int(fe.size(-1))
-    try:
-        return int(fe.shape[-1])
-    except Exception:
-        return 0
-
-
-def _infer_exo_dim_from_loader(train_loader: DataLoader) -> int:
-    """
-    데이터 로더의 첫 배치 검사를 통한 미래 외생 변수 차원 추론.
-    배치 구조: (x, y, part_ids, fe_cont, ...) 가정.
-    """
-    try:
-        batch = next(iter(train_loader))
-    except Exception:
-        return 0
-
-    # (x, y, part_ids, fe_cont, pe_cont, pe_cat) 형태라고 가정
-    if not isinstance(batch, (list, tuple)) or len(batch) < 4:
-        return 0
-
-    fe_cont = batch[3]
-    if torch.is_tensor(fe_cont):
-        return int(fe_cont.size(-1))
-    return 0
 
 
 def _pick_future_exo_cb(model, user_cb: Optional[Callable]) -> Optional[Callable]:
@@ -125,28 +84,6 @@ def _ensure_patchtst_future_head(model, exo_dim: int, *, loss_mode: str = "point
     return model
 
 
-def _maybe_make_spike_loader(train_loader: DataLoader, enable: bool) -> DataLoader:
-    """
-    Spike Loss 활성화 시 스파이크 샘플에 가중치를 부여한 DataLoader 생성.
-    """
-    if (not enable) or (not hasattr(train_loader.dataset, "sample_is_spike")):
-        return train_loader
-
-    import numpy as np
-    m = np.asarray(train_loader.dataset.sample_is_spike, dtype=bool)
-    w = np.where(m, 3.0, 1.0).astype("float32")
-    sampler = WeightedRandomSampler(weights=w, num_samples=len(w), replacement=True)
-
-    return DataLoader(
-        train_loader.dataset,
-        batch_size=train_loader.batch_size,
-        sampler=sampler,
-        num_workers=train_loader.num_workers,
-        pin_memory=getattr(train_loader, "pin_memory", True),
-        drop_last=getattr(train_loader, "drop_last", False),
-        collate_fn=getattr(train_loader, "collate_fn", None),
-    )
-
 
 def train_patchtst(
         model,
@@ -169,18 +106,14 @@ def train_patchtst(
     - CommonTrainer를 이용한 스테이지별(Stage-wise) 학습 루프 실행.
     """
     assert train_cfg is not None, "train_cfg는 필수입니다."
-
+    horizon = getattr(model, 'horizon', None) or getattr(train_cfg, 'horizon', None)
     # 1) exo 콜백 결정
-    future_exo_cb = _pick_future_exo_cb(model, future_exo_cb)
+    if future_exo_cb is not None:
+        if horizon is None:
+            raise ValueError('horizon을 model 또는 train_cfg에서 찾을 수 없습니다.')
 
-    # 2) exo_dim 추론 후 head 보정 (PatchMixer와 동일한 전략)
-    horizon = getattr(model, "horizon", None) or getattr(getattr(model, "cfg", None), "horizon", None) or getattr(
-        train_cfg, "horizon", None)
-    if horizon is None:
-        raise ValueError("horizon을 model/cfg/train_cfg에서 찾을 수 없습니다.")
-
-    E_loader = _infer_exo_dim_from_loader(train_loader)
-    E_cb = _infer_exo_dim_from_cb(future_exo_cb, horizon, device="cpu")
+    E_loader = infer_future_exo_spec_from_loader(train_loader)[1]
+    E_cb = infer_exo_dim_from_cb(future_exo_cb, horizon, device="cpu")
 
     # 실제 학습 입력 기준으로 head를 맞추는 것이 안전
     E = E_loader if E_loader > 0 else E_cb
@@ -236,9 +169,10 @@ def train_patchtst(
         print(f"\n[train_patchtst] ===== Stage {i}/{len(stages)} =====")
         print(f"  - spike: {'ON' if cfg_i.spike_loss.enabled else 'OFF'}")
         print(f"  - epochs: {cfg_i.epochs} | lr={cfg_i.lr} | horizon_decay={cfg_i.use_horizon_decay}")
-        _dump_cfg(cfg_i)
+        from modeling_module.training.model_trainers.cfg_policy import dump_cfg
+        dump_cfg(cfg_i, name = 'patchtst_train')
 
-        tl_i = _maybe_make_spike_loader(train_loader, enable=cfg_i.spike_loss.enabled)
+        tl_i = maybe_make_spike_loader(train_loader, enable=cfg_i.spike_loss.enabled)
 
         # 트레이너 초기화 및 학습 수행
         trainer = CommonTrainer(

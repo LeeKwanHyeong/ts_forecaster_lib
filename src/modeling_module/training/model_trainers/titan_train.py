@@ -11,35 +11,12 @@ from torch.utils.data import DataLoader, WeightedRandomSampler
 from modeling_module.training.adapters import TitanAdapter, DefaultAdapter
 from modeling_module.training.config import TrainingConfig, StageConfig, apply_stage
 from modeling_module.training.engine import CommonTrainer
+from modeling_module.training.model_trainers.exo_policy import infer_exo_dim_from_cb
+from modeling_module.training.model_trainers.spike_policy import maybe_make_spike_loader
 from modeling_module.utils.exogenous_utils import calendar_sin_cos
 
 
-def _dump_cfg(cfg):
-    """
-    현재 적용된 학습 설정(TrainingConfig)을 JSON 형식으로 출력하여 로깅함.
-    """
-    data = asdict(cfg) if is_dataclass(cfg) else cfg.__dict__
-    print("[train_titan] Effective TrainingConfig:")
-    print(json.dumps(data, indent=2, ensure_ascii=False, default=str))
-
-
-def _infer_exo_dim_from_cb(future_exo_cb, horizon: int, device: str = "cpu") -> int:
-    """
-    콜백 함수(future_exo_cb) 실행을 통해 미래 외생 변수(Future Exo)의 차원(E)을 추론함.
-    반환값은 (Horizon, Exo_Dim) 텐서의 마지막 차원 크기임.
-    """
-    if future_exo_cb is None:
-        return 0
-    fe = future_exo_cb(0, horizon, device=device)  # (H,E) expected
-    if isinstance(fe, torch.Tensor):
-        return int(fe.size(-1))
-    try:
-        return int(fe.shape[-1])
-    except Exception:
-        return 0
-
-
-def _ensure_model_exo_head(model, exo_dim: int):
+def _ensure_titan_exo_head(model, exo_dim: int):
     """콜백 기반 외생 변수 모드일 때, 추론된 차원에 맞춰 Titan의 decoder exogenous projection을 갱신함.
 
     Titan 계열은 `model.exo_head`를 사용하지 않고, `TitanDecoder.exo_proj`를 통해
@@ -82,33 +59,6 @@ def _ensure_model_exo_head(model, exo_dim: int):
     return model
 
 
-def _maybe_make_spike_loader(train_loader: DataLoader, enable: bool) -> DataLoader:
-    """
-    스파이크(Spike, 급격한 변화) 구간의 학습 강화를 위한 가중 샘플링(Weighted Random Sampling) 데이터 로더 생성.
-
-    기능:
-    - 데이터셋에 `sample_is_spike` 정보가 있을 경우에만 동작함.
-    - 일반 샘플 대비 스파이크 샘플에 3.0배 높은 가중치를 부여하여 오버샘플링함.
-    """
-    if (not enable) or (not hasattr(train_loader.dataset, "sample_is_spike")):
-        return train_loader
-
-    import numpy as np
-    m = np.asarray(train_loader.dataset.sample_is_spike, dtype=bool)
-    w = np.where(m, 3.0, 1.0).astype("float32")  # 스파이크:기본 = 3:1
-    sampler = WeightedRandomSampler(weights=w, num_samples=len(w), replacement=True)
-
-    return DataLoader(
-        train_loader.dataset,
-        batch_size=train_loader.batch_size,
-        sampler=sampler,
-        num_workers=train_loader.num_workers,
-        pin_memory=getattr(train_loader, "pin_memory", True),
-        drop_last=getattr(train_loader, "drop_last", False),
-        collate_fn=getattr(train_loader, "collate_fn", None),
-    )
-
-
 def train_titan(
         model,
         train_loader,
@@ -138,8 +88,8 @@ def train_titan(
         if horizon is None:
             raise ValueError("horizon을 model 또는 train_cfg에서 찾을 수 없습니다.")
 
-        E = _infer_exo_dim_from_cb(future_exo_cb, int(horizon), device="cpu")
-        model = _ensure_model_exo_head(model, E)
+        E = infer_exo_dim_from_cb(future_exo_cb, int(horizon), device="cpu")
+        model = _ensure_titan_exo_head(model, E)
         print(
             "[EXO-setup] (callback) "
             f"inferred E={E}, model.exo_dim={getattr(model, 'exo_dim', None)}, "
@@ -187,10 +137,11 @@ def train_titan(
         print(f"\n[train_titan] ===== Stage {i}/{len(stages)} =====")
         print(f"  - spike: {'ON' if cfg_i.spike_loss.enabled else 'OFF'}")
         print(f"  - epochs: {cfg_i.epochs} | lr={cfg_i.lr} | horizon_decay={cfg_i.use_horizon_decay}")
-        _dump_cfg(cfg_i)
+        from modeling_module.training.model_trainers.cfg_policy import dump_cfg
+        dump_cfg(cfg = cfg_i, name = 'titan_train')
 
         # Spike Loss 설정에 따른 데이터 로더 생성
-        tl_i = _maybe_make_spike_loader(train_loader, enable=cfg_i.spike_loss.enabled)
+        tl_i = maybe_make_spike_loader(train_loader, enable=cfg_i.spike_loss.enabled)
 
         # CommonTrainer를 통한 학습 수행
         trainer = CommonTrainer(

@@ -11,70 +11,6 @@ from torch.utils.data import DataLoader
 
 from modeling_module.training.config import TrainingConfig, StageConfig, apply_stage
 
-
-def _json_safe(obj):
-    """
-    JSON 직렬화가 불가능한 객체(Torch Device, Tensor, Path 등)를 문자열이나 기본 타입으로 변환.
-    설정(Config) 로깅 시 오류 방지 목적.
-    """
-    # torch.device 처리
-    try:
-        import torch
-        if isinstance(obj, torch.device):
-            return str(obj)
-    except Exception:
-        pass
-
-    # numpy / torch scalar 처리
-    try:
-        import numpy as np
-        if isinstance(obj, (np.integer, np.floating)):
-            return obj.item()
-    except Exception:
-        pass
-
-    if hasattr(obj, "item") and callable(getattr(obj, "item")):
-        try:
-            return obj.item()
-        except Exception:
-            pass
-
-    # pathlib.Path 등 처리
-    try:
-        import os
-        if isinstance(obj, os.PathLike):
-            return str(obj)
-    except Exception:
-        pass
-
-    # set/tuple -> list 변환
-    if isinstance(obj, (set, tuple)):
-        return list(obj)
-
-    # 기본 문자열 변환
-    return str(obj)
-
-
-def _dump_cfg(cfg, save_dir: str, name: str) -> None:
-    """
-    학습 설정을 JSON 파일로 저장.
-    """
-    import json, os
-    from dataclasses import asdict, is_dataclass
-
-    os.makedirs(save_dir, exist_ok=True)
-    path = os.path.join(save_dir, name)
-
-    # NOTE:
-    # - dataclass(asdict)는 dataclass field만 직렬화하므로, 런타임에 setattr로 주입한 값(예: use_exogenous_mode)은 누락될 수 있습니다.
-    # - 따라서 asdict 결과에 cfg.__dict__를 병합하여 '추가/오버라이드' 키까지 함께 저장합니다.
-    payload = asdict(cfg) if is_dataclass(cfg) else {}
-    if hasattr(cfg, "__dict__"):
-        payload.update(cfg.__dict__)  # dataclass field + runtime-injected attrs
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False, indent=2, default=_json_safe)
-
-
 def _getattr(cfg, key: str, default):
     """안전한 속성 접근 유틸리티."""
     return getattr(cfg, key, default)
@@ -168,7 +104,8 @@ def train_patchtst_pretrain(
     # 설정 저장
     if save_dir is not None:
         os.makedirs(save_dir, exist_ok=True)
-        _dump_cfg(train_cfg, save_dir, "pretrain_cfg.json")
+        from modeling_module.training.model_trainers.cfg_policy import dump_cfg
+        dump_cfg(cfg = train_cfg, name = 'patchtst_pretrain', save_dir = save_dir, cfg_name = "pretrain_cfg.json")
 
     # 스테이지별 학습 루프
     for si, stg in enumerate(stages):
