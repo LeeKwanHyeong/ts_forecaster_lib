@@ -370,7 +370,6 @@ def train_patchtst_finetune(
         unfreeze_after_stage0: bool = True,
         # exo passthrough (기존 patchtst_train과 동일)
         future_exo_cb: Optional[Callable] = None,
-        exo_is_normalized: bool = True,
 ) -> Dict[str, Any]:
     """
     PatchTST 지도학습 파인튜닝 실행 (Runner).
@@ -386,6 +385,8 @@ def train_patchtst_finetune(
       - Best-effort 로딩: 타겟 모델 구조에 맞는 가중치만 선별하여 로드.
     """
     assert train_cfg is not None, "train_cfg는 필수입니다."
+    exo_is_normalized = getattr(train_cfg, "exo_is_normalized", True)
+
 
     # 1) 사전학습 체크포인트 로드 (존재 시)
     if pretrain_ckpt_path is not None:
@@ -441,7 +442,6 @@ def train_patchtst_finetune(
         stages=stages,
         train_cfg=train_cfg,
         future_exo_cb=future_exo_cb,
-        exo_is_normalized=exo_is_normalized,
     )
 
     # 4) 학습 후 동결 해제 (옵션)

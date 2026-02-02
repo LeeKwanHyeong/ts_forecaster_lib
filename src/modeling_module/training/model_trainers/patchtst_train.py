@@ -13,7 +13,9 @@ from torch.utils.data import DataLoader, WeightedRandomSampler
 from modeling_module.training.adapters import DefaultAdapter
 from modeling_module.training.config import TrainingConfig, StageConfig, apply_stage
 from modeling_module.training.engine import CommonTrainer
+from modeling_module.training.model_trainers.amp_policy import amp_type_set
 from modeling_module.training.model_trainers.exo_policy import infer_future_exo_spec_from_loader, infer_exo_dim_from_cb
+from modeling_module.training.model_trainers.loss_policy import infer_loss_mode
 from modeling_module.training.model_trainers.spike_policy import maybe_make_spike_loader
 from modeling_module.utils.exogenous_utils import calendar_sin_cos
 
@@ -94,8 +96,6 @@ def train_patchtst(
         stages: list[StageConfig] | None = None,
         train_cfg: Optional[TrainingConfig] = None,
         future_exo_cb: Optional[Callable] = None,
-        exo_is_normalized: bool = True,
-        use_exogenous_mode: bool = True
 ):
     """
     PatchTST 모델 학습 진입점(Entry Point).
@@ -106,8 +106,12 @@ def train_patchtst(
     - CommonTrainer를 이용한 스테이지별(Stage-wise) 학습 루프 실행.
     """
     assert train_cfg is not None, "train_cfg는 필수입니다."
+    use_exogenous_mode = getattr(train_cfg, 'use_exogenous_mode', True)
+    exo_is_normalized = getattr(train_cfg, 'exo_is_normalized', False)
+    # ----------
+    # (1) exo dim inference
+    # ----------
     horizon = getattr(model, 'horizon', None) or getattr(train_cfg, 'horizon', None)
-    # 1) exo 콜백 결정
     if future_exo_cb is not None:
         if horizon is None:
             raise ValueError('horizon을 model 또는 train_cfg에서 찾을 수 없습니다.')
@@ -118,19 +122,7 @@ def train_patchtst(
     # 실제 학습 입력 기준으로 head를 맞추는 것이 안전
     E = E_loader if E_loader > 0 else E_cb
 
-    loss_mode = str(getattr(train_cfg, "loss_mode", "auto")).lower()
-
-    # --- ADD: auto 해석 ---
-    if loss_mode in ("auto", "infer"):
-        loss_obj = getattr(train_cfg, "loss", None)
-        loss_name = getattr(loss_obj, "__class__", type("x", (object,), {})).__name__
-
-        if (loss_name == "DistributionLoss") or bool(getattr(loss_obj, "is_distribution_output", False)):
-            loss_mode = "dist"
-        elif loss_name in ("MQLoss", "QuantileLoss") or bool(getattr(model, "is_quantile", False)):
-            loss_mode = "quantile"
-        else:
-            loss_mode = "point"
+    loss_mode = infer_loss_mode(train_cfg)
     print(f'[train_patchtst] loss_mode: {loss_mode}')
     if use_exogenous_mode:
         print(f'[train_patchtst] exogenous_mode: {use_exogenous_mode}')
@@ -142,17 +134,7 @@ def train_patchtst(
         print(f"[train_patchtst] loader provides fe_cont(E={E_loader}), so future_exo_cb disabled.")
 
     # 3) AMP 설정 (Titan/PM과 동일 패턴)
-    amp_device = getattr(train_cfg, "amp_device", "cuda")
-    amp_enabled = (amp_device == "cuda" and torch.cuda.is_available())
-    amp_dtype_str = str(getattr(train_cfg, "amp_dtype", "bf16")).lower()
-    if amp_dtype_str in ("bf16", "bfloat16"):
-        amp_dtype = torch.bfloat16
-    elif amp_dtype_str in ("fp16", "float16", "half"):
-        amp_dtype = torch.float16
-    elif amp_dtype_str in ("fp32", "float32"):
-        amp_dtype = torch.float32f
-    else:
-        amp_dtype = torch.bfloat16
+    amp_device, amp_enabled, amp_dtype = amp_type_set(train_cfg)
 
     autocast_input = dict(device_type=amp_device, enabled=amp_enabled, dtype=amp_dtype)
 

@@ -191,7 +191,7 @@ def _canonical_model_key(name: str) -> str:
     if sl in {
         "patchmixer_base", "patchmixer_quantile", "patchmixer_dist"
         "titan_base", "titan_lmm", "titan_seq2seq",
-        "patchtst_base", "patchtst_quantile",
+        "patchtst_base", "patchtst_quantile", 'exotst_base'
     }:
         return sl
 
@@ -214,6 +214,9 @@ def _canonical_model_key(name: str) -> str:
         return "titan_seq2seq"
     if "titan" in sl:
         return "titan_base"
+
+    if 'exotst' in sl and ('base' in sl):
+        return 'exotst_base'
 
     # fallback
     return sl

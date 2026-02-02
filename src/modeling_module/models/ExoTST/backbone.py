@@ -11,7 +11,7 @@ import torch.nn.functional as F
 
 # =========================================================
 # Utils
-# =========================================================
+# ===============================================g==========
 def num_patches(seq_len: int, patch_len: int, stride: int) -> int:
     """
     Return number of patches produced by unfold with right-padding allowed.
@@ -211,44 +211,93 @@ class CrossTemporalFusionLayer(nn.Module):
         self.norm_f2 = nn.LayerNorm(d_model)
 
     def forward(self, hp: torch.Tensor, hf: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        b, c, np, d = hp.shape
-        _, _, nf, _ = hf.shape
+        """Cross-temporal fusion between past(hp) and future(hf) exogenous token sets.
 
+        hp: (B, C_p, Np, D)  with agg token at index 0 of Np
+        hf: (B, C_f, Nf, D)  with agg token at index 0 of Nf
+
+        NOTE
+        - Original paper-aligned implementation assumes C_p == C_f (channel-wise fusion).
+        - In our project setting, past/future exogenous dims can differ (e.g., past has more features
+          than future calendar), especially under exo_nan_policy='zero+indicator' which doubles dims.
+          For robustness, we support C_p != C_f by switching to a pooled-agg fusion mode.
+        """
+        if hp.dim() != 4 or hf.dim() != 4:
+            raise ValueError(f"Fusion expects 4D tensors: hp={tuple(hp.shape)} hf={tuple(hf.shape)}")
+
+        b, c_p, np, d = hp.shape
+        b2, c_f, nf, d2 = hf.shape
+
+        if b2 != b or d2 != d:
+            raise ValueError(
+                f"Fusion batch/emb mismatch: hp={tuple(hp.shape)} hf={tuple(hf.shape)}"
+            )
         if np < 1 or nf < 1:
             raise ValueError('Fusion requires agg tokens (N>=1)')
 
-        # reshape channel-wise: (B*C, N, D)
-        Hp = hp.reshape(b * c, np, d)
-        Hf = hf.reshape(b * c, nf, d)
+        # ------------------------------------------------------------------
+        # Case A) channel-wise fusion (original behavior): requires C_p == C_f
+        # ------------------------------------------------------------------
+        if c_p == c_f:
+            # reshape channel-wise: (B*C, N, D)
+            Hp = hp.reshape(b * c_p, np, d)
+            Hf = hf.reshape(b * c_p, nf, d)
 
-        # agg queries
-        qp = Hp[:, :1, :]   # (B * C, 1, D)
-        qf = Hf[:, :1, :]   # (B * C, 1, D)
+            # agg queries
+            qp = Hp[:, :1, :]   # (B * C, 1, D)
+            qf = Hf[:, :1, :]   # (B * C, 1, D)
 
-        # keys/values are full token sets of opposite modality
-        # past agg attends to future tokens
-        ap, _ = self.p_to_f(qp, Hf, Hf) # (B*C, 1, D)
-        # future agg attends to past tokens
-        af, _ = self.f_to_p(qf, Hp, Hp) # (B*C, 1, D)
+            # past agg attends to future tokens
+            ap, _ = self.p_to_f(qp, Hf, Hf) # (B*C, 1, D)
+            # future agg attends to past tokens
+            af, _ = self.f_to_p(qf, Hp, Hp) # (B*C, 1, D)
 
-        # residual + norm + FFN (only agg token updated)
+            # residual + FFN (past)
+            qp2 = self.norm_p(qp + ap)
+            qp3 = self.norm_p2(qp2 + self.ff_p(qp2))
+
+            # residual + FFN (future)
+            qf2 = self.norm_f(qf + af)
+            qf3 = self.norm_f2(qf2 + self.ff_f(qf2))  # BUGFIX: ff_p -> ff_f
+
+            # replace agg tokens
+            Hp = torch.cat([qp3, Hp[:, 1:, :]], dim=1)
+            Hf = torch.cat([qf3, Hf[:, 1:, :]], dim=1)
+
+            return Hp.reshape(b, c_p, np, d), Hf.reshape(b, c_f, nf, d)
+
+        # ------------------------------------------------------------------
+        # Case B) pooled-agg fusion: supports C_p != C_f
+        #   - We fuse *aggregated* modality summaries using flattened token sets.
+        #   - We update per-channel agg tokens by broadcasting the delta.
+        # ------------------------------------------------------------------
+        Hp_flat = hp.reshape(b, c_p * np, d)  # (B, C_p*Np, D)
+        Hf_flat = hf.reshape(b, c_f * nf, d)  # (B, C_f*Nf, D)
+
+        # pooled agg queries: mean over channels
+        qp = hp[:, :, :1, :].mean(dim=1)  # (B, 1, D)
+        qf = hf[:, :, :1, :].mean(dim=1)  # (B, 1, D)
+
+        ap, _ = self.p_to_f(qp, Hf_flat, Hf_flat)  # (B, 1, D)
+        af, _ = self.f_to_p(qf, Hp_flat, Hp_flat)  # (B, 1, D)
+
         qp2 = self.norm_p(qp + ap)
         qp3 = self.norm_p2(qp2 + self.ff_p(qp2))
 
         qf2 = self.norm_f(qf + af)
-        qf3 = self.norm_f2(qf2 + self.ff_p(qf2))
+        qf3 = self.norm_f2(qf2 + self.ff_f(qf2))
 
-        # write back updated agg tokens, keep patch tokens unchanged
-        Hp = torch.cat([qp3, Hp[:, 1:, :]], dim=1)
-        Hf = torch.cat([qf3, Hf[:, 1:, :]], dim=1)
+        # broadcast delta to each channel's agg token
+        dp = (qp3 - qp).squeeze(1)  # (B, D)
+        df = (qf3 - qf).squeeze(1)  # (B, D)
 
-        hp_out = Hp.reshape(b, c, np, d)
-        hf_out = Hf.reshape(b, c, nf, d)
+        hp_out = hp.clone()
+        hf_out = hf.clone()
+        hp_out[:, :, 0, :] = hp_out[:, :, 0, :] + dp.unsqueeze(1)
+        hf_out[:, :, 0, :] = hf_out[:, :, 0, :] + df.unsqueeze(1)
+
         return hp_out, hf_out
 
-# =========================================================
-# Endogenous Decoder (channel-wise Transformer Decoder)
-# =========================================================
 class EndoDecoder(nn.Module):
     """
     Decode endogenous tokens (B, Cy, Ny, D) with self-attn + cross-attn to exo memory.

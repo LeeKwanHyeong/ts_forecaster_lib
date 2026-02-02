@@ -132,8 +132,8 @@ class TrainingConfig:
     # ------------Exogenous Value (외생 변수) --------------
     exo_dim = 2  # 미래 외생 변수 차원
     nonneg_head = False  # 출력단의 비음수(Non-negative) 제약 강제 여부 (Softplus)
-    use_exogenous_mode: bool = False  # 외생 변수 모드 사용 여부 마스터 스위치
-
+    use_exogenous_mode: bool = True  # 외생 변수 모드 사용 여부 마스터 스위치
+    exo_is_normalized: bool = True
     # ------------Spike-friendly Loss (스파이크 대응)-------------- #
     spike_loss: SpikeLossConfig = field(default_factory=SpikeLossConfig)  # 스파이크 특화 손실 설정
 

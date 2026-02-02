@@ -12,8 +12,6 @@ class ExoTSTConfig(TrainingConfig):
     # -------------------------
     # Data / IO
     # -------------------------
-    lookback: int = 52
-    horizon: int = 27
 
     y_dim: int = 1  # endogenous channel count (Cy)
 
@@ -65,7 +63,7 @@ class ExoTSTConfig(TrainingConfig):
     use_revin: bool = True
     revin_affine: bool = True
     revin_eps: float = 1e-5
-    revin_subtract_last: bool = False
+    subtract_last: bool = True
 
     # -------------------------
     # Head

@@ -1,6 +1,7 @@
-from dataclasses import fields, is_dataclass
-from typing import Union, Any, Optional
+from dataclasses import fields, is_dataclass, asdict
+from typing import Union, Any, Optional, Mapping
 
+from modeling_module.models.ExoTST.configs import ExoTSTConfig
 from modeling_module.models.PatchMixer.PatchMixer import PatchMixerModel, PatchMixerQuantileModel
 from modeling_module.models.PatchMixer.common.configs import PatchMixerConfig
 from modeling_module.models.PatchTST.common.configs import PatchTSTConfig
@@ -89,6 +90,7 @@ def build_titan_seq2seq(cfg: TitanConfig, *, out_mult: int = 1, param_names=None
     return TitanSeq2SeqModel(cfg, out_mult=out_mult, param_names=param_names)
 
 
+
 # -----------------------------
 # PatchTST: dict/Namespace → PatchTSTConfig
 # -----------------------------
@@ -142,3 +144,121 @@ def build_patchTST_quantile(cfg):
     cfg = _ensure_patchtst_config(cfg)
     return PatchTSTQuantileModel.from_config(cfg)
 
+def _ensure_exotst_config(cfg: Union[ExoTSTConfig, dict, Any]) -> ExoTSTConfig:
+    """
+    Normalize various config inputs into ExoTSTConfig.
+
+    Supported inputs:
+      - ExoTSTConfig: returned as-is
+      - dict / Mapping: ExoTSTConfig(**dict) with key normalization
+      - dataclass / Any object: try asdict(), then vars()
+
+    Also:
+      - handles alias keys (e.g., "seq_len" -> "lookback", "pred_len" -> "horizon")
+      - normalizes head_type/loss_mode conventions
+      - basic validation for critical fields
+    """
+    if isinstance(cfg, ExoTSTConfig):
+        out = cfg
+    else:
+        # 1) dict-like
+        if isinstance(cfg, Mapping):
+            d = dict(cfg)
+        # 2) dataclass-like
+        elif is_dataclass(cfg):
+            d = asdict(cfg)
+        # 3) generic object (TrainingConfig 등)
+        else:
+            try:
+                d = dict(vars(cfg))
+            except Exception as e:
+                raise TypeError(f"Unsupported cfg type for ExoTSTConfig: {type(cfg)}") from e
+
+        # -------------------------
+        # Key normalization (aliases)
+        # -------------------------
+        # common time-series naming
+        alias_map = {
+            "seq_len": "lookback",
+            "context_length": "lookback",
+            "input_len": "lookback",
+            "look_back": "lookback",
+            "pred_len": "horizon",
+            "prediction_length": "horizon",
+            "output_len": "horizon",
+            "target_dim": "y_dim",
+            "c_in": "y_dim",
+            "d_model": "d_model",
+            "n_head": "n_heads",
+            "nhead": "n_heads",
+            "ff_dim": "d_ff",
+            "dropout_rate": "dropout",
+        }
+        for k, v in list(d.items()):
+            if k in alias_map and alias_map[k] not in d:
+                d[alias_map[k]] = v
+
+        # -------------------------
+        # head_type / loss_mode normalization
+        # -------------------------
+        # build_exotst(... out_mult/param_names ...) 호출부에서 head_type을 결정하려는 경우가 많아서,
+        # cfg에 head_type이 없고 loss_mode만 있는 경우 head_type으로 매핑해줌.
+        loss_mode = str(d.get("loss_mode", "")).lower() if d.get("loss_mode") is not None else ""
+        if "head_type" not in d and loss_mode:
+            if loss_mode in ("dist", "distribution"):
+                d["head_type"] = "dist"
+            elif loss_mode in ("point", "mse", "mae", "huber"):
+                d["head_type"] = "point"
+            # quantile은 ExoTST에서 아직 head가 없으면 builder 단계에서 막는 편이 안전
+            elif loss_mode in ("quantile", "mq"):
+                d["head_type"] = "quantile"
+
+        # 기본값 강제(프로젝트에서 실수 잦은 부분)
+        d.setdefault("strict_shape", True)
+        d.setdefault("exo_nan_policy", "zero+indicator")
+
+        # 실제 Config로 변환
+        try:
+            out = ExoTSTConfig(**d)
+        except TypeError as e:
+            # 어떤 키가 문제인지 디버깅하기 쉽게 메시지 보강
+            allowed = set(ExoTSTConfig.__annotations__.keys())
+            extra = sorted(set(d.keys()) - allowed)
+            raise TypeError(
+                f"Failed to build ExoTSTConfig from input. "
+                f"Extra keys not in ExoTSTConfig: {extra}"
+            ) from e
+
+    # -------------------------
+    # Basic validation (fail-fast)
+    # -------------------------
+    if int(out.lookback) <= 0:
+        raise ValueError(f"lookback must be > 0, got {out.lookback}")
+    if int(out.horizon) <= 0:
+        raise ValueError(f"horizon must be > 0, got {out.horizon}")
+    if int(out.patch_len) <= 0:
+        raise ValueError(f"patch_len must be > 0, got {out.patch_len}")
+    if int(out.stride) <= 0:
+        raise ValueError(f"stride must be > 0, got {out.stride}")
+    if int(out.d_model) <= 0:
+        raise ValueError(f"d_model must be > 0, got {out.d_model}")
+    if int(out.n_heads) <= 0:
+        raise ValueError(f"n_heads must be > 0, got {out.n_heads}")
+
+    if out.exo_nan_policy not in ("zero", "zero+indicator"):
+        raise ValueError(f"exo_nan_policy must be 'zero' or 'zero+indicator', got {out.exo_nan_policy}")
+
+    if getattr(out, "exo_memory_mode", "all") not in ("all", "agg"):
+        raise ValueError(f"exo_memory_mode must be 'all' or 'agg', got {getattr(out, 'exo_memory_mode', None)}")
+
+    head_type = getattr(out, "head_type", "point")
+    if head_type not in ("point", "dist", "quantile"):
+        raise ValueError(f"head_type must be one of ('point','dist','quantile'), got {head_type}")
+
+    return out
+
+def build_exotst(cfg):
+    """ExoTST 점 예측(Point) 모델 인스턴스 생성."""
+    cfg = _ensure_exotst_config(cfg)
+    from modeling_module.models.ExoTST.ExoTST import ExoTST
+    return ExoTST.from_config(cfg)

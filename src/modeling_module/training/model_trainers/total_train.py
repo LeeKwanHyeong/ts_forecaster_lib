@@ -17,7 +17,7 @@ from modeling_module.models.model_builder import (
     build_patch_mixer_quantile,
     build_patchTST,
     build_patchTST_quantile,
-    build_patch_mixer,
+    build_patch_mixer, build_exotst,
 )
 from modeling_module.training.config import SpikeLossConfig, TrainingConfig, StageConfig
 from modeling_module.training.model_losses.loss_module import (
@@ -33,7 +33,9 @@ from modeling_module.training.model_trainers.patchtst_pretrain import train_patc
 from modeling_module.training.model_trainers.patchtst_train import train_patchtst
 from modeling_module.training.model_trainers.titan_train import train_titan
 from modeling_module.utils.exogenous_utils import compose_exo_calendar_cb
-
+from .exotst_train import train_exotst
+from ...models.ExoTST.ExoTST import ExoTST
+from ...models.ExoTST.configs import ExoTSTConfig
 
 SSLMode = Literal["ssl_only", "full", "sl_only"]
 
@@ -477,6 +479,92 @@ def _norm_list(xs: Optional[Iterable[str]]) -> List[str]:
 # =============================================================================
 # Model runners
 # =============================================================================
+
+
+def _run_exotst(
+    *,
+    freq: str,
+    train_loader,
+    val_loader,
+    point_train_cfg,
+    stages,
+    device: str,
+    lookback: int,
+    horizon: int,
+    patch_len: int,
+    stride: int,
+    use_exogenous_mode: bool,
+    exo_dim: int,
+    future_exo_cb : Optional[Callable] = None,
+    save_root: str,
+    **kwargs
+):
+    """
+    ExoTST Runner (total_train compatible)
+        - ExoTST는 paper-aligned 설계 기준으로 past+future exogenous 모두 필요.
+        - past_exo_cont는 loader에서만 공급 (=pe_cont)
+        - future_exo는 loader(fe_cont) 또는 future_exo_cb 둘 중 하나에서 공급 가능 (하지만 exo_dim > 0 필수)
+        - loss에 따라 출력이 달라지는 구조는 ExoTST(model)에서  cfg.loss 기반으로 head를 선택한다고 가정
+    """
+
+    train_cfg: TrainingConfig = point_train_cfg
+
+    if not use_exogenous_mode:
+        raise RuntimeError("[total_train] ExoTST requires use_exogenous_mode = True (needs past+future exogenous)")
+    if exo_dim <= 0 and future_exo_cb is None:
+        raise RuntimeError("[total_train] ExoTST requires future exogenous (loader fe_cont dim > 0 or future_exo_cb)")
+
+    past_cont_dim, _past_cat_dim = infer_past_exo_dim_from_loader_for_exotst(train_loader)
+    if past_cont_dim <= 0:
+        raise RuntimeError("[total_train] ExoTST requires past_exo_cont from loader (pe_cont dim > 0)")
+
+    loss_obj = getattr(train_cfg, 'loss', None)
+    mode = infer_supervised_mode(loss_obj)
+    if mode == 'quantile':
+        raise NotImplementedError("[total_train] Quantile trainer is not implemented yet. Use point/distribution first.")
+
+    head_type = 'dist' if mode == 'dist' else 'point'
+
+    cfg_kwargs = asdict(train_cfg)  # 여기 이미 'loss'가 포함됨
+    cfg_kwargs["loss"] = loss_obj  # 필요하면 여기서 덮어쓰기(override)
+    cfg_kwargs['subtract_last'] = True
+
+    cfg_kwargs.update(
+        dict(
+            y_dim=1,
+            patch_len=patch_len,
+            stride=stride,
+            use_past_exo=True,
+            use_future_exo=True,
+            exo_dim_past=past_cont_dim,
+            exo_dim_future=max(int(exo_dim), 0),
+            exo_nan_policy="zero+indicator",
+            head_type=head_type,
+            strict_shape=True,
+        )
+    )
+
+    exotst_cfg = ExoTSTConfig(**cfg_kwargs)
+
+    model = ExoTST(exotst_cfg).to(device)
+    exotst = build_exotst(exotst_cfg)
+
+    best_exotst = train_exotst(
+        model = model,
+        train_loader = train_loader,
+        val_loader = val_loader,
+        stages = stages,
+        train_cfg = train_cfg,
+        device = device,
+        future_exo_cb = future_exo_cb,
+    )
+
+    if save_root:
+        ckpt_path_q = _make_ckpt_path(save_root, freq, "ExoTSTBase", lookback, horizon)
+        save_model(exotst, exotst_cfg, ckpt_path_q)
+        best_exotst["ckpt_path"] = str(ckpt_path_q)
+
+
 def _run_patchtst(
     *,
     results: Dict[str, Dict],
@@ -618,7 +706,6 @@ def _run_patchtst(
             train_cfg=point_train_cfg,
             stages=list(stages),
             future_exo_cb=future_exo_cb,
-            exo_is_normalized=True,
             pretrain_ckpt_path=pretrain_ckpt_path,
             load_strict=False,
             freeze_encoder_before_ft=ssl_freeze_encoder_before_ft,
@@ -632,7 +719,6 @@ def _run_patchtst(
             train_cfg=point_train_cfg,
             stages=list(stages),
             future_exo_cb=future_exo_cb,
-            use_exogenous_mode=use_exogenous_mode,
             device = device
         )
 
@@ -664,7 +750,6 @@ def _run_patchtst(
             train_cfg=quantile_train_cfg,
             stages=list(stages),
             future_exo_cb=future_exo_cb,
-            exo_is_normalized=True,
             pretrain_ckpt_path=pretrain_ckpt_path,
             load_strict=False,  # head mismatch를 허용 (매우 중요)
             freeze_encoder_before_ft=ssl_freeze_encoder_before_ft,
@@ -678,7 +763,6 @@ def _run_patchtst(
             train_cfg=quantile_train_cfg,
             stages=list(stages),
             future_exo_cb=future_exo_cb,
-            use_exogenous_mode=use_exogenous_mode,
             device = device
         )
 
@@ -773,7 +857,6 @@ def _run_titan(
         train_cfg=point_train_cfg,
         stages=list(stages),
         future_exo_cb=(future_exo_cb if use_exogenous_mode else None),
-        use_exogenous_mode=use_exogenous_mode,
     )
     if save_root:
         ckpt_path = _make_ckpt_path(save_root, freq, ckpt_name_lmm, lookback, horizon)
@@ -793,7 +876,6 @@ def _run_titan(
         train_cfg=point_train_cfg,
         stages=list(stages),
         future_exo_cb=(future_exo_cb if use_exogenous_mode else None),
-        use_exogenous_mode=use_exogenous_mode,
     )
     if save_root:
         ckpt_path = _make_ckpt_path(save_root, freq, ckpt_name_s2s, lookback, horizon)
@@ -940,8 +1022,6 @@ def _run_patchmixer(
         train_cfg=point_train_cfg,
         stages=list(stages),
         future_exo_cb=(future_exo_cb if use_exogenous_mode else None),
-        exo_is_normalized=pm_base_cfg.exo_is_normalized_default,
-        use_exogenous_mode=use_exogenous_mode,
     )
 
     if save_root:
@@ -968,8 +1048,6 @@ def _run_patchmixer(
         train_cfg=quantile_train_cfg,
         stages=list(stages),
         future_exo_cb=(future_exo_cb if use_exogenous_mode else None),
-        exo_is_normalized=pm_q_cfg.exo_is_normalized_default,
-        use_exogenous_mode=use_exogenous_mode,
     )
 
     if save_root:
@@ -984,6 +1062,7 @@ MODEL_REGISTRY: Dict[str, Callable] = {
     "patchtst": _run_patchtst,
     "titan": _run_titan,
     "patchmixer": _run_patchmixer,
+    "exotst": _run_exotst,
 }
 
 
@@ -994,7 +1073,7 @@ MODEL_REGISTRY: Dict[str, Callable] = {
 # Frequency/Exogenous policies are split into dedicated modules for readability.
 try:
     from .freq_policy import FreqSpec, get_freq_spec
-    from .exo_policy import ExoSpec, resolve_future_exogenous
+    from .exo_policy import ExoSpec, resolve_future_exogenous, infer_past_exo_dim_from_loader_for_exotst
 except Exception:  # pragma: no cover
     from freq_policy import FreqSpec, get_freq_spec  # type: ignore
     from exo_policy import ExoSpec, resolve_future_exogenous  # type: ignore
@@ -1175,6 +1254,14 @@ def run_total_train(
             # titan runner does not use quantile configs
             kwargs.pop("quantile_train_cfg", None)
             kwargs.pop("loss_quantile", None)
+
+        elif m == 'exotst':
+            kwargs.update(
+                dict(
+                    patch_len = freq_spec.patch_len,
+                    stride = freq_spec.stride
+                )
+            )
 
         MODEL_REGISTRY[m](**kwargs)
 

@@ -12,6 +12,7 @@ from torch.utils.data import DataLoader, WeightedRandomSampler
 from modeling_module.training.adapters import PatchMixerAdapter, DefaultAdapter
 from modeling_module.training.config import TrainingConfig, StageConfig, apply_stage
 from modeling_module.training.engine import CommonTrainer
+from modeling_module.training.model_trainers.amp_policy import amp_type_set
 from modeling_module.training.model_trainers.exo_policy import infer_exo_dim_from_cb
 from modeling_module.training.model_trainers.spike_policy import maybe_make_spike_loader
 
@@ -58,8 +59,6 @@ def train_patchmixer(
         train_cfg: Optional[TrainingConfig] = None,
         # 외생 변수 관련 인자
         future_exo_cb: Optional[Callable[[int, int], "torch.Tensor"]] = None,
-        exo_is_normalized: bool = False,
-        use_exogenous_mode: bool = True,
         device
 ):
     """
@@ -78,7 +77,8 @@ def train_patchmixer(
        - 모델의 exo_head 설정을 건드리지 않음.
     """
     assert train_cfg is not None, "train_cfg는 필수입니다."
-
+    use_exogenous_mode = getattr(train_cfg, 'use_exogenous_mode', True)
+    exo_is_normalized = getattr(train_cfg, 'exo_is_normalized', True)
     # 1. 외생 변수 헤드 설정 (Callback 모드일 경우에만 동적 처리)
     if future_exo_cb is not None:
         horizon = getattr(model, "horizon", None) or getattr(train_cfg, "horizon", None)
@@ -101,24 +101,7 @@ def train_patchmixer(
         )
 
     # 2. AMP (Mixed Precision) 설정
-    amp_device = getattr(train_cfg, "amp_device", "cuda")
-    amp_enabled = (amp_device == "cuda" and torch.cuda.is_available())
-    amp_dtype_str = getattr(train_cfg, "amp_dtype", "bf16")
-
-    # dtype 파싱 및 설정
-    if isinstance(amp_dtype_str, torch.dtype):
-        amp_dtype = amp_dtype_str
-    else:
-        s = str(amp_dtype_str).lower()
-        if s in ("bf16", "bfloat16"):
-            amp_dtype = torch.bfloat16
-        elif s in ("fp16", "float16", "half"):
-            amp_dtype = torch.float16
-        elif s in ("fp32", "float32"):
-            amp_dtype = torch.float32
-        else:
-            amp_dtype = torch.bfloat16
-
+    amp_device, amp_enabled, amp_dtype = amp_type_set(train_cfg)
     autocast_input = dict(device_type=amp_device, enabled=amp_enabled, dtype=amp_dtype)
 
     # 3. 모델 어댑터 초기화 (입/출력 형식 변환용)

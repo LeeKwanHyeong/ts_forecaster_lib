@@ -15,7 +15,7 @@ Why separate?
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, Callable
+from typing import Optional, Callable, Tuple
 
 import torch
 
@@ -76,6 +76,48 @@ def infer_future_exo_spec_from_loader(loader) -> tuple[bool, int]:
         return (True, 0)
     except Exception:
         return (False, 0)
+
+def infer_past_exo_dim_from_loader(loader) -> int:
+    """
+        batch = (x, uid, fe_cont, pe_cont, pe_cat)
+            - fe_cont: (B, H, E_future)
+            - pe_cont: (B, H, E_past)
+
+        pe_cont가 없거나 shape[-1] == 0 이면 0 반환
+        """
+    try:
+        b = next(iter(loader))
+    except Exception:
+        return 0
+
+    pe_cont = b[3]
+    if pe_cont is None or not torch.is_tensor(pe_cont) or pe_cont.dim() != 3:
+        return 0
+    return int(pe_cont.shape[-1])
+
+def infer_past_exo_dim_from_loader_for_exotst(loader) -> Tuple[int, int]:
+    """
+    DataLoader batch format이 (len==5) or (len>=6) 두 케이스 모두 커버.
+        -len == 5 : (x, uid, fe, pe_cont, pe_cat)
+        -len >= 6: (x, ..., fe, ..., pe_cont, pe_cat) 형태로 운용중인 기존 코드 반영
+    :returns (past_cont_dim, past_cat_dim)
+    """
+    b = next(iter(loader))
+    if not isinstance(b, (tuple, list)):
+        return 0, 0
+
+    pe_cont = None
+    pe_cat = None
+    if len(b) == 5:
+        pe_cont, pe_cat = b[3], b[4]
+    elif len(b) >= 6:
+        pe_cont, pe_cat = b[4], b[5]
+
+    d_cont = int(pe_cont.shape[-1]) if torch.is_tensor(pe_cont) and pe_cont.ndim == 3 else 0
+    d_cat = int(pe_cat.shape[-1]) if torch.is_tensor(pe_cat) and pe_cat.ndim == 3 else 0
+    return d_cont, d_cat
+
+
 
 
 def wrap_future_exo_cb(future_exo_cb):

@@ -76,6 +76,7 @@ class ExoTST(nn.Module):
         self.lookback = int(cfg.lookback)
         self.horizon = int(cfg.horizon)
         self.y_dim = int(cfg.y_dim)
+        self.use_revin = bool(cfg.use_revin)
 
 
 
@@ -98,7 +99,7 @@ class ExoTST(nn.Module):
                 num_features = self.y_dim,
                 eps = cfg.revin_eps,
                 affine = cfg.revin_affine,
-                subtract_last = cfg.revin_subtract_last,
+                subtract_last = cfg.subtract_last,
             )
         else:
             self.revin = None
@@ -216,22 +217,34 @@ class ExoTST(nn.Module):
         )
     def _build_exo_memory(self, hp: torch.Tensor, hf: torch.Tensor) -> torch.Tensor:
         """
-        hp: (B, Cx, Np+1, D)
-        hf: (B, Cx, Nf+1, D)
-        return exo_mem: (B, M, D)
-        """
-        if self.cfg.exo_memory_mode == "agg":
-            # use only agg tokens from past/future: (B,C,1,D) + (B,C,1,D) -> (B,2C,D)
-            ap = hp[:, :, :1, :]
-            af = hf[:, :, :1, :]
-            mem = torch.cat([ap, af], dim=2)  # (B, C, 2, D)
-            b, c, n, d = mem.shape
-            return mem.reshape(b, c * n, d)
+        hp: (B, C_p, Np, D)  (Np includes agg token if enabled)
+        hf: (B, C_f, Nf, D)
+        return exo_mem: (B, M, D) where M = C_p*Np + C_f*Nf (or only agg tokens if mode='agg')
 
-        # "all": concat full token sets per channel
-        mem = torch.cat([hp, hf], dim=2)  # (B, C, (Np+1)+(Nf+1), D)
-        b, c, n, d = mem.shape
-        return mem.reshape(b, c * n, d)
+        NOTE: past/future exogenous channel counts (C_p, C_f) may differ.
+        """
+        if hp.dim() != 4 or hf.dim() != 4:
+            raise ValueError(f"hp/hf must be 4D. got hp={tuple(hp.shape)} hf={tuple(hf.shape)}")
+
+        b, cp, np, d = hp.shape
+        b2, cf, nf, d2 = hf.shape
+        if b2 != b or d2 != d:
+            raise ValueError(f"batch/d_model mismatch: hp={tuple(hp.shape)} hf={tuple(hf.shape)}")
+
+        if self.cfg.exo_memory_mode == "agg":
+            ap = hp[:, :, :1, :].reshape(b, cp, d)
+            af = hf[:, :, :1, :].reshape(b, cf, d)
+            return torch.cat([ap, af], dim=1)
+
+        # 'all': concat full token sets flattened over channels
+        mem_p = hp.reshape(b, cp * np, d)
+        mem_f = hf.reshape(b, cf * nf, d)
+        return torch.cat([mem_p, mem_f], dim=1)
+
+    @classmethod
+    def from_config(cls, config: "ExoTSTConfig"):
+        return cls(cfg=config)
+
 
     def forward(
             self,
@@ -247,6 +260,17 @@ class ExoTST(nn.Module):
         future_exo: (B, H, E_f) or None
         past_exo_cont: (B, L, E_p) or None
         """
+        x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
+
+        def _assert_finite(name, t):
+            if t is None:
+                return
+            if not torch.isfinite(t).all():
+                raise RuntimeError(f"[ExoTST] {name} has NaN/Inf: shape={tuple(t.shape)}")
+
+        _assert_finite("x", x)
+        _assert_finite("past_exo_cont", past_exo_cont)
+        _assert_finite("future_exo", future_exo)
         if x.dim() != 3:
             raise ValueError("ExoTST expects x shape (B, L, Cy)")
 
@@ -261,9 +285,9 @@ class ExoTST(nn.Module):
         # 0) RevIN normalize endogenous
         # -------------------------
         if self.revin is not None:
-            x_norm, stats = self.revin(x, 'norm')
+            x_norm = self.revin(x, 'norm')
         else:
-            x_norm, stats = x, None
+            x_norm = x
 
         # -------------------------
         # 1) Endogenous patch embedding

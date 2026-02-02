@@ -11,6 +11,7 @@ from torch.utils.data import DataLoader, WeightedRandomSampler
 from modeling_module.training.adapters import TitanAdapter, DefaultAdapter
 from modeling_module.training.config import TrainingConfig, StageConfig, apply_stage
 from modeling_module.training.engine import CommonTrainer
+from modeling_module.training.model_trainers.amp_policy import amp_type_set
 from modeling_module.training.model_trainers.exo_policy import infer_exo_dim_from_cb
 from modeling_module.training.model_trainers.spike_policy import maybe_make_spike_loader
 from modeling_module.utils.exogenous_utils import calendar_sin_cos
@@ -67,7 +68,6 @@ def train_titan(
         stages: list[StageConfig] | None = None,
         train_cfg: Optional[TrainingConfig] = None,
         future_exo_cb=None,
-        use_exogenous_mode: bool = True,
         device
 ):
     """
@@ -81,6 +81,7 @@ def train_titan(
     assert train_cfg is not None, "train_cfg는 필수입니다."
 
     print(f'future_exo_cb : {future_exo_cb is not None}')
+    use_exogenous_mode = getattr(train_cfg, "use_exogenous_mode", True)
 
     # 1. 외생 변수 설정 및 헤드 갱신
     if future_exo_cb is not None:
@@ -104,21 +105,7 @@ def train_titan(
 
     # 2. AMP (Mixed Precision) 설정
 
-    amp_device = getattr(train_cfg, "amp_device", "cuda")
-    amp_enabled = (amp_device == "cuda" and torch.cuda.is_available())
-    amp_dtype_str = getattr(train_cfg, "amp_dtype", "bf16")
-    if isinstance(amp_dtype_str, torch.dtype):
-        amp_dtype = amp_dtype_str
-    else:
-        s = str(amp_dtype_str).lower()
-        if s in ("bf16", "bfloat16"):
-            amp_dtype = torch.bfloat16
-        elif s in ("fp16", "float16", "half"):
-            amp_dtype = torch.float16
-        elif s in ("fp32", "float32"):
-            amp_dtype = torch.float32
-        else:
-            amp_dtype = torch.bfloat16
+    amp_device, amp_enabled, amp_dtype = amp_type_set(train_cfg)
     autocast_input = dict(device_type=amp_device, enabled=amp_enabled, dtype=amp_dtype)
 
     # 3. 어댑터 초기화 (입출력 인터페이스 변환용)
