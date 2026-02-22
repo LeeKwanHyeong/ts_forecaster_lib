@@ -233,6 +233,398 @@ def _alpha_schedule_to_zero(
 # -------------------------------------------------------------------------
 # Main Class
 # -------------------------------------------------------------------------
+
+# -------------------------------------------------------------------------
+# Tail Extension (parametric tail fit)
+# -------------------------------------------------------------------------
+class TailExtender:
+    """Parametric tail extension for long horizons.
+
+    Supported tail_model:
+      - 'exp'          : A * exp(-k t) + c  (c default 0)
+      - 'piecewise_exp': exp with two decay rates (k1 then k2)
+    Notes:
+      - This module is intentionally light-weight (no scipy dependency).
+      - Stability is enforced via non-negativity + optional prior/clip rules.
+        state_prior로 아래 키들을 주면 tail 파라미터가 튀는 걸 더 강하게 제어할 수 있음.
+
+        Weibull용
+            •	weibull_shape_min (default 0.3)
+            •	weibull_shape_max (default 3.5)
+            •	weibull_scale_min (default 1.0)
+            •	weibull_scale_max (default 120.0)
+
+        Log-logistic용
+            •	loglogistic_beta_min (default 0.3)
+            •	loglogistic_beta_max (default 4.0)
+            •	loglogistic_alpha_min (default 1.0)
+            •	loglogistic_alpha_max (default 120.0)
+
+        state_prior = {
+            "weibull_shape_min": 0.5,
+            "weibull_shape_max": 2.5,
+            "weibull_scale_max": 60.0,
+            "use_ratio_guard": True,
+            "ratio_max": 1.2,
+        }
+
+        out = f.predict(
+            x_init=x_init,
+            horizon=86,
+            extension_policy="tail_fit",
+            tail_model="weibull",
+            state_prior=state_prior,
+        )
+    """
+
+    def __init__(
+        self,
+        tail_model: str = "exp",
+        fit_window: int = 18,
+        anchor: str = "mean_last_3",
+        state_prior: Optional[Any] = None,
+    ):
+        self.tail_model = str(tail_model).strip().lower()
+        self.fit_window = max(3, int(fit_window))
+        self.anchor = str(anchor).strip().lower()
+        self.state_prior = state_prior
+
+        if self.tail_model not in ("exp", "piecewise_exp", "weibull", "loglogistic"):
+            raise ValueError(f"Unsupported tail_model={self.tail_model!r}")
+
+    def extend(self, y_hist: torch.Tensor, *, remain: int) -> torch.Tensor:
+        """Extend from history y_hist (B,T) to (B,remain)."""
+        if remain <= 0:
+            return y_hist[:, :0]
+
+        if y_hist.dim() != 2:
+            raise ValueError(f"y_hist must be (B,T), got {tuple(y_hist.shape)}")
+
+        B, T = y_hist.shape
+        K = min(self.fit_window, T)
+        y_fit = y_hist[:, -K:].clamp(min=0.0)
+
+        # resolve anchor level
+        if self.anchor == "last":
+            y0 = y_fit[:, -1]
+        elif self.anchor == "mean_last_6":
+            kk = min(6, K)
+            y0 = y_fit[:, -kk:].mean(dim=1)
+        else:  # mean_last_3
+            kk = min(3, K)
+            y0 = y_fit[:, -kk:].mean(dim=1)
+
+        # prior/clip defaults
+        prior = self._get_prior(y_hist)
+
+        if self.tail_model == "weibull":
+            return self._extend_weibull(y0, y_fit, remain=remain, prior=prior)
+
+        if self.tail_model == "loglogistic":
+            return self._extend_loglogistic(y0, y_fit, remain=remain, prior=prior)
+
+        if self.tail_model == "piecewise_exp":
+            return self._extend_piecewise_exp(y0, y_fit, remain=remain, prior=prior)
+
+        return self._extend_exp(y0, y_fit, remain=remain, prior=prior)
+
+    def _get_prior(self, y_hist: torch.Tensor) -> Dict[str, float]:
+        """Return prior/clip settings for tail params."""
+        # default safe bounds
+        prior = dict(
+            k_min=0.0,
+            k_max=0.30,          # per-month decay upper bound (aggressive)
+            c_min=0.0,
+            c_max=0.0,
+            ratio_max=1.5,       # sum_tail <= ratio_max * sum_front (optional)
+            # Weibull / Log-logistic defaults (used when tail_model matches)
+            weibull_shape_min=0.3,
+            weibull_shape_max=3.5,
+            weibull_scale_min=1.0,
+            weibull_scale_max=120.0,
+            loglogistic_beta_min=0.3,
+            loglogistic_beta_max=4.0,
+            loglogistic_alpha_min=1.0,
+            loglogistic_alpha_max=120.0,
+            use_ratio_guard=False,
+        )
+        sp = self.state_prior
+        if sp is None:
+            return prior
+
+        # Support both dict-like and object-like providers
+        try:
+            if isinstance(sp, dict):
+                prior.update({k: float(v) for k, v in sp.items()})
+            else:
+                # best-effort: call get_prior(y_hist) or get_prior(features)
+                if hasattr(sp, "get_prior"):
+                    p = sp.get_prior(y_hist)
+                    if isinstance(p, dict):
+                        prior.update({k: float(v) for k, v in p.items()})
+        except Exception:
+            # prior provider must never break forecasting
+            return prior
+
+        return prior
+
+    def _fit_k_from_window(self, y_fit: torch.Tensor, *, eps: float = 1e-8) -> torch.Tensor:
+        """Estimate exp decay rate k from last K window using log-slope.
+        y_fit: (B,K) non-negative
+        """
+        B, K = y_fit.shape
+        # take log on positive points
+        y = y_fit.clamp(min=eps)
+        logy = torch.log(y)
+
+        # time index 0..K-1
+        t = torch.arange(K, device=y.device, dtype=y.dtype).view(1, K).expand(B, K)
+        t_mean = t.mean(dim=1, keepdim=True)
+        y_mean = logy.mean(dim=1, keepdim=True)
+
+        cov = ((t - t_mean) * (logy - y_mean)).sum(dim=1)
+        var = ((t - t_mean) ** 2).sum(dim=1).clamp(min=eps)
+
+        slope = cov / var  # slope of logy vs t
+        k = (-slope).clamp(min=0.0)  # decay => negative slope
+        return k
+
+    def _extend_exp(self, y0: torch.Tensor, y_fit: torch.Tensor, *, remain: int, prior: Dict[str, float]) -> torch.Tensor:
+        """A * exp(-k t) + c with c fixed 0 (for now)."""
+        k = self._fit_k_from_window(y_fit)
+        k = k.clamp(min=float(prior.get("k_min", 0.0)), max=float(prior.get("k_max", 0.30)))
+
+        # generate steps 1..remain
+        t = torch.arange(1, remain + 1, device=y0.device, dtype=y0.dtype).view(1, remain)
+        y = y0.view(-1, 1) * torch.exp(-k.view(-1, 1) * t)
+        y = y.clamp(min=0.0)
+
+        # optional ratio guard (very conservative)
+        if bool(prior.get("use_ratio_guard", False)):
+            ratio_max = float(prior.get("ratio_max", 1.5))
+            sum_front = y_fit.sum(dim=1).clamp(min=1e-8)
+            sum_tail = y.sum(dim=1)
+            scale = (ratio_max * sum_front / sum_tail.clamp(min=1e-8)).clamp(max=1.0)
+            y = y * scale.view(-1, 1)
+
+        return y
+
+    def _extend_piecewise_exp(self, y0: torch.Tensor, y_fit: torch.Tensor, *, remain: int, prior: Dict[str, float]) -> torch.Tensor:
+        """Two-stage exponential decay: first half uses k1, second half uses k2."""
+        B, K = y_fit.shape
+        # estimate two ks from split windows
+        k1 = self._fit_k_from_window(y_fit[:, : max(3, K // 2)])
+        k2 = self._fit_k_from_window(y_fit[:, max(0, K // 2):])
+        k1 = k1.clamp(min=float(prior.get("k_min", 0.0)), max=float(prior.get("k_max", 0.30)))
+        k2 = k2.clamp(min=float(prior.get("k_min", 0.0)), max=float(prior.get("k_max", 0.30)))
+
+        r1 = max(1, remain // 2)
+        r2 = remain - r1
+
+        t1 = torch.arange(1, r1 + 1, device=y0.device, dtype=y0.dtype).view(1, r1)
+        y1 = y0.view(-1, 1) * torch.exp(-k1.view(-1, 1) * t1)
+
+        if r2 > 0:
+            y1_last = y1[:, -1].clamp(min=0.0)
+            t2 = torch.arange(1, r2 + 1, device=y0.device, dtype=y0.dtype).view(1, r2)
+            y2 = y1_last.view(-1, 1) * torch.exp(-k2.view(-1, 1) * t2)
+            y = torch.cat([y1, y2], dim=1)
+        else:
+            y = y1
+
+        y = y.clamp(min=0.0)
+
+        if bool(prior.get("use_ratio_guard", False)):
+            ratio_max = float(prior.get("ratio_max", 1.5))
+            sum_front = y_fit.sum(dim=1).clamp(min=1e-8)
+            sum_tail = y.sum(dim=1)
+            scale = (ratio_max * sum_front / sum_tail.clamp(min=1e-8)).clamp(max=1.0)
+            y = y * scale.view(-1, 1)
+
+        return y
+
+
+    def _safe_linreg_slope_intercept(self, x: torch.Tensor, y: torch.Tensor, *, eps: float = 1e-8) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Batch linear regression y = a*x + b. x,y: (B,N). Returns (a,b)."""
+        B, N = x.shape
+        x_mean = x.mean(dim=1, keepdim=True)
+        y_mean = y.mean(dim=1, keepdim=True)
+        cov = ((x - x_mean) * (y - y_mean)).sum(dim=1)
+        var = ((x - x_mean) ** 2).sum(dim=1).clamp(min=eps)
+        a = cov / var
+        b = (y_mean.squeeze(1) - a * x_mean.squeeze(1))
+        return a, b
+
+    def _fit_weibull_from_window(self, y_fit: torch.Tensor, y0: torch.Tensor, *, eps: float = 1e-8) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Fit mirrored Weibull-survival tail params from recent window.
+
+        Forward tail model:
+          y_future(t) = y0 * exp(-(t/lam)^k)
+
+        We estimate (k, lam) from past ratios (moving backwards from anchor):
+          r(u) = y_past(u)/y0  ≈ exp((u/lam)^k)
+          ln(ln r(u)) = k * ln u - k * ln lam
+
+        Returns:
+          k_shape: (B,)
+          lam_scale: (B,)
+        """
+        B, K = y_fit.shape
+        if K < 4:
+            # fallback: approximate with exp-equivalent
+            k_exp = self._fit_k_from_window(y_fit)
+            k_shape = torch.ones_like(k_exp)
+            lam = (1.0 / (k_exp.clamp(min=1e-3)))  # rough
+            return k_shape, lam
+
+        # build u = 1..K-1 (steps into past)
+        u = torch.arange(1, K, device=y_fit.device, dtype=y_fit.dtype).view(1, K - 1).expand(B, K - 1)
+
+        # y_past(u): take values before the anchor (exclude last point)
+        y_past = y_fit[:, :-1]  # (B,K-1) oldest..just-before-anchor
+        # align u with distance-to-anchor: oldest is u=K-1, nearest is u=1
+        # reverse u to match y_past order
+        u = torch.flip(u, dims=[1])
+
+        r = (y_past / y0.view(-1, 1).clamp(min=eps)).clamp(min=1.0 + eps)
+        z = torch.log(r).clamp(min=eps)           # ln r
+        yz = torch.log(z).clamp(min=-30.0)        # ln(ln r)
+        xz = torch.log(u.clamp(min=1.0))          # ln u
+
+        # remove nearly-flat points (where r≈1)
+        mask = (r > (1.0 + 5e-3)).to(y_fit.dtype)
+        # if mask is too sparse, fallback to exp
+        valid_cnt = mask.sum(dim=1).clamp(min=0.0)
+
+        # weighted means for stability
+        w = mask
+        wsum = w.sum(dim=1, keepdim=True).clamp(min=eps)
+        x_mean = (xz * w).sum(dim=1, keepdim=True) / wsum
+        y_mean = (yz * w).sum(dim=1, keepdim=True) / wsum
+        cov = ((xz - x_mean) * (yz - y_mean) * w).sum(dim=1)
+        var = (((xz - x_mean) ** 2) * w).sum(dim=1).clamp(min=eps)
+        k_shape = (cov / var).clamp(min=eps)
+
+        # intercept: b = y_mean - k*x_mean = -k ln lam
+        b = (y_mean.squeeze(1) - k_shape * x_mean.squeeze(1))
+        ln_lam = (-b / k_shape.clamp(min=eps))
+        lam = torch.exp(ln_lam).clamp(min=eps)
+
+        # fallback for sparse valid points
+        k_exp = self._fit_k_from_window(y_fit)
+        lam_fb = (1.0 / (k_exp.clamp(min=1e-3)))
+        use_fb = (valid_cnt < 2).to(y_fit.dtype)
+        k_shape = k_shape * (1.0 - use_fb) + torch.ones_like(k_shape) * use_fb
+        lam = lam * (1.0 - use_fb) + lam_fb * use_fb
+
+        return k_shape, lam
+
+    def _fit_loglogistic_from_window(self, y_fit: torch.Tensor, y0: torch.Tensor, *, eps: float = 1e-8) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Fit mirrored log-logistic tail params from recent window.
+
+        Forward tail model:
+          y_future(t) = y0 / (1 + (t/alpha)^beta)
+
+        Mirror assumption into past:
+          r(u) = y_past(u)/y0 ≈ 1 + (u/alpha)^beta
+          ln(r(u)-1) = beta * ln u - beta * ln alpha
+
+        Returns:
+          beta: (B,)
+          alpha: (B,)
+        """
+        B, K = y_fit.shape
+        if K < 4:
+            k_exp = self._fit_k_from_window(y_fit)
+            beta = torch.ones_like(k_exp)
+            alpha = (1.0 / (k_exp.clamp(min=1e-3)))
+            return beta, alpha
+
+        u = torch.arange(1, K, device=y_fit.device, dtype=y_fit.dtype).view(1, K - 1).expand(B, K - 1)
+        y_past = y_fit[:, :-1]
+        u = torch.flip(u, dims=[1])
+
+        r = (y_past / y0.view(-1, 1).clamp(min=eps)).clamp(min=1.0 + eps)
+        wv = (r - 1.0).clamp(min=eps)
+        yv = torch.log(wv).clamp(min=-30.0)       # ln(r-1)
+        xv = torch.log(u.clamp(min=1.0))
+
+        mask = (wv > 5e-3).to(y_fit.dtype)
+        valid_cnt = mask.sum(dim=1).clamp(min=0.0)
+        w = mask
+        wsum = w.sum(dim=1, keepdim=True).clamp(min=eps)
+        x_mean = (xv * w).sum(dim=1, keepdim=True) / wsum
+        y_mean = (yv * w).sum(dim=1, keepdim=True) / wsum
+        cov = ((xv - x_mean) * (yv - y_mean) * w).sum(dim=1)
+        var = (((xv - x_mean) ** 2) * w).sum(dim=1).clamp(min=eps)
+        beta = (cov / var).clamp(min=eps)
+
+        b = (y_mean.squeeze(1) - beta * x_mean.squeeze(1))  # = -beta ln alpha
+        ln_alpha = (-b / beta.clamp(min=eps))
+        alpha = torch.exp(ln_alpha).clamp(min=eps)
+
+        k_exp = self._fit_k_from_window(y_fit)
+        alpha_fb = (1.0 / (k_exp.clamp(min=1e-3)))
+        use_fb = (valid_cnt < 2).to(y_fit.dtype)
+        beta = beta * (1.0 - use_fb) + torch.ones_like(beta) * use_fb
+        alpha = alpha * (1.0 - use_fb) + alpha_fb * use_fb
+
+        return beta, alpha
+
+    def _extend_weibull(self, y0: torch.Tensor, y_fit: torch.Tensor, *, remain: int, prior: Dict[str, float]) -> torch.Tensor:
+        """Weibull-survival tail: y = y0 * exp(-(t/lam)^k)"""
+        k_shape, lam = self._fit_weibull_from_window(y_fit, y0)
+
+        k_min = float(prior.get("weibull_shape_min", 0.3))
+        k_max = float(prior.get("weibull_shape_max", 3.5))
+        lam_min = float(prior.get("weibull_scale_min", 1.0))
+        lam_max = float(prior.get("weibull_scale_max", 120.0))
+
+        k_shape = k_shape.clamp(min=k_min, max=k_max)
+        lam = lam.clamp(min=lam_min, max=lam_max)
+
+        t = torch.arange(1, remain + 1, device=y0.device, dtype=y0.dtype).view(1, remain)
+        # (t/lam)^k
+        power = (t / lam.view(-1, 1)).clamp(min=1e-8) ** k_shape.view(-1, 1)
+        y = y0.view(-1, 1) * torch.exp(-power)
+        y = y.clamp(min=0.0)
+
+        if bool(prior.get("use_ratio_guard", False)):
+            ratio_max = float(prior.get("ratio_max", 1.5))
+            sum_front = y_fit.sum(dim=1).clamp(min=1e-8)
+            sum_tail = y.sum(dim=1)
+            scale = (ratio_max * sum_front / sum_tail.clamp(min=1e-8)).clamp(max=1.0)
+            y = y * scale.view(-1, 1)
+
+        return y
+
+    def _extend_loglogistic(self, y0: torch.Tensor, y_fit: torch.Tensor, *, remain: int, prior: Dict[str, float]) -> torch.Tensor:
+        """Log-logistic tail: y = y0 / (1 + (t/alpha)^beta)"""
+        beta, alpha = self._fit_loglogistic_from_window(y_fit, y0)
+
+        b_min = float(prior.get("loglogistic_beta_min", 0.3))
+        b_max = float(prior.get("loglogistic_beta_max", 4.0))
+        a_min = float(prior.get("loglogistic_alpha_min", 1.0))
+        a_max = float(prior.get("loglogistic_alpha_max", 120.0))
+
+        beta = beta.clamp(min=b_min, max=b_max)
+        alpha = alpha.clamp(min=a_min, max=a_max)
+
+        t = torch.arange(1, remain + 1, device=y0.device, dtype=y0.dtype).view(1, remain)
+        denom = 1.0 + (t / alpha.view(-1, 1)).clamp(min=1e-8) ** beta.view(-1, 1)
+        y = y0.view(-1, 1) / denom
+        y = y.clamp(min=0.0)
+
+        if bool(prior.get("use_ratio_guard", False)):
+            ratio_max = float(prior.get("ratio_max", 1.5))
+            sum_front = y_fit.sum(dim=1).clamp(min=1e-8)
+            sum_tail = y.sum(dim=1)
+            scale = (ratio_max * sum_front / sum_tail.clamp(min=1e-8)).clamp(max=1.0)
+            y = y * scale.view(-1, 1)
+
+        return y
+
+
 class DMSForecaster:
     """
     Unified Forecaster for DMS + IMS extension.
@@ -296,7 +688,17 @@ class DMSForecaster:
         past_exo_cat: Optional[torch.Tensor] = None,
         future_exo_batch: Optional[torch.Tensor] = None,
         future_exo_cb: Optional[Callable[[int, int, torch.device], torch.Tensor]] = None,
-        # NEW: horizon extension policy
+        # Horizon extension policy (backward compatible)
+        # - extension_policy=None: use legacy flags (is_IMS / is_linear_decay)
+        # - 'ims'      : DMS-to-IMS autoregressive rolling
+        # - 'decay0'   : DMS then decay-to-zero (legacy is_IMS=False)
+        # - 'tail_fit' : DMS then parametric tail fitting (recommended for long horizons)
+        extension_policy: Optional[str] = None,
+        tail_model: str = "exp",            # exp | piecewise_exp | weibull | loglogistic
+        tail_fit_window: int = 18,          # use last K points of DMS block for tail fit
+        tail_anchor: str = "mean_last_3",   # last | mean_last_3 | mean_last_6
+        state_prior: Optional[Any] = None,  # optional prior/clip provider for tail params
+        # Legacy flags (kept for compatibility)
         is_IMS: bool = True,
         is_linear_decay: bool = True,
     ) -> Dict[str, Any]:
@@ -310,6 +712,27 @@ class DMSForecaster:
         """
         device = torch.device(device or next(self.model.parameters()).device)
         self.model.to(device).eval()
+
+        # --------------------------------------------------------------
+        # 0) Resolve extension policy (backward compatible)
+        # --------------------------------------------------------------
+        if extension_policy is None:
+            resolved_policy = "ims" if bool(is_IMS) else "decay0"
+        else:
+            resolved_policy = str(extension_policy).strip().lower()
+
+        if resolved_policy not in ("ims", "decay0", "tail_fit"):
+            raise ValueError(
+                f"Unsupported extension_policy={resolved_policy!r}. Use one of: 'ims' | 'decay0' | 'tail_fit'."
+            )
+
+        # Tail config bundle (passed down; ignored unless policy == 'tail_fit')
+        tail_cfg = dict(
+            tail_model=str(tail_model).strip().lower(),
+            fit_window=int(tail_fit_window),
+            anchor=str(tail_anchor).strip().lower(),
+            state_prior=state_prior,
+        )
 
         part_ids = _to_device_any(part_ids, device)
         past_exo_cont = _to_device_any(past_exo_cont, device)
@@ -440,7 +863,7 @@ class DMSForecaster:
         if is_quantile:
             return self._predict_quantile_strategy(
                 x_raw, out0, horizon, device, fwd_kwargs,
-                is_IMS=is_IMS, is_linear_decay=is_linear_decay
+                is_IMS=is_IMS, is_linear_decay=is_linear_decay, resolved_policy=resolved_policy, tail_cfg=tail_cfg
             )
         else:
             return self._predict_point_strategy(
@@ -462,6 +885,8 @@ class DMSForecaster:
         *,
         is_IMS: bool,
         is_linear_decay: bool,
+        resolved_policy: str,
+        tail_cfg: Dict[str, Any],
     ):
         B = x_raw.size(0)
         y0 = _normalize_point_to_BH(out0, B, H_hint=probe_H)
@@ -470,7 +895,7 @@ class DMSForecaster:
         if int(horizon) <= Hm:
             y_hat = y0[:, :int(horizon)]
         else:
-            if is_IMS:
+            if resolved_policy == "ims":
                 y_hat = self._impl_point_DMS_to_IMS(
                     x_init=x_raw,
                     horizon=int(horizon),
@@ -478,7 +903,7 @@ class DMSForecaster:
                     device=device,
                     fwd_kwargs=fwd_kwargs,
                 )
-            else:
+            elif resolved_policy == "decay0":
                 y_hat = self._impl_point_DMS_then_decay_to_zero(
                     x_init=x_raw,
                     horizon=int(horizon),
@@ -486,6 +911,15 @@ class DMSForecaster:
                     device=device,
                     fwd_kwargs=fwd_kwargs,
                     linear=is_linear_decay,
+                )
+            else:  # tail_fit
+                y_hat = self._impl_point_DMS_then_tail_fit(
+                    x_init=x_raw,
+                    horizon=int(horizon),
+                    model_horizon=Hm,
+                    device=device,
+                    fwd_kwargs=fwd_kwargs,
+                    tail_cfg=tail_cfg,
                 )
 
         return {"point": y_hat.detach().cpu().numpy().reshape(-1)}
@@ -500,6 +934,8 @@ class DMSForecaster:
         *,
         is_IMS: bool,
         is_linear_decay: bool,
+        resolved_policy: str,
+        tail_cfg: Dict[str, Any],
     ):
         q10_blk, q50_blk, q90_blk = _extract_quantile_block(out0)
         Hm = int(q50_blk.size(1))
@@ -509,7 +945,7 @@ class DMSForecaster:
             q50 = q50_blk[:, :int(horizon)]
             q90 = q90_blk[:, :int(horizon)]
         else:
-            if is_IMS:
+            if resolved_policy == "ims":
                 q10, q50, q90 = self._impl_quantile_DMS_to_IMS(
                     x_init=x_raw,
                     horizon=int(horizon),
@@ -517,7 +953,7 @@ class DMSForecaster:
                     device=device,
                     fwd_kwargs=fwd_kwargs,
                 )
-            else:
+            elif resolved_policy == "decay0":
                 q10, q50, q90 = self._impl_quantile_DMS_then_decay_to_zero(
                     x_init=x_raw,
                     horizon=int(horizon),
@@ -525,6 +961,15 @@ class DMSForecaster:
                     device=device,
                     fwd_kwargs=fwd_kwargs,
                     linear=is_linear_decay,
+                )
+            else:  # tail_fit
+                q10, q50, q90 = self._impl_quantile_DMS_then_tail_fit(
+                    x_init=x_raw,
+                    horizon=int(horizon),
+                    model_horizon=Hm,
+                    device=device,
+                    fwd_kwargs=fwd_kwargs,
+                    tail_cfg=tail_cfg,
                 )
 
         return {
@@ -826,6 +1271,180 @@ class DMSForecaster:
     # ---------------------------------------------------------------------
     # Internal Logic: Input Preparation & Guards
     # ---------------------------------------------------------------------
+    # ---------------------------------------------------------------------
+    # Implementation: Tail Fit Extension (recommended for long horizons)
+    # ---------------------------------------------------------------------
+    def _impl_point_DMS_then_tail_fit(
+        self,
+        x_init: torch.Tensor,
+        horizon: int,
+        model_horizon: int,
+        device: torch.device,
+        fwd_kwargs: Dict,
+        *,
+        tail_cfg: Dict[str, Any],
+    ) -> torch.Tensor:
+        """DMS block (Hm) + parametric tail fit for remaining steps."""
+        x_raw = x_init.clone()
+        B, L, C = x_raw.shape
+        Hm = int(model_horizon)
+
+        # --- 1) DMS block (same as decay impl) ---
+        def _call_point(xr, need_h, step_offset):
+            exo = None
+            if self.future_exo_cb is not None:
+                t0 = self.global_t0 + step_offset
+                ex = self.future_exo_cb(t0, need_h).to(xr.device)
+
+                if ex.ndim == 2:
+                    exo = ex.unsqueeze(0).expand(B, -1, -1)
+                elif ex.ndim == 3:
+                    if ex.size(0) == 1 and B > 1:
+                        exo = ex.expand(B, -1, -1)
+                    elif ex.size(0) == B:
+                        exo = ex
+                    else:
+                        raise RuntimeError(f"future_exo batch dim mismatch: got {ex.size(0)}, expected 1 or {B}")
+                else:
+                    raise RuntimeError(f"future_exo must be (H,E) or (B,H,E), got shape={tuple(ex.shape)}")
+
+            out = _safe_forward(self.model, xr, future_exo=exo, fe_cont=exo, **fwd_kwargs)
+            return _normalize_point_to_BH(out, B, H_hint=need_h)
+
+        y_block_raw = _call_point(x_raw, Hm, 0)
+
+        outputs: List[torch.Tensor] = []
+        use_len = min(Hm, horizon)
+
+        for t in range(use_len):
+            if self.ttm:
+                self.ttm.add_context(x_raw)
+            y_step = y_block_raw[:, t]
+            y_adj = self._apply_guards(x_raw, y_step)
+            outputs.append(y_adj.unsqueeze(1))
+            x_raw = self._prepare_next_input(x_raw, y_adj)
+
+        if use_len >= horizon:
+            return torch.cat(outputs, dim=1)
+
+        # --- 2) Tail fit extension ---
+        remain = horizon - use_len
+        y_hist = torch.cat(outputs, dim=1)  # (B, use_len)
+
+        extender = TailExtender(**tail_cfg)
+        y_ext = extender.extend(y_hist, remain=remain)  # (B, remain)
+
+        # Tail 구간은 "구조적 연장"이므로 guard는 보수적으로 적용(기본: 미적용).
+        # 필요 시 TailExtender 내부에서 clip/prior로 안정화.
+        for k in range(remain):
+            yk = y_ext[:, k]
+            outputs.append(yk.unsqueeze(1))
+            x_raw = self._prepare_next_input(x_raw, yk)
+
+        return torch.cat(outputs, dim=1)
+
+    def _impl_quantile_DMS_then_tail_fit(
+        self,
+        x_init: torch.Tensor,
+        horizon: int,
+        model_horizon: int,
+        device: torch.device,
+        fwd_kwargs: Dict,
+        *,
+        tail_cfg: Dict[str, Any],
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Quantile DMS block (Hm) + tail fit on q50, propagate to q10/q90."""
+        x_raw = x_init.clone()
+        B, L, C = x_raw.shape
+        Hm = int(model_horizon)
+
+        def _call_quantile(xr, step_offset):
+            exo = None
+            if self.future_exo_cb is not None:
+                t0 = self.global_t0 + step_offset
+                ex = self.future_exo_cb(t0, Hm).to(xr.device)
+
+                if ex.ndim == 2:
+                    exo = ex.unsqueeze(0).expand(B, -1, -1)
+                elif ex.ndim == 3:
+                    if ex.size(0) == 1 and B > 1:
+                        exo = ex.expand(B, -1, -1)
+                    elif ex.size(0) == B:
+                        exo = ex
+                    else:
+                        raise RuntimeError(f"future_exo batch dim mismatch: got {ex.size(0)}, expected 1 or {B}")
+                else:
+                    raise RuntimeError(f"future_exo must be (H,E) or (B,H,E), got shape={tuple(ex.shape)}")
+
+            out = _safe_forward(self.model, xr, future_exo=exo, fe_cont=exo, **fwd_kwargs)
+            return _extract_quantile_block(out)
+
+        q10_blk, q50_blk, q90_blk = _call_quantile(x_raw, 0)
+
+        q10_seq: List[torch.Tensor] = []
+        q50_seq: List[torch.Tensor] = []
+        q90_seq: List[torch.Tensor] = []
+
+        use_len = min(Hm, horizon)
+        for t in range(use_len):
+            if self.ttm:
+                self.ttm.add_context(x_raw)
+
+            # Guard는 q50 기준으로만 적용하고, q10/q90는 스프레드를 보존
+            q50_step = q50_blk[:, t]
+            q50_adj = self._apply_guards(x_raw, q50_step)
+
+            # spread(비대칭 허용) - 음수 방지
+            d_lo = (q50_step - q10_blk[:, t]).clamp(min=0.0)
+            d_hi = (q90_blk[:, t] - q50_step).clamp(min=0.0)
+
+            q10_adj = (q50_adj - d_lo).clamp(min=0.0)
+            q90_adj = (q50_adj + d_hi).clamp(min=0.0)
+
+            q10_seq.append(q10_adj.unsqueeze(1))
+            q50_seq.append(q50_adj.unsqueeze(1))
+            q90_seq.append(q90_adj.unsqueeze(1))
+
+            x_raw = self._prepare_next_input(x_raw, q50_adj)
+
+        if use_len >= horizon:
+            return torch.cat(q10_seq, dim=1), torch.cat(q50_seq, dim=1), torch.cat(q90_seq, dim=1)
+
+        remain = horizon - use_len
+        q50_hist = torch.cat(q50_seq, dim=1)  # (B, use_len)
+
+        extender = TailExtender(**tail_cfg)
+        q50_ext = extender.extend(q50_hist, remain=remain)  # (B, remain)
+
+        # Tail 구간에서 spread는 마지막 window의 평균 비율로 유지
+        # (보수적: 스프레드는 시간이 갈수록 축소)
+        eps = 1e-8
+        win = min(int(tail_cfg.get("fit_window", 18)), q50_hist.size(1))
+        q50_tail = q50_hist[:, -win:]
+        # last spreads computed from last available DMS quantiles
+        q10_tail = torch.cat(q10_seq, dim=1)[:, -win:]
+        q90_tail = torch.cat(q90_seq, dim=1)[:, -win:]
+        r_lo = ((q50_tail - q10_tail).mean(dim=1) / (q50_tail.mean(dim=1) + eps)).clamp(0.0, 2.0)  # (B,)
+        r_hi = ((q90_tail - q50_tail).mean(dim=1) / (q50_tail.mean(dim=1) + eps)).clamp(0.0, 2.0)  # (B,)
+
+        for k in range(remain):
+            q50k = q50_ext[:, k]
+            # shrink spread as horizon increases (linear to 50%)
+            shrink = 1.0 - 0.5 * (float(k + 1) / float(max(remain, 1)))
+            d_lo = (q50k * r_lo * shrink).clamp(min=0.0)
+            d_hi = (q50k * r_hi * shrink).clamp(min=0.0)
+            q10k = (q50k - d_lo).clamp(min=0.0)
+            q90k = (q50k + d_hi).clamp(min=0.0)
+
+            q10_seq.append(q10k.unsqueeze(1))
+            q50_seq.append(q50k.unsqueeze(1))
+            q90_seq.append(q90k.unsqueeze(1))
+
+            x_raw = self._prepare_next_input(x_raw, q50k)
+
+        return torch.cat(q10_seq, dim=1), torch.cat(q50_seq, dim=1), torch.cat(q90_seq, dim=1)
+
+
     def _prepare_next_input(self, x_raw, y_next_val):
         B, L, C = x_raw.shape
         y_r = y_next_val.reshape(B, 1, 1)
