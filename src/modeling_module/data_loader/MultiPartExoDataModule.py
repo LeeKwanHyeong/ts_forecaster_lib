@@ -233,6 +233,7 @@ class MultiPartExoTrainingDataset(Dataset):
             df: pl.DataFrame,
             lookback: int,
             horizon: int,
+            freq: str = 'weekly',
             *,
             id_col: str = "unique_id",
             date_col: str = "date",
@@ -246,6 +247,7 @@ class MultiPartExoTrainingDataset(Dataset):
         # 윈도우 설정
         self.lookback = int(lookback)
         self.horizon = int(horizon)
+        self.freq = str(freq).lower()
 
         # 컬럼명 설정
         self.id_col = id_col
@@ -367,8 +369,9 @@ class MultiPartExoTrainingDataset(Dataset):
         # 미래 외생 변수 시작 시점 계산
         # Lookback 마지막 시점의 날짜 조회
         last_dt = int(d_all[i + L - 1])
+        next_dt = _add_time(last_dt, 1, self.freq)
         # 인덱서를 통해 '예측 시작 시점(Horizon 첫 번째)'의 정수형 날짜/인덱스 계산
-        start_idx = int(self.date_indexer(last_dt)) + 1
+        start_idx = int(self.date_indexer(next_dt))
 
         # Tensor 변환 (최소한의 연산으로 수행)
         x = torch.from_numpy(x_win).to(torch.float32).unsqueeze(-1)  # [L, 1]
@@ -576,9 +579,10 @@ class MultiPartExoAnchoredInferenceDataset(Dataset):
             # 4) 미래 외생 변수(Future Exo) 처리
             # 마지막 과거 시점을 기준으로 미래 시작 인덱스 계산
             last_hist = int(win_dates[-1])
-            start_idx = int(self.date_indexer(last_hist)) + 1
+            next_dt = _add_time(last_hist, 1, self.freq)
+            # 인덱서를 통해 '예측 시작 시점(Horizon 첫 번째)'의 정수형 날짜/인덱스 계산
+            start_idx = int(self.date_indexer(next_dt))
             self.start_idxs.append(start_idx)
-
 
             fe = np.zeros((self.horizon, 0), dtype=float)
             if self.future_exo_cb is not None:
@@ -730,6 +734,7 @@ class MultiPartExoDataModule:
             self.df,
             self.lookback,
             self.horizon,
+            self.freq,
             id_col=self.id_col,
             date_col=self.date_col,
             qty_col=self.qty_col,

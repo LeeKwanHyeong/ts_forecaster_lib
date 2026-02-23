@@ -3,7 +3,7 @@ import torch.nn as nn
 from typing import Literal, Optional, Callable, List
 from typing import Callable, Union, Sequence
 import numpy as np
-
+from datetime import date
 
 def calendar_sin_cos(t: torch.Tensor, period: float, device = 'cpu') -> torch.Tensor:
     """
@@ -18,13 +18,25 @@ def calendar_sin_cos(t: torch.Tensor, period: float, device = 'cpu') -> torch.Te
         torch.cos(2 * torch.pi * t / period)
     ], dim=-1)
 
-def compose_exo_calendar_cb(date_type: str = "weekly", *, sincos: bool = True) -> Callable:
+
+def yyyyww_to_week_ordinal(yyyyww: int, *, anchor=(1970, 1, 1)) -> int:
     """
-    Returns:
-        cb(start_idx, H, device) ->
-          - start_idx scalar: (H, E)
-          - start_idx batch : (B, H, E)
+    yyyyww(예: 202511)를 ISO week 기준으로 '연속 주차 index'로 변환.
+    anchor=(1970,1,1) 기준으로 몇 주 차이인지 반환.
     """
+    y = int(yyyyww) // 100
+    w = int(yyyyww) % 100
+
+    # ISO week의 월요일 날짜
+    d = date.fromisocalendar(y, w, 1)
+
+    # anchor 날짜(월요일로 맞추는 게 더 깔끔하지만, 일단 주 단위 차이만 쓰면 충분)
+    a = date(*anchor)
+
+    # 주 단위 ordinal
+    return (d - a).days // 7
+
+def compose_exo_calendar_cb_yyyyww(date_type: str = "weekly", *, sincos: bool = True):
     dt = date_type.lower()
     if dt == "monthly":
         periods = [12.0]
@@ -37,28 +49,37 @@ def compose_exo_calendar_cb(date_type: str = "weekly", *, sincos: bool = True) -
     else:
         periods = [52.0]
 
-    def cb(start_idx: Union[int, Sequence[int], np.ndarray], H: int, device: str = "cpu"):
+    def calendar_sin_cos(t, p: float):
+        # t: (B,H) float
+        ang = 2.0 * np.pi * (t / float(p))
+        ang = torch.as_tensor(ang, device=t.device, dtype=t.dtype)
+        return torch.stack([torch.sin(ang), torch.cos(ang)], dim=-1)  # (B,H,2)
+
+    def cb(start_idx, H: int, device: str = "cpu"):
         H = int(H)
         dev = torch.device(device)
 
         is_scalar = isinstance(start_idx, (int, np.integer))
         if is_scalar:
-            s = torch.tensor([int(start_idx)], device=dev, dtype=torch.float32)  # (1,)
+            s_raw = np.array([int(start_idx)], dtype=np.int64)
         else:
-            s = torch.as_tensor(np.asarray(start_idx, dtype=np.int64).reshape(-1), device=dev).to(torch.float32)  # (B,)
+            s_raw = np.asarray(start_idx, dtype=np.int64).reshape(-1)
 
-        offs = torch.arange(0, H, device=dev, dtype=torch.float32)  # (H,)
-        t = s[:, None] + offs[None, :]                               # (B, H)
+        s_ord = np.array([yyyyww_to_week_ordinal(v) for v in s_raw], dtype=np.int64)
+
+        s = torch.as_tensor(s_ord, device=dev, dtype=torch.float32)  # (B,)
+        offs = torch.arange(0, H, device=dev, dtype=torch.float32)   # (H,)
+        t = s[:, None] + offs[None, :]                                # (B,H)
 
         feats = []
         if sincos:
             for p in periods:
-                feats.append(calendar_sin_cos(t, p))                 # (B,H,2)
-            exo = torch.cat(feats, dim=-1)                           # (B,H,2*len(periods))
+                feats.append(calendar_sin_cos(t, p))                  # (B,H,2)
+            exo = torch.cat(feats, dim=-1)                            # (B,H,2*len(periods))
         else:
             for p in periods:
-                feats.append(((t % float(p)) / float(p)).unsqueeze(-1))  # (B,H,1)
-            exo = torch.cat(feats, dim=-1)                           # (B,H,len(periods))
+                feats.append(((t % float(p)) / float(p)).unsqueeze(-1))
+            exo = torch.cat(feats, dim=-1)
 
         return exo[0] if is_scalar else exo
 
