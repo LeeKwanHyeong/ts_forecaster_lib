@@ -9,11 +9,15 @@ from modeling_module.training.adapters import DefaultAdapter
 from modeling_module.training.config import TrainingConfig, StageConfig, apply_stage
 from modeling_module.training.engine import CommonTrainer
 from modeling_module.training.model_trainers.amp_policy import amp_type_set
-from modeling_module.training.model_trainers.exo_policy import infer_future_exo_spec_from_loader, infer_exo_dim_from_cb, \
-    infer_past_exo_dim_from_loader
 from modeling_module.training.model_trainers.loss_policy import infer_loss_mode
 from modeling_module.training.model_trainers.spike_policy import maybe_make_spike_loader
-
+from modeling_module.training.model_trainers.exo_policy import (
+    ExoSpec,
+    infer_future_exo_spec_from_loader,
+    infer_past_exo_dim_from_loader_for_exotst,
+    infer_exo_dim_from_cb,
+    wrap_future_exo_cb,
+)
 
 def _ensure_exotst_loss_head(model, train_cfg: TrainingConfig):
     """
@@ -108,86 +112,123 @@ def sdp_math_only():
 
 
 def train_exotst(
-        model,
-        train_loader,
-        val_loader,
-        device,
-        *,
-        stages: list[StageConfig] | None = None,
-        train_cfg: TrainingConfig = None,
-        future_exo_cb: Optional[Callable] = None,
+    model,
+    train_loader,
+    val_loader,
+    device,
+    *,
+    stages=None,
+    train_cfg=None,
+    future_exo_cb: Optional[Callable] = None,
+
+    exo_spec: Optional[ExoSpec] = None,
+
+    lookback: Optional[int] = None,
 ):
     """
-        ExoTST 학습 진입점(Entry Point).
+    ExoTST 학습 진입점.
 
-        핵심 정책(프로젝트 컨벤션 정렬):
-        - 미래 외생변수(E_future): loader(fe_cont) 우선, 없으면 callback으로 추론
-        - 과거 외생변수(E_past): loader(pe_cont)에서만 받는 것을 기본으로 가정
-        - ExoTST는 논문 정렬(현재 구현)상 past+future 둘 다 필요 → 하나라도 없으면 fail-fast
+    정책(= exo_policy 정렬):
+    - 미래 exo: loader(fe_cont) 우선, 없으면 future_exo_cb로 제공
+    - 과거 exo: loader(pe_cont)에서만 받는 것을 기본 가정
+    - ExoTST는 past+future 모두 필요 → 하나라도 없으면 fail-fast
+    """
+    assert train_cfg is not None, "train_cfg는 필수입니다."
 
-        참고 패턴:
-        - PatchTST: head 재구성 + loader가 fe_cont 제공 시 callback disable :contentReference[oaicite:1]{index=1}
-        - PatchMixer/Titan: AMP + Stage loop + CommonTrainer
-        """
-    assert train_cfg is not None, 'train_cfg는 필수입니다.'
-    use_exogenous_mode = getattr(train_cfg, "use_exogenous_mode", True)
-    exo_is_normalized = getattr(train_cfg, "exo_is_normalized", True)
-    # ----------
-    # (1) exo dim inference
-    # ----------
-    horizon = getattr(model, 'horizon', None) or getattr(train_cfg, 'horizon', None)
+    use_exogenous_mode = bool(getattr(train_cfg, "use_exogenous_mode", True))
+    exo_is_normalized = bool(getattr(train_cfg, "exo_is_normalized", True))
 
-    # Future exo: loader vs callback
-    E_future_loader = int(infer_future_exo_spec_from_loader(train_loader)[1])
-    E_future_cb = int(infer_exo_dim_from_cb(future_exo_cb, int(horizon), device = 'cpu'))
-    E_future = E_future_loader if E_future_loader > 0 else E_future_cb
+    # ExoTST는 구조적으로 exo가 필수이므로 OFF면 에러로 고정(권장)
+    if not use_exogenous_mode:
+        raise RuntimeError("[train_exotst] ExoTST는 use_exogenous_mode=True가 필수입니다.")
 
-    # Past exo: loader
-    E_past = int(infer_past_exo_dim_from_loader(train_loader))
+    horizon = int(getattr(model, "horizon", None) or getattr(train_cfg, "horizon", None) or 0)
+    if horizon <= 0:
+        raise RuntimeError("[train_exotst] horizon을 모델 또는 train_cfg에서 얻지 못했습니다.")
 
-    # loader가 미래 exo를 주면 callback은 끄는 것이 안전 (중복/불일치 방지)
-    if E_future_loader > 0 and future_exo_cb is not None:
-        future_exo_cb = None
-        print(f'[train_exotst] loader provides fe_cont(E_future={E_future_loader}), so future_exo_cb disabled.')
+    # lookback(검증 정확도↑): 주입 안되면 train_cfg.lookback을 사용
+    if lookback is None:
+        lookback = int(getattr(train_cfg, "lookback", 0) or 0) or None
 
-    # fail-fast (ExoTST 구현은 past + future 둘다 필요.)
-    if E_past <= 0:
+    # ----------------------------------------------------------
+    # (1) exo dim inference (exo_policy 기준)
+    # ----------------------------------------------------------
+    if exo_spec is not None:
+        # total_train에서 이미 resolve_exogenous()로 결정된 값을 그대로 사용
+        E_future_loader = int(exo_spec.loader_exo_dim) if exo_spec.has_loader_future_exo else 0
+        E_future = int(exo_spec.exo_dim)
+        E_past_cont = int(exo_spec.past_cont_dim)
+        E_past_cat = int(exo_spec.past_cat_dim)
+        # source가 loader면 cb는 반드시 None이 맞음(중복/불일치 방지)
+        future_exo_cb_eff = None if exo_spec.source == "loader" else exo_spec.future_exo_cb or future_exo_cb
+    else:
+        # 1) loader에서 future exo dim 추론
+        has_fe, fe_dim = infer_future_exo_spec_from_loader(
+            train_loader, lookback=lookback, horizon=horizon
+        )
+        E_future_loader = int(fe_dim) if has_fe else 0
+
+        # 2) loader에서 past exo dim 추론 (cont/cat)
+        past_cont_dim, past_cat_dim = infer_past_exo_dim_from_loader_for_exotst(
+            train_loader, lookback=lookback, horizon=horizon
+        )
+        E_past_cont = int(past_cont_dim)
+        E_past_cat = int(past_cat_dim)
+
+        # 3) loader가 미래 exo를 주면 callback은 끄는 것이 안전
+        future_exo_cb_eff = future_exo_cb
+        if E_future_loader > 0 and future_exo_cb_eff is not None:
+            future_exo_cb_eff = None
+            print(f"[train_exotst] loader provides fe_cont(E_future={E_future_loader}), so future_exo_cb disabled.")
+
+        # 4) loader가 미래 exo를 안 주면 cb dim 추론
+        if E_future_loader > 0:
+            E_future = E_future_loader
+        else:
+            cb_wrapped = wrap_future_exo_cb(future_exo_cb_eff)
+            E_future_cb = int(infer_exo_dim_from_cb(cb_wrapped, horizon, device="cpu"))
+            E_future = E_future_cb
+
+    # ----------------------------------------------------------
+    # (2) fail-fast (ExoTST 구현은 past+future 둘다 필요)
+    # ----------------------------------------------------------
+    if E_past_cont <= 0:
         raise RuntimeError(
-            "[train_exotst] past_exo_cont(pe_cont) dim == 0 입니다."
+            "[train_exotst] past_exo_cont(pe_cont) dim == 0 입니다. "
             "ExoTST는 과거 외생변수가 필수입니다. DataLoader wiring을 확인하세요."
         )
 
     if E_future <= 0:
         raise RuntimeError(
-            "[train_exotst] future_exo dim == 0 입니다."
-            "ExoTST는 미래 외생변수가 필수입니다."
+            "[train_exotst] future_exo dim == 0 입니다. "
+            "ExoTST는 미래 외생변수가 필수입니다. "
             "DataLoader(fe_cont) 또는 future_exo_cb를 제공하세요."
         )
 
-    # cfg 동기화 (forward의 use_past/use_future gating에 필요)
-    _ensure_exotst_exo_dims(model, E_past, E_future)
+    if E_past_cat > 0:
+        # ExoTST가 cat을 직접 안 쓰면 경고만(또는 여기서 에러로 강제)
+        print(f"[train_exotst][WARN] past_exo_cat dim={E_past_cat} detected. "
+              f"ExoTST가 cat을 직접 지원하지 않으면 pe_cont로 인코딩해서 넣는 것을 권장합니다.")
 
-    # loss_mode에 따른 head 동기화 (PatchTST와 동일 취지)
+    # cfg 동기화 (forward의 use_past/use_future gating에 필요)
+    _ensure_exotst_exo_dims(model, E_past_cont, E_future)
+
+    # loss_mode에 따른 head 동기화
     _ensure_exotst_loss_head(model, train_cfg)
 
-
-
     print(
-        f"[EXO-setup] E_past = {E_past} | E_future={E_future}"
-        f"| future_exo_cb ? {future_exo_cb is not None} | exo_is_normalized = {exo_is_normalized}"
+        f"[EXO-setup] E_past_cont={E_past_cont} | E_future={E_future} | "
+        f"future_exo_cb? {future_exo_cb_eff is not None} | exo_is_normalized={exo_is_normalized}"
     )
 
-    # ---------
-    # (2) AMP 설정 (PatchMixer/Titan과 동일 패턴)
-    # ---------
+    # ----------------------------------------------------------
+    # (3) 이하 AMP / stages / trainer loop는 기존 그대로
+    # ----------------------------------------------------------
     amp_device, amp_enabled, amp_dtype = amp_type_set(train_cfg)
     autocast_input = dict(device_type=amp_device, enabled=amp_enabled, dtype=amp_dtype)
 
-    # ---------
-    # (3) stages 구성
-    # ---------
     if not stages or len(stages) == 0:
-        stages = [StageConfig(epochs = train_cfg.epochs, spike_enabled = train_cfg.spike_loss.enabled)]
+        stages = [StageConfig(epochs=train_cfg.epochs, spike_enabled=train_cfg.spike_loss.enabled)]
 
     adapter = DefaultAdapter()
     best = None
@@ -206,7 +247,7 @@ def train_exotst(
         trainer = CommonTrainer(
             cfg=cfg_i,
             adapter=adapter,
-            future_exo_cb=future_exo_cb,
+            future_exo_cb=future_exo_cb_eff,
             logger=print,
             metrics_fn=None,
             autocast_input=autocast_input,
@@ -214,6 +255,7 @@ def train_exotst(
             use_exogenous_mode=use_exogenous_mode,
             device=device,
         )
+
         with sdp_math_only():
             model = trainer.fit(model, tl_i, val_loader, tta_steps=0)
         best = {"model": model, "cfg": cfg_i}

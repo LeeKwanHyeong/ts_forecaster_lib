@@ -42,12 +42,12 @@ class PatchBackboneBase(nn.Module):
 
         # B. Past Continuous Exo Dimension 설정
         # 과거 연속형 외생 변수 차원 계산
-        self.d_past_cont = getattr(cfg, 'd_past_cont', 0)
+        self.d_past_cont = getattr(cfg, 'past_exo_cont_dim', 0)
         self.cont_input_dim = self.patch_len * self.d_past_cont
 
         # C. Past Categorical Exo Dimension 설정
         # 과거 범주형 외생 변수 처리 및 임베딩 차원 계산
-        self.d_past_cat = getattr(cfg, 'd_past_cat', 0)
+        self.d_past_cat = getattr(cfg, 'past_exo_cat_dim', 0)
         self.cat_cardinalities = getattr(cfg, 'cat_cardinalities', [])
         self.d_cat_emb = getattr(cfg, 'd_cat_emb', 8)
 

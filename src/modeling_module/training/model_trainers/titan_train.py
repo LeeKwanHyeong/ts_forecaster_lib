@@ -1,12 +1,9 @@
 from __future__ import annotations
 
-import json
-from dataclasses import asdict, is_dataclass
 from typing import Optional
 
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, WeightedRandomSampler
 
 from modeling_module.training.adapters import TitanAdapter, DefaultAdapter
 from modeling_module.training.config import TrainingConfig, StageConfig, apply_stage
@@ -14,7 +11,6 @@ from modeling_module.training.engine import CommonTrainer
 from modeling_module.training.model_trainers.amp_policy import amp_type_set
 from modeling_module.training.model_trainers.exo_policy import infer_exo_dim_from_cb
 from modeling_module.training.model_trainers.spike_policy import maybe_make_spike_loader
-from modeling_module.utils.exogenous_utils import calendar_sin_cos
 
 
 def _ensure_titan_exo_head(model, exo_dim: int):
@@ -32,7 +28,7 @@ def _ensure_titan_exo_head(model, exo_dim: int):
 
     # model-level meta
     if hasattr(model, "exo_dim"):
-        model.exo_dim = int(exo_dim)
+        model.future_exo_dim = int(exo_dim)
     if hasattr(model, "use_exogenous_mode"):
         model.use_exogenous_mode = True
 

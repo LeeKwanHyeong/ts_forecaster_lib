@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Optional, List
+from dataclasses import dataclass
+from typing import Optional
 
 
 @dataclass
@@ -12,15 +12,15 @@ class TitanConfig:
     lookback: int = 52
     horizon: int = 27
 
+    # future exogenous
+    future_exo_dim: int = 0  # future exo dim (B, H, E_f)
+
     # past exogenous
-    past_exo_cont_dim: int = 0
-    past_exo_cat_dims: Optional[List[int]] = None
-    past_exo_cat_embed_dims: Optional[List[int]] = None
+    past_exo_cont_dim: int = 0  # 연속형 과거 외생 변수 차원 (B, L, E_p_cont)
+    past_exo_cat_dim: int = 0   # (단일) categorical vocab size (cardinality). 0이면 미사용
+    past_exo_cat_embed_dim: Optional[int] = None  # (단일) cat embedding dim. None이면 자동 결정
 
     final_clamp_nonneg: bool = False
-
-    # future exogenous
-    exo_dim: int = 0  # future exo dim
 
     # -------------------------
     # Model dims
@@ -60,4 +60,3 @@ class TitanConfig:
     # -------------------------
     clamp_min: Optional[float] = 0.0
     clamp_max: Optional[float] = None
-

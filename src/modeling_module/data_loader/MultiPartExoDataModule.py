@@ -433,6 +433,8 @@ class MultiPartExoAnchoredInferenceDataset(Dataset):
         self.date_indexer = date_indexer or identity_date_indexer
         self.cat_indexers = cat_indexers or {}
 
+        self.start_idxs = []
+
         # 최종 데이터 저장 리스트 초기화
         self.inputs, self.ids = [], []
         self.past_exo_conts, self.past_exo_cats = [], []
@@ -575,6 +577,8 @@ class MultiPartExoAnchoredInferenceDataset(Dataset):
             # 마지막 과거 시점을 기준으로 미래 시작 인덱스 계산
             last_hist = int(win_dates[-1])
             start_idx = int(self.date_indexer(last_hist)) + 1
+            self.start_idxs.append(start_idx)
+
 
             fe = np.zeros((self.horizon, 0), dtype=float)
             if self.future_exo_cb is not None:
@@ -594,20 +598,19 @@ class MultiPartExoAnchoredInferenceDataset(Dataset):
         return len(self.inputs)
 
     def __getitem__(self, idx):
-        """
-        인덱스에 해당하는 추론 샘플 반환 및 텐서 변환.
-        Returns:
-            x: [Lookback, 1]
-            id: 식별자 문자열
-            feC: [Horizon, Future_Exo_Dim]
-            peC: [Lookback, Past_Exo_Cont_Dim]
-            peK: [Lookback, Past_Exo_Cat_Dim]
-        """
-        x = torch.tensor(self.inputs[idx], dtype=torch.float32).unsqueeze(-1)
-        peC = torch.tensor(self.past_exo_conts[idx], dtype=torch.float32)
-        peK = torch.tensor(self.past_exo_cats[idx], dtype=torch.long)
-        feC = torch.tensor(self.future_exo_conts[idx], dtype=torch.float32)
-        return x, self.ids[idx], feC, peC, peK
+        x = torch.tensor(self.inputs[idx], dtype=torch.float32).unsqueeze(-1)  # [L,1]
+        peC = torch.tensor(self.past_exo_conts[idx], dtype=torch.float32)  # [L,E_cont]
+        peK = torch.tensor(self.past_exo_cats[idx], dtype=torch.long)  # [L,E_cat]
+
+        # y dummy: inference에서는 의미 없음 (shape만 horizon 맞추기)
+        y_dummy = torch.zeros((self.horizon,), dtype=torch.float32)  # [H]
+
+        # start_idx를 dataset에서 이미 계산해뒀으니 같이 저장해두는 게 정석
+        # 현재 __init__에서 start_idx를 계산만 하고 리스트에 저장하지 않음 → 아래처럼 self.start_idxs를 만들어 저장 필요
+        start_idx = int(self.start_idxs[idx])
+
+        uid = self.ids[idx]
+        return x, y_dummy, uid, start_idx, peC, peK
 
 
 # ============================================================
@@ -931,9 +934,13 @@ class MultiPartExoDataModule:
             date_indexer=self.date_indexer,
             cat_indexers=self.cat_indexers,
         )
-        # 추론용이므로 셔플 없음
-        return DataLoader(ds, batch_size=self.batch_size, shuffle=False)
 
+        collate_fn = _build_train_collate_fn(
+            horizon=self.horizon,
+            future_exo_cb=self.future_exo_cb,
+            cache_size=15000,
+        )
+        return DataLoader(ds, batch_size=self.batch_size, shuffle=False, collate_fn=collate_fn)
 
 from dataclasses import dataclass, field
 from typing import Optional, Callable, Dict, List, Tuple

@@ -41,7 +41,7 @@ class PatchTSTModel(nn.Module):
         self.lookback = int(getattr(cfg, 'lookback', 52))
         self.horizon = int(getattr(cfg, 'horizon', 27))
         self.d_model = int(getattr(cfg, 'd_model', 128))
-        self.d_future = int(getattr(cfg, 'd_future', 0))
+        self.d_future = int(getattr(cfg, 'future_exo_dim', 0))
         self.act = getattr(cfg, 'act', 'gelu')
         self.patch_len = int(getattr(cfg, 'patch_len', 8))
         self.stride = int(getattr(cfg, 'stride', self.patch_len // 2))
@@ -181,7 +181,7 @@ class PatchTSTQuantileModel(nn.Module):
         self.head = QuantileHeadWithExo(
             d_model=cfg.d_model,
             horizon=cfg.horizon,
-            d_future=getattr(cfg, "d_future", 0),
+            d_future=getattr(cfg, "future_exo_dim", 0),
             quantiles=getattr(cfg, "quantiles", (0.1, 0.5, 0.9)),
             hidden=getattr(cfg, "q_hidden", 128),
             monotonic=getattr(cfg, "monotonic_quantiles", True),

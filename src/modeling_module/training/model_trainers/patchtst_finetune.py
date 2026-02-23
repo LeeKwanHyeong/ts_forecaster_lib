@@ -408,6 +408,24 @@ def train_patchtst_finetune(
         # SSL patch_embed -> Supervised input_proj 매핑
         state = _map_patch_embed_to_input_proj(state)
 
+        w = state.get("backbone.patch_embed.weight")
+        b = state.get("backbone.patch_embed.bias")
+
+        tgt_w = model_state.get("backbone.input_proj.weight")
+        tgt_b = model_state.get("backbone.input_proj.bias")
+
+        if (w is not None) and (tgt_w is not None):
+            if w.shape == tgt_w.shape:
+                state["backbone.input_proj.weight"] = w
+            else:
+                new_w = tgt_w.clone()
+                cols = min(w.shape[1], new_w.shape[1])
+                new_w[:, :cols] = w[:, :cols]
+                state["backbone.input_proj.weight"] = new_w
+
+        if (b is not None) and (tgt_b is not None) and (b.shape == tgt_b.shape):
+            state["backbone.input_proj.bias"] = b
+
         # 로드 가능한 키 선별 및 위치 인코딩 보정
         filtered = _select_loadable_keys(state, model_state)
         filtered = _maybe_add_sinusoidal_pos_enc(filtered, model_state)

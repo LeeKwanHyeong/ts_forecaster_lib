@@ -130,7 +130,7 @@ class TrainingConfig:
     val_use_weights: bool = False  # 검증 시 학습 가중치(Intermittent 등) 적용 여부 (공정 평가 위해 보통 False)
 
     # ------------Exogenous Value (외생 변수) --------------
-    exo_dim = 2  # 미래 외생 변수 차원
+    future_exo_dim = 2  # 미래 외생 변수 차원
     nonneg_head = False  # 출력단의 비음수(Non-negative) 제약 강제 여부 (Softplus)
     use_exogenous_mode: bool = True  # 외생 변수 모드 사용 여부 마스터 스위치
     exo_is_normalized: bool = True

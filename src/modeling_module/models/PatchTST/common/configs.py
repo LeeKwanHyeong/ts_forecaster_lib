@@ -74,13 +74,13 @@ class PatchTSTConfig(TrainingConfig):
     padding_patch: Optional[str] = None  # 패딩 전략 ('end': 마지막 패치 보존을 위한 패딩 추가)
 
     # ---------- 과거 외생 변수 (Past Exogenous) ----------
-    d_past_cont: int = 0  # 과거 연속형 외생 변수 개수
-    d_past_cat: int = 0  # 과거 범주형 외생 변수 개수
+    past_exo_cont_dim: int = 0  # 과거 연속형 외생 변수 개수
+    past_exo_cat_dim: int = 0  # 과거 범주형 외생 변수 개수
     cat_cardinalities: List[int] = field(default_factory=list)  # 범주형 변수별 카디널리티(고유값 수)
     d_cat_emb: int = 0  # 범주형 변수 임베딩 차원
 
     # ---------- 미래 외생 변수 (Future Exogenous) ----------
-    d_future: int = 0  # 미래 연속형 외생 변수 개수 (예측 헤드에 주입)
+    future_exo_dim: int = 0  # 미래 연속형 외생 변수 개수 (예측 헤드에 주입)
 
     # ---------- 인코더(백본) 구조 설정 ----------
     n_layers: int = 3  # 인코더 블록(Layer) 개수

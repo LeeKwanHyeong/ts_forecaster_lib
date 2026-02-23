@@ -35,9 +35,6 @@ class PatchMixerConfig(TrainingConfig):
     expander_n_harmonics: int = 8  # 사용할 고조파(Harmonics) 개수
     expander_max_harmonics: int = 16  # 최대 고조파 개수 (호환성 유지용)
 
-    # ---------- 미래 외생 변수 (Future Exogenous) ----------
-    exo_dim: int = 0  # 미래 외생 변수 차원 (0일 경우 미사용)
-    exo_is_normalized_default: bool = False  # 외생 변수 정규화 여부 기본값
 
     # ---------- 파트(Part) 임베딩 ----------
     use_part_embedding: bool = False  # 파트(ID) 임베딩 사용 여부
@@ -65,6 +62,10 @@ class PatchMixerConfig(TrainingConfig):
 
     # 시계열 분해(Decomposition) 설정 (RevIN 등에서 참조 가능)
     decomp: DecompositionConfig = field(default_factory=DecompositionConfig)
+
+    # ---------- 미래 외생 변수 (Future Exogenous) ----------
+    future_exo_dim: int = 0  # 미래 외생 변수 차원 (0일 경우 미사용)
+    exo_is_normalized_default: bool = False  # 외생 변수 정규화 여부 기본값
 
     # ---------- 과거 외생 변수 (Past Exogenous) ----------
     # 주의: 체크포인트 저장/로드 시 누락 방지를 위해 타입 어노테이션 필수

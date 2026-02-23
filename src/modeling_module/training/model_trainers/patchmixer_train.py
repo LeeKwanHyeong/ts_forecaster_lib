@@ -46,7 +46,7 @@ def _ensure_patchmixer_exo_head(model, exo_dim: int):
         nn.GELU(),
         nn.Linear(64, 1),
     )
-    model.exo_dim = int(exo_dim)
+    model.future_exo_dim = int(exo_dim)
     print(f"[train_patchmixer] exo_head rebuilt with exo_dim={exo_dim}")
     return model
 

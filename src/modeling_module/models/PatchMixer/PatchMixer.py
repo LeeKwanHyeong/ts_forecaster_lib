@@ -89,14 +89,14 @@ class _ExoMixin(nn.Module):
         외생 변수 처리를 위한 모듈 및 차원 초기화.
         """
         # 1. 미래 외생 변수 (Future Exo) 설정
-        self.exo_dim = int(getattr(cfg, "exo_dim", 0) or 0)
+        self.future_exo_dim = int(getattr(cfg, "future_exo_dim", 0) or 0)
         self.exo_is_normalized_default = bool(getattr(cfg, "exo_is_normalized_default", False))
         self.exo_head: Optional[nn.Module] = None
 
         # 미래 외생 변수가 존재할 경우, 이를 예측값 보정에 사용할 헤드 생성 (MLP)
-        if self.exo_dim > 0:
+        if self.future_exo_dim > 0:
             self.exo_head = nn.Sequential(
-                nn.Linear(self.exo_dim, 64),
+                nn.Linear(self.future_exo_dim, 64),
                 nn.GELU(),
                 nn.Linear(64, 1),
             )
@@ -210,11 +210,11 @@ class _ExoMixin(nn.Module):
         반환:
             (보정된 y, 계산된 Shift값)
         """
-        if future_exo is None or self.exo_head is None or self.exo_dim <= 0:
+        if future_exo is None or self.exo_head is None or self.future_exo_dim <= 0:
             return y, None
 
         # 차원 조정
-        fe = _pad_or_slice_last_dim(future_exo.float(), self.exo_dim, pad_value=0.0)
+        fe = _pad_or_slice_last_dim(future_exo.float(), self.future_exo_dim, pad_value=0.0)
 
         # 보정값(Shift) 계산
         # apply_exo_shift_linear 함수가 외부에 정의되어 있다고 가정
@@ -515,8 +515,8 @@ class PatchMixerQuantileModel(_ExoMixin):
 
         # 6) future exo shift (out-space add)
         #   - apply_exo_shift_linear_trainable를 사용 (grad flow OK)
-        if (future_exo is not None) and (self.exo_head is not None) and (self.exo_dim > 0):
-            fe = _pad_or_slice_last_dim(future_exo.float(), self.exo_dim, pad_value=0.0)
+        if (future_exo is not None) and (self.exo_head is not None) and (self.future_exo_dim > 0):
+            fe = _pad_or_slice_last_dim(future_exo.float(), self.future_exo_dim, pad_value=0.0)
             ex = apply_exo_shift_linear_trainable(
                 self.exo_head,
                 fe,
@@ -769,8 +769,8 @@ class PatchMixerModel(_ExoMixin):
                 y_raw = y
 
             # future exo shift (out-space add)
-            if (future_exo is not None) and (self.exo_head is not None) and (self.exo_dim > 0):
-                fe = _pad_or_slice_last_dim(future_exo.float(), self.exo_dim, pad_value=0.0)
+            if (future_exo is not None) and (self.exo_head is not None) and (self.future_exo_dim > 0):
+                fe = _pad_or_slice_last_dim(future_exo.float(), self.future_exo_dim, pad_value=0.0)
                 ex = apply_exo_shift_linear_trainable(
                     self.exo_head,
                     fe,
@@ -797,8 +797,8 @@ class PatchMixerModel(_ExoMixin):
         if self.use_revin:
             loc = self.revin_layer(loc, "denorm")  # (B,H,1)
 
-        if (future_exo is not None) and (self.exo_head is not None) and (self.exo_dim > 0):
-            fe = _pad_or_slice_last_dim(future_exo.float(), self.exo_dim, pad_value=0.0)
+        if (future_exo is not None) and (self.exo_head is not None) and (self.future_exo_dim > 0):
+            fe = _pad_or_slice_last_dim(future_exo.float(), self.future_exo_dim, pad_value=0.0)
             ex = apply_exo_shift_linear(
                 self.exo_head, fe, horizon=self.horizon,
                 out_dtype=loc.dtype, out_device=loc.device,

@@ -1,15 +1,11 @@
 # modeling_module/training/model_trainers/patchtst_train.py
 from __future__ import annotations
 
-import json
-from dataclasses import asdict, is_dataclass
 from typing import Optional, Callable
 
-import torch
-import torch.nn as nn
+# PatchTST 내부 head 재구성에 필요
+from modeling_module.models.PatchTST.common.patching import compute_patch_num
 from modeling_module.models.PatchTST.supervised.PatchTST import PointHeadWithExo, QuantileHeadWithExo, DistHeadWithExo
-from torch.utils.data import DataLoader, WeightedRandomSampler
-
 from modeling_module.training.adapters import DefaultAdapter
 from modeling_module.training.config import TrainingConfig, StageConfig, apply_stage
 from modeling_module.training.engine import CommonTrainer
@@ -17,25 +13,6 @@ from modeling_module.training.model_trainers.amp_policy import amp_type_set
 from modeling_module.training.model_trainers.exo_policy import infer_future_exo_spec_from_loader, infer_exo_dim_from_cb
 from modeling_module.training.model_trainers.loss_policy import infer_loss_mode
 from modeling_module.training.model_trainers.spike_policy import maybe_make_spike_loader
-from modeling_module.utils.exogenous_utils import calendar_sin_cos
-
-# PatchTST 내부 head 재구성에 필요
-from modeling_module.models.PatchTST.common.patching import compute_patch_num
-
-
-def _pick_future_exo_cb(model, user_cb: Optional[Callable]) -> Optional[Callable]:
-    """
-    사용할 미래 외생 변수 생성 콜백 결정.
-    우선순위: 사용자 지정 콜백 > 모델 설정(d_future > 0) 시 캘린더 콜백 > None.
-    """
-    # 사용자 콜백이 우선
-    if user_cb is not None:
-        return user_cb
-
-    # 모델 cfg에 d_future가 0보다 크면 캘린더 기본 주입 (필요 시 프로젝트 정책에 맞게 조정)
-    cfg = getattr(model, "cfg", None) or getattr(model, "config", None)
-    d_future = int(getattr(cfg, "d_future", 0)) if cfg is not None else 0
-    return calendar_sin_cos if d_future > 0 else None
 
 
 def _ensure_patchtst_future_head(model, exo_dim: int, *, loss_mode: str = "point"):
@@ -116,6 +93,7 @@ def train_patchtst(
         if horizon is None:
             raise ValueError('horizon을 model 또는 train_cfg에서 찾을 수 없습니다.')
 
+
     E_loader = infer_future_exo_spec_from_loader(train_loader)[1]
     E_cb = infer_exo_dim_from_cb(future_exo_cb, horizon, device="cpu")
 
@@ -124,14 +102,38 @@ def train_patchtst(
 
     loss_mode = infer_loss_mode(train_cfg)
     print(f'[train_patchtst] loss_mode: {loss_mode}')
-    if use_exogenous_mode:
-        print(f'[train_patchtst] exogenous_mode: {use_exogenous_mode}')
-        model = _ensure_patchtst_future_head(model, E, loss_mode = loss_mode)
 
-    # loader가 fe_cont를 주는 경우, 자동 CB는 끄는 쪽이 안전 (중복/불일치 방지)
-    if E_loader > 0 and future_exo_cb is not None:
+
+    if not use_exogenous_mode:
+        if future_exo_cb is not None:
+            print("[train_patchtst][WARN] use_exogenous_mode=False so future_exo_cb is force-disabled.")
         future_exo_cb = None
-        print(f"[train_patchtst] loader provides fe_cont(E={E_loader}), so future_exo_cb disabled.")
+        E_loader, E_cb, E = 0, 0, 0
+
+        model = _ensure_patchtst_future_head(model, 0, loss_mode=loss_mode)
+    else:
+        horizon = getattr(model, "horizon", None) or getattr(train_cfg, "horizon", None)
+        if future_exo_cb is not None and horizon is None:
+            raise ValueError("horizon을 model 또는 train_cfg에서 찾을 수 없습니다.")
+
+        E_loader = infer_future_exo_spec_from_loader(train_loader)[1]
+        E_cb = infer_exo_dim_from_cb(future_exo_cb, horizon, device="cpu")
+        E = int(E_loader) if int(E_loader) > 0 else int(E_cb)
+
+        model = _ensure_patchtst_future_head(model, E, loss_mode=loss_mode)
+
+        # loader가 fe_cont를 주면 callback 끄기(중복 방지)
+        if int(E_loader) > 0 and future_exo_cb is not None:
+            future_exo_cb = None
+            print(f"[train_patchtst] loader provides fe_cont(E={E_loader}), so future_exo_cb disabled.")
+
+    print(
+        f"[EXO-train] inferred E={E} | future_exo_cb? {future_exo_cb is not None} | exo_is_normalized={exo_is_normalized}")
+
+    # # loader가 fe_cont를 주는 경우, 자동 CB는 끄는 쪽이 안전 (중복/불일치 방지)
+    # if E_loader > 0 and future_exo_cb is not None:
+    #     future_exo_cb = None
+    #     print(f"[train_patchtst] loader provides fe_cont(E={E_loader}), so future_exo_cb disabled.")
 
     # 3) AMP 설정 (Titan/PM과 동일 패턴)
     amp_device, amp_enabled, amp_dtype = amp_type_set(train_cfg)
