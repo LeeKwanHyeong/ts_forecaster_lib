@@ -5,6 +5,13 @@ from typing import Optional, Tuple
 
 import torch
 from torch.amp import autocast, GradScaler
+from torch.profiler import profile, record_function, ProfilerActivity
+
+import os
+import time
+import traceback
+from contextlib import contextmanager
+from collections import defaultdict
 
 # -----------------------------------------------------------------------------
 # Device / AMP helpers (robust to str | torch.device)
@@ -56,6 +63,124 @@ def _resolve_autocast_dtype(dtype_like, device_type: str) -> torch.dtype:
 from modeling_module.training.adapters import DefaultAdapter
 from modeling_module.training.model_losses.losses import LossComputer
 
+
+
+# -----------------------------------------------------------------------------
+# Debug stack tracing (code-level) for torch ops
+# - Useful when IDE "View Call Stack" is disabled / not clickable.
+# - Captures Python call sites for common sync-heavy ops: Tensor.to / Tensor.item
+# -----------------------------------------------------------------------------
+def _env_bool(key: str, default: bool = False) -> bool:
+    v = os.getenv(key)
+    if v is None:
+        return default
+    return v.strip().lower() in ("1", "true", "t", "yes", "y", "on")
+
+def _short_stack(*, limit: int = 25, skip: int = 0, keep_keywords=None) -> str:
+    """
+    Return a compact Python stack string.
+    - keep_keywords: if provided, only keep frames whose filename contains any keyword.
+    """
+    st = traceback.extract_stack(limit=limit)
+    st = st[:-1 - skip]  # drop this function frame + optional skip
+    frames = []
+    for fr in reversed(st):
+        fn = fr.filename.replace("\\", "/")
+        if keep_keywords:
+            if not any(k in fn for k in keep_keywords):
+                continue
+        # hide torch internals by default
+        if "/site-packages/torch/" in fn or "/python" in fn and "site-packages" in fn:
+            continue
+        frames.append(f"{fn}:{fr.lineno} in {fr.name} -> {fr.line}".rstrip())
+        if len(frames) >= 12:
+            break
+    return "\n".join(frames) if frames else "(no python frames kept)"
+
+class TorchStackTracer:
+    """
+    Monkeypatch Tensor.to / Tensor.item to print code-level stacks.
+    - Extremely useful to locate accidental CPU<->GPU transfers and scalar sync points.
+    - Enable via env TSF_TRACE_STACK=1 (default off).
+    """
+    def __init__(
+        self,
+        *,
+        enabled: bool,
+        max_prints_per_key: int = 20,
+        stack_limit: int = 30,
+        keep_keywords=None,
+        logger=print,
+    ):
+        self.enabled = bool(enabled)
+        self.max_prints_per_key = int(max_prints_per_key)
+        self.stack_limit = int(stack_limit)
+        self.keep_keywords = keep_keywords or ["DSIODemand", "modeling_module", "engine.py", "PycharmProjects"]
+        self.logger = logger
+
+        self._counts = defaultdict(int)
+        self._orig_to = None
+        self._orig_item = None
+
+    def _should_print(self, key: str) -> bool:
+        self._counts[key] += 1
+        return self._counts[key] <= self.max_prints_per_key
+
+    def __enter__(self):
+        if not self.enabled:
+            return self
+
+        # Guard: patch only once
+        if self._orig_to is None:
+            self._orig_to = torch.Tensor.to
+        if self._orig_item is None:
+            self._orig_item = torch.Tensor.item
+
+        tracer = self
+
+        def _to_patched(t: torch.Tensor, *args, **kwargs):
+            # Print before executing (so failures still show stack)
+            if tracer._should_print("Tensor.to"):
+                dev = kwargs.get("device", None)
+                dtype = kwargs.get("dtype", None)
+                # args can include (device) or (dtype) etc; keep lightweight
+                tracer.logger(
+                    "[TRACE][Tensor.to] "
+                    f"shape={tuple(t.shape)} dtype={t.dtype} device={t.device} -> "
+                    f"args={args} kwargs={{'device':{dev}, 'dtype':{dtype}}}\n"
+                    f"{_short_stack(limit=tracer.stack_limit, keep_keywords=tracer.keep_keywords)}\n"
+                )
+            return tracer._orig_to(t, *args, **kwargs)
+
+        def _item_patched(t: torch.Tensor, *args, **kwargs):
+            if tracer._should_print("Tensor.item"):
+                tracer.logger(
+                    "[TRACE][Tensor.item] "
+                    f"shape={tuple(t.shape)} dtype={t.dtype} device={t.device}\n"
+                    f"{_short_stack(limit=tracer.stack_limit, keep_keywords=tracer.keep_keywords)}\n"
+                )
+            return tracer._orig_item(t, *args, **kwargs)
+
+        torch.Tensor.to = _to_patched
+        torch.Tensor.item = _item_patched
+        self.logger(
+            f"[TRACE] TorchStackTracer enabled "
+            f"(max_prints_per_key={self.max_prints_per_key}, keep_keywords={self.keep_keywords})"
+        )
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if not self.enabled:
+            return False
+        # restore
+        try:
+            if self._orig_to is not None:
+                torch.Tensor.to = self._orig_to
+            if self._orig_item is not None:
+                torch.Tensor.item = self._orig_item
+        finally:
+            self.logger(f"[TRACE] TorchStackTracer disabled. counts={dict(self._counts)}")
+        return False
 
 class CommonTrainer:
     """
@@ -327,22 +452,22 @@ class CommonTrainer:
             self._nan_stat("future_exo", exo)
         return exo
 
-    def _nan_stat(self, name, t):
-        """텐서 내 NaN/Inf 존재 여부 검사 및 로깅."""
-        if not torch.is_tensor(t):
-            return
-        has_nan = torch.isnan(t).any().item()
-        has_inf = torch.isinf(t).any().item()
-        finite_mask = torch.isfinite(t)
-        if finite_mask.any():
-            try:
-                mx = t[finite_mask].abs().max().item()
-            except Exception:
-                mx = t[finite_mask].to(torch.float32).abs().max().item()
-        else:
-            mx = float("inf")
-        if has_nan or has_inf:
-            print(f"[NaN-{name}] has_nan={has_nan} has_inf={has_inf} max|x|={mx}")
+    # def _nan_stat(self, name, t):
+    #     """텐서 내 NaN/Inf 존재 여부 검사 및 로깅."""
+    #     if not torch.is_tensor(t):
+    #         return
+    #     has_nan = torch.isnan(t).any().item()
+    #     has_inf = torch.isinf(t).any().item()
+    #     finite_mask = torch.isfinite(t)
+    #     if finite_mask.any():
+    #         try:
+    #             mx = t[finite_mask].abs().max().item()
+    #         except Exception:
+    #             mx = t[finite_mask].to(torch.float32).abs().max().item()
+    #     else:
+    #         mx = float("inf")
+    #     if has_nan or has_inf:
+    #         print(f"[NaN-{name}] has_nan={has_nan} has_inf={has_inf} max|x|={mx}")
 
     def _unpack_batch(self, batch) -> Tuple[
         torch.Tensor, torch.Tensor, Optional[list], Optional[torch.Tensor], Optional[torch.Tensor], Optional[
@@ -401,6 +526,10 @@ class CommonTrainer:
                 mode=mode,
             )
 
+
+
+
+
     # ----------------- 에폭 루프 -----------------
     def _run_epoch(self, model, loader, *, train: bool):
         """
@@ -411,94 +540,277 @@ class CommonTrainer:
         - 외생 변수 처리.
         - AMP(Mixed Precision) 기반 순전파 및 손실 계산.
         - 역전파 및 가중치 업데이트 (Train 모드 시).
+        - (선택) 간이 프로파일(load vs compute) 및 torch.profiler 정밀 프로파일 지원.
+
+        Profiler 사용 방법(예):
+            cfg.profile = True
+            cfg.profile_dir = "tb_prof/patchtst"
+            cfg.profile_warmup = 10
+            cfg.profile_steps = 30
+            # 실행 후:
+            #   tensorboard --logdir tb_prof
         """
         device = self.device
         total = 0.0
+
         # 모델 모드(학습/평가) 전환
         model.train() if train else model.eval()
 
-        with torch.set_grad_enabled(train):
-            for batch in loader:
-                # 1. 배치 데이터 구조 분해 및 텐서 장치 이동
-                x, y, part_ids, fe_cont, pe_cont, pe_cat = self._unpack_batch(batch)
-                x, y = x.to(device), y.to(device)
+        # ----------------------
+        # profiler 옵션 (cfg 기반)
+        # ----------------------
+        def _cfg_get(key, default):
+            if isinstance(self.cfg, dict):
+                return self.cfg.get(key, default)
+            return getattr(self.cfg, key, default)
 
-                # 입력 데이터 수치 안정성(NaN/Inf) 검사
-                self._nan_stat("x(in)", x)
-                self._nan_stat("y(in)", y)
-                if pe_cont is not None: self._nan_stat("past_exo_cont", pe_cont)
-                if pe_cat is not None: self._nan_stat("past_exo_cat", pe_cat)
+        do_prof = bool(_cfg_get("profile", True))
+        prof_steps = int(_cfg_get("profile_steps", 30))
+        prof_warmup = int(_cfg_get("profile_warmup", 10))
+        prof_dir = str(_cfg_get("profile_dir", r"C:\Users\USER\PycharmProjects\ts_forecaster_lib\tb_prof"))
 
-                if train:
-                    self.opt.zero_grad(set_to_none=True)
+        # CUDA synchronize는 CUDA에서만
+        is_cuda = (hasattr(device, "type") and device.type == "cuda") or str(device).lower().startswith("cuda")
+        activities = [ProfilerActivity.CPU, ProfilerActivity.CUDA] if is_cuda else [ProfilerActivity.CPU]
 
-                # 2. 설정에 따른 미래 외생 변수 주입 전략 결정
-                if self.use_exogenous_mode:
-                    future_exo = self._resolve_future_exo(fe_cont, x, y, device=device)
-                else:
-                    future_exo = None
+        def _sync():
+            if is_cuda:
+                torch.cuda.synchronize()
 
-                # 3. AMP(Mixed Precision) 컨텍스트 내 순전파 및 손실 계산
-                _ac_kwargs = {"device_type": self.amp_device, "enabled": self.enabled}
+        # ----------------------
+        # 간이 profile(load vs compute) 준비
+        # ----------------------
+        import time
+        if not hasattr(self, "_prof_simple"):
+            self._prof_simple = {"load": 0.0, "compute": 0.0, "n": 0}
+            self._prof_simple_warmup = int(_cfg_get("simple_profile_warmup", 10))
+            self._prof_simple_steps = int(_cfg_get("simple_profile_steps", 200))
+            self._prof_simple_i = 0
 
-                if self.dtype is not None:
-                    _ac_kwargs["dtype"] = self.dtype
+        def _print_top_ops_with_stack(prof, *, sort_by="cpu_time_total", topk=15, stack_depth=8):
+            """
+            key_averages(group_by_stack_n=...) 로 'op + stack' 기준 집계 테이블 출력
+            """
+            try:
+                tbl = prof.key_averages(group_by_stack_n=stack_depth).table(
+                    sort_by=sort_by,
+                    row_limit=topk
+                )
+                self.logger(f"[Profiler] key_averages(group_by_stack_n={stack_depth}) sort_by={sort_by}")
+                self.logger(tbl)
+            except Exception as e:
+                self.logger(f"[Profiler] key_averages stack table failed: {e}")
 
-                with autocast(**_ac_kwargs):
-                    # 어댑터를 경유한 모델 순전파 실행
-                    pred = self._forward_with_adapter(
-                        model,
-                        x,
-                        future_exo=future_exo,
-                        past_exo_cont=(pe_cont.to(device) if torch.is_tensor(pe_cont) else None),
-                        past_exo_cat=(pe_cat.to(device) if torch.is_tensor(pe_cat) else None),
-                        part_ids=part_ids,
-                        mode=("train" if train else "eval"),
-                    )
-                    self._nan_stat("pred", pred)
+        def _dump_event_stacks(prof, *,
+                               keys=("aten::to", "aten::item", "aten::_local_scalar_dense", "aten::to_copy"),
+                               max_events_per_key=3, max_stack_lines=12):
+            """
+            개별 이벤트에서 stack을 직접 뽑아 프린트 (UI 없이도 '어느 코드라인에서 호출했는지' 확인용)
+            """
+            try:
+                # 이벤트가 많을 수 있으니 cpu_time_total 큰 순으로 정렬 후 필터
+                evs = list(prof.events())
+                evs.sort(key=lambda e: getattr(e, "cpu_time_total", 0), reverse=True)
 
-                    # 손실 함수 계산 (Validation 여부 반영)
-                    loss = self.loss_comp.compute(pred, y, is_val=(not train))
-
-                    # 디버깅: Spike Loss 상세 분석 (초기 배치 한정)
-                    if self._get_spike_enabled():
-                        self._dbg_spike_seen += 1
-                        if self._dbg_spike_seen <= self._dbg_max_print:
-                            self._debug_spike_breakdown(pred, y, is_val=(not train), tag=("train" if train else "eval"))
-
-                    # 추가 손실 함수(Extra Loss) 합산
-                    if self.extra_loss_fn is not None:
-                        loss = loss + self.extra_loss_fn(x, pred, self.cfg)
-
-                    self._nan_stat("loss_raw", loss)
-
-                    # 정규화 손실(Regularization Loss) 합산
-                    reg = self.adapter.reg_loss(model)
-                    if reg is not None:
-                        self._nan_stat("reg", reg)
-                        loss = loss + reg
-
-                # 4. 역전파 및 파라미터 최적화 (학습 모드 시)
-                if train:
-                    loss_t = self._to_tensor(loss, device)
-
-                    # 손실 값 무결성 체크
-                    if torch.isnan(loss_t):
-                        self.logger("[Warn] NaN loss. step skipped.")
+                seen = {k: 0 for k in keys}
+                for e in evs:
+                    k = getattr(e, "key", None)
+                    if k not in seen:
                         continue
+                    if seen[k] >= max_events_per_key:
+                        continue
+
+                    st = getattr(e, "stack", None)
+                    if not st:
+                        continue
+
+                    seen[k] += 1
+                    self.logger(f"\n[STACK-DUMP] op={k} cpu_time_total(us)={getattr(e, 'cpu_time_total', 0)} "
+                                f"cuda_time_total(us)={getattr(e, 'cuda_time_total', 0)}")
+                    # stack은 보통 "file:line - func" 문자열 리스트
+                    for line in st[:max_stack_lines]:
+                        self.logger(f"  {line}")
+
+                self.logger(f"\n[STACK-DUMP] done. counts={seen}")
+            except Exception as e:
+                self.logger(f"[Profiler] event stack dump failed: {e}")
+
+        # NOTE:
+        # - for batch in loader 구조에서는 next(it) 시간 자체를 분리하기 어려움.
+        # - 여기서는 "unpack + H2D(to(device))"를 load로 근사하고,
+        #   "forward~(backward/step)"을 compute로 근사합니다.
+        def _run_one_step(batch):
+            nonlocal total
+
+            t0 = time.perf_counter()
+
+            # 1) 배치 데이터 구조 분해
+            x, y, part_ids, fe_cont, pe_cont, pe_cat = self._unpack_batch(batch)
+            t1 = time.perf_counter()
+
+            # 2) H2D (가능하면 non_blocking 사용; pin_memory=True일 때 효과)
+            if torch.is_tensor(x):
+                x = x.to(device, non_blocking=True)
+            if torch.is_tensor(y):
+                y = y.to(device, non_blocking=True)
+            t2 = time.perf_counter()
+
+            # 입력 데이터 수치 안정성(NaN/Inf) 검사
+            # self._nan_stat("x(in)", x)
+            # self._nan_stat("y(in)", y)
+            # if pe_cont is not None:
+            #     self._nan_stat("past_exo_cont", pe_cont)
+            # if pe_cat is not None:
+            #     self._nan_stat("past_exo_cat", pe_cat)
+
+            if train:
+                self.opt.zero_grad(set_to_none=True)
+
+            # 3) 미래 외생 변수
+            if self.use_exogenous_mode:
+                future_exo = self._resolve_future_exo(fe_cont, x, y, device=device)
+            else:
+                future_exo = None
+
+            # 4) AMP 컨텍스트 내 순전파 및 손실 계산
+            _ac_kwargs = {"device_type": self.amp_device, "enabled": self.enabled}
+            if self.dtype is not None:
+                _ac_kwargs["dtype"] = self.dtype
+
+            with autocast(**_ac_kwargs):
+                pred = self._forward_with_adapter(
+                    model,
+                    x,
+                    future_exo=future_exo,
+                    past_exo_cont=(pe_cont.to(device, non_blocking=True) if torch.is_tensor(pe_cont) else None),
+                    past_exo_cat=(pe_cat.to(device, non_blocking=True) if torch.is_tensor(pe_cat) else None),
+                    part_ids=part_ids,
+                    mode=("train" if train else "eval"),
+                )
+                # self._nan_stat("pred", pred)
+
+                loss = self.loss_comp.compute(pred, y, is_val=(not train))
+
+                # 디버깅: Spike Loss 상세 분석 (초기 배치 한정)
+                if self._get_spike_enabled():
+                    self._dbg_spike_seen += 1
+                    if self._dbg_spike_seen <= self._dbg_max_print:
+                        self._debug_spike_breakdown(
+                            pred, y, is_val=(not train),
+                            tag=("train" if train else "eval")
+                        )
+
+                # 추가 손실 함수(Extra Loss) 합산
+                if self.extra_loss_fn is not None:
+                    loss = loss + self.extra_loss_fn(x, pred, self.cfg)
+
+                # self._nan_stat("loss_raw", loss)
+
+                # 정규화 손실(Regularization Loss) 합산
+                reg = self.adapter.reg_loss(model)
+                if reg is not None:
+                    # self._nan_stat("reg", reg)
+                    loss = loss + reg
+
+            # 5) 역전파 및 최적화 (train only)
+            if train:
+                loss_t = self._to_tensor(loss, device)
+
+                if torch.isnan(loss_t):
+                    self.logger("[Warn] NaN loss. step skipped.")
+                    return
+
+                # detect_anomaly는 매우 느림. 필요 시 cfg로 켜는 것을 권장.
+                if bool(_cfg_get("detect_anomaly", False)):
                     torch.autograd.set_detect_anomaly(True)
-                    # Scaler를 이용한 역전파 (Gradient Scaling)
-                    self.scaler.scale(loss_t).backward()
 
-                    # Gradient Clipping을 위한 Unscale 및 최적화
-                    self.scaler.unscale_(self.opt)
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), self.cfg.max_grad_norm)
-                    self.scaler.step(self.opt)
-                    self.scaler.update()
+                self.scaler.scale(loss_t).backward()
+                self.scaler.unscale_(self.opt)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), self.cfg.max_grad_norm)
+                self.scaler.step(self.opt)
+                self.scaler.update()
 
+            _sync()
+            t3 = time.perf_counter()
+
+            # ---- 간이 프로파일 누적 ----
+            if train:
+                self._prof_simple_i += 1
+                if self._prof_simple_i > self._prof_simple_warmup and self._prof_simple["n"] < self._prof_simple_steps:
+                    self._prof_simple["load"] += (t2 - t0)       # unpack + H2D
+                    self._prof_simple["compute"] += (t3 - t2)    # forward ~ step
+                    self._prof_simple["n"] += 1
+
+                    if self._prof_simple["n"] == self._prof_simple_steps:
+                        avg_load = self._prof_simple["load"] / self._prof_simple["n"] * 1000
+                        avg_comp = self._prof_simple["compute"] / self._prof_simple["n"] * 1000
+                        ratio = self._prof_simple["load"] / (self._prof_simple["load"] + self._prof_simple["compute"]) * 100
+                        self.logger(f"[SIMPLE-PROFILE] avg load   = {avg_load:.2f} ms/step")
+                        self.logger(f"[SIMPLE-PROFILE] avg compute = {avg_comp:.2f} ms/step")
+                        self.logger(f"[SIMPLE-PROFILE] load ratio  = {ratio:.1f}%")
+
+            # loss 누적
+            if torch.is_tensor(loss):
                 total += float(loss.detach())
+            else:
+                total += float(loss)
 
-        # 평균 손실 값 반환
+        # ----------------------
+        # 루프 실행 (profiler on/off)
+        # ----------------------
+        import os
+        tb_logdir = r"C:\Users\USER\PycharmProjects\ts_forecaster_lib\src\model_test\tb_prof"
+        profile_dir = os.path.join(tb_logdir, "plugins", "profile")
+        os.makedirs(profile_dir, exist_ok=True)
+        with torch.set_grad_enabled(train):
+            if train and do_prof:
+                # warmup + measure만 수행 (trace 파일 크기 제한)
+                max_steps = prof_warmup + prof_steps
+                with profile(
+                        activities=activities,
+                        record_shapes=True,
+                        profile_memory=True,
+                        with_stack=True,  # 핵심
+                        with_flops=True,
+                        with_modules=True,
+                        on_trace_ready=torch.profiler.tensorboard_trace_handler(profile_dir),
+                ) as prof:
+                    _tracer = TorchStackTracer(enabled=_env_bool('TSF_TRACE_STACK', True), max_prints_per_key=int(os.getenv('TSF_TRACE_MAX', '20')))
+                    _tracer.__enter__()
+                    for i, batch in enumerate(loader):
+                        if i >= max_steps:
+                            break
+                        if i >= prof_warmup:
+                            with record_function("train_step"):
+                                _run_one_step(batch)
+                        else:
+                            _run_one_step(batch)
+                        prof.step()
+
+                    _tracer.__exit__(None, None, None)
+
+                # --- 기존 summary 출력 대신 아래를 호출 ---
+                _print_top_ops_with_stack(prof, sort_by="cpu_time_total", topk=25, stack_depth=10)
+                _print_top_ops_with_stack(prof, sort_by="cuda_time_total", topk=25, stack_depth=10)
+
+                # 'to/item' 류가 어디서 터지는지 라인 단위로 보고 싶으면 이것도:
+                _dump_event_stacks(prof)
+
+                # 요약 테이블 출력
+                try:
+                    self.logger(prof.key_averages().table(sort_by="cuda_time_total", row_limit=25))
+                    self.logger(prof.key_averages().table(sort_by="cpu_time_total", row_limit=25))
+                except Exception as e:
+                    self.logger(f"[Profiler] summary print failed: {e}")
+
+                # 프로파일 모드에서는 epoch 전체를 다 돌지 않았으므로 len(loader) 대신 실제 step로 평균
+                denom = max(1, max_steps)
+                return total / denom
+
+            # 일반 학습/검증 (전체 epoch)
+            for batch in loader:
+                _run_one_step(batch)
+
         return total / max(1, len(loader))
 
     # ----------------- 학습 진입 -----------------
