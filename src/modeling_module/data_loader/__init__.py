@@ -30,14 +30,14 @@ __all__ = [
 # Type checking imports (IDE friendly)
 # ---------------------------------------
 if TYPE_CHECKING:
-    from .MultiPartDataModule import (
+    from .multi_part_data_module import (
         MultiPartDataModule,
         MultiPartInferenceDataset,
         MultiPartTrainingDataset,
         MultiPartAnchoredInferenceByYYYYWW,
         MultiPartAnchoredInferenceByYYYYMM,
     )
-    from .MultiPartExoDataModule import (
+    from .multi_part_exo_data_module import (
         MultiPartExoDataModule,
         MultiPartExoTrainingDataset,
         MultiPartExoAnchoredInferenceDataset,

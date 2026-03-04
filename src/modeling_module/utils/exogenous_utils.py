@@ -36,7 +36,7 @@ def yyyyww_to_week_ordinal(yyyyww: int, *, anchor=(1970, 1, 1)) -> int:
     # 주 단위 ordinal
     return (d - a).days // 7
 
-def compose_exo_calendar_cb_yyyyww(date_type: str = "weekly", *, sincos: bool = True):
+def compose_exo_calendar_cb(date_type: str = "weekly", *, sincos: bool = True):
     dt = date_type.lower()
     if dt == "monthly":
         periods = [12.0]
