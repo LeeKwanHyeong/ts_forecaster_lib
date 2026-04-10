@@ -1504,7 +1504,7 @@ def run_total_train_monthly(
     loss_quantile: Optional[nn.Module] = None,
     loss: Optional[nn.Module] = None,
     use_ssl_mode: SSLMode = "sl_only",
-    ssl_pretrain_epochs: int = 10,
+    ssl_pretrain_epochs: int = 2,
     ssl_mask_ratio: float = 0.3,
     ssl_loss_type: str = "mse",
     ssl_freeze_encoder_before_ft: bool = False,
