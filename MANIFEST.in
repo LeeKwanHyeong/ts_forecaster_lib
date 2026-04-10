@@ -1,0 +1,12 @@
+include README.md
+include README.package.md
+prune raw_data
+prune src/model_test
+prune tests
+prune .idea
+prune .pytest_cache
+prune build
+prune dist
+global-exclude __pycache__
+global-exclude *.py[cod]
+global-exclude .DS_Store

@@ -209,6 +209,7 @@ dependencies:
   - pybind11-global=3.0.1=pyhc7ab6ef_0
   - pycparser=2.22=pyh29332c3_1
   - pygments=2.19.2=pyhd8ed1ab_0
+  - pytest
   - pyobjc-core=12.1=py312h19bbe71_0
   - pyobjc-framework-cocoa=12.1=py312h1de3e18_0
   - pyparsing=3.3.1=pyhcf101f3_0

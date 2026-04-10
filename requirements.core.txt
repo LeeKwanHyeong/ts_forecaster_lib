@@ -2,8 +2,9 @@ numpy
 pandas
 polars
 pyarrow
-scipy
+PyYAML
 scikit-learn
+scipy
 statsmodels
-pyyaml
+torch
 tqdm

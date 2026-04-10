@@ -1,5 +1,6 @@
-matplotlib
-ipykernel
-jupyterlab
-rich
+-r requirements.core.txt
+build>=1
 loguru
+pytest>=8
+rich
+twine>=5

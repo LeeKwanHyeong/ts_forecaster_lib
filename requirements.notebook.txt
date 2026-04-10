@@ -1,0 +1,4 @@
+-r requirements.core.txt
+ipykernel
+jupyterlab
+matplotlib
