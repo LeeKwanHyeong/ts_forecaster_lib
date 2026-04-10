@@ -1,18 +1,25 @@
 from __future__ import annotations
 
 import os
-from dataclasses import asdict, is_dataclass, replace
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Dict, Optional, Iterable, List, Callable, Any, Literal, Tuple, Union
 
 import torch
 import torch.nn as nn
 
+from modeling_module.models.registry import (
+    expand_training_targets,
+    filter_targets_for_family,
+    ordered_training_families_for_targets,
+    resolve_artifact_model_key,
+)
 from modeling_module.models.PatchMixer.common.configs import PatchMixerConfig
 from modeling_module.models.PatchTST.common.configs import PatchTSTConfig
 from modeling_module.models.PatchTST.self_supervised.PatchTST import PatchTSTPretrainModel
 from modeling_module.models.Titan.common.configs import TitanConfig
 from modeling_module.models.model_builder import (
+    build_titan_base,
     build_titan_lmm,
     build_titan_seq2seq,
     build_patch_mixer_quantile,
@@ -29,6 +36,7 @@ from modeling_module.training.model_losses.loss_module import (
     MQLoss,
     DistributionLoss,
 )
+from modeling_module.utils.checkpoint import save_model as save_checkpoint
 from modeling_module.training.model_trainers.patchmixer_train import train_patchmixer
 from modeling_module.training.model_trainers.patchtst_finetune import train_patchtst_finetune
 from modeling_module.training.model_trainers.patchtst_pretrain import train_patchtst_pretrain
@@ -298,24 +306,48 @@ def _get_part_vocab_size_from_loader(loader) -> int:
         return 0
 
 
-def save_model(model: torch.nn.Module, cfg, path: Union[str, Path]) -> None:
-    """모델 state_dict + config 저장."""
-    path = str(path)
-    state = {"model_state": model.state_dict(), "model_class": model.__class__.__name__}
-    if cfg is not None:
-        if is_dataclass(cfg):
-            state["config"] = asdict(cfg)
-        else:
-            cfg_dict = getattr(cfg, "__dict__", None)
-            state["config"] = dict(cfg_dict) if cfg_dict is not None else cfg
-    torch.save(state, path)
-    print(f"[save_model] ok -> {path}")
+def save_model(
+    model: torch.nn.Module,
+    cfg,
+    path: Union[str, Path],
+    *,
+    extra_meta: Optional[Dict[str, Any]] = None,
+) -> None:
+    """학습기 내부 저장은 utils.checkpoint 포맷을 공식 포맷으로 사용한다."""
+    save_checkpoint(model, cfg, str(path), extra_meta=extra_meta)
 
 
 def _make_ckpt_path(save_dir: Path, freq: str, model_name: str, lookback: int, horizon: int) -> Path:
     save_dir.mkdir(parents=True, exist_ok=True)
     fname = f"{freq}_{model_name}_L{lookback}_H{horizon}.pt"
     return save_dir / fname
+
+
+def _requested_target_set(requested_artifact_keys: Optional[Iterable[str]]) -> Optional[set[str]]:
+    if not requested_artifact_keys:
+        return None
+    return {resolve_artifact_model_key(key) for key in requested_artifact_keys}
+
+
+def _wants_artifact(requested_artifact_keys: Optional[set[str]], artifact_key: str) -> bool:
+    return requested_artifact_keys is None or artifact_key in requested_artifact_keys
+
+
+def _store_result(
+    results: Dict[str, Dict],
+    *,
+    result_name: str,
+    best: Dict[str, Any],
+    model_key: Optional[str] = None,
+    family_key: Optional[str] = None,
+) -> None:
+    record = dict(best)
+    if model_key is not None:
+        record.setdefault("model_key", model_key)
+    if family_key is not None:
+        record.setdefault("family_key", family_key)
+    record.setdefault("display_name", result_name)
+    results[result_name] = record
 
 
 def _build_common_train_configs(
@@ -471,6 +503,7 @@ def _run_exotst(
     past_cont_dim: int,
     past_cat_dim: int,
     save_root: Optional[Path] = None,
+    requested_artifact_keys: Optional[Iterable[str]] = None,
     **kwargs,
 ):
     """
@@ -478,6 +511,10 @@ def _run_exotst(
       - past + future exo 필수.
       - exo_policy에서 past_cont_dim/exo_dim을 확정했으므로 여기서는 '검증'만 수행.
     """
+    requested = _requested_target_set(requested_artifact_keys)
+    if not _wants_artifact(requested, "exotst_base"):
+        return
+
     if not use_exogenous_mode:
         raise RuntimeError("[total_train] ExoTST requires use_exogenous_mode=True (needs past+future exo).")
     if int(exo_dim) <= 0 and future_exo_cb is None:
@@ -528,10 +565,15 @@ def _run_exotst(
 
     if save_root:
         ckpt_path = _make_ckpt_path(save_root, freq, "ExoTSTBase", lookback, horizon)
-        save_model(exotst_model, exotst_cfg, ckpt_path)
+        save_model(
+            exotst_model,
+            exotst_cfg,
+            ckpt_path,
+            extra_meta={"model_key": "exotst_base", "family_key": "exotst"},
+        )
         best["ckpt_path"] = str(ckpt_path)
 
-    results["ExoTST"] = best
+    _store_result(results, result_name="ExoTST", best=best, model_key="exotst_base", family_key="exotst")
 
 
 def _run_patchtst(
@@ -562,6 +604,7 @@ def _run_patchtst(
     ssl_loss_type: str = "mse",
     ssl_freeze_encoder_before_ft: bool = False,
     ssl_pretrained_ckpt_path: Optional[str] = None,
+    requested_artifact_keys: Optional[Iterable[str]] = None,
 ):
     """
     PatchTST 학습 파이프라인.
@@ -569,6 +612,9 @@ def _run_patchtst(
     - SSL pretrain은 y-only로 강제(d_future=0, d_past_cont=0, d_past_cat=0)하여 shape mismatch 방지.
     """
     use_ssl_mode = _validate_ssl_mode(use_ssl_mode)
+    requested = _requested_target_set(requested_artifact_keys)
+    run_base = _wants_artifact(requested, "patchtst_base")
+    run_quantile = _wants_artifact(requested, "patchtst_quantile")
 
     # ------------------------------------------------------------
     # 1) PatchTST common kwargs
@@ -663,100 +709,124 @@ def _run_patchtst(
     loss_point_obj = loss_point if loss_point is not None else point_train_cfg.loss
     mode, out_mul, param_names, dist_name = _infer_mode_and_dist(loss_point_obj)
 
-    pt_train_cfg = PatchTSTConfig(
-        **pt_kwargs,
-        loss=loss_point_obj,
-        loss_mode=mode,
-        out_mul=int(out_mul),
-        param_names=param_names,
-        dist_name=dist_name,
-    )
-
-    pt_base = build_patchTST(pt_train_cfg)
-    name_base = "PatchTST"
-    print(f"{name_base} ({freq.capitalize()})")
-
     # future_exo_cb는 exo ON일 때만 의미 있음
     _fcb = future_exo_cb if use_exogenous_mode else None
     print(f"[PatchTST][EXO] use_exo={use_exogenous_mode} future_exo_dim={pt_kwargs.get('future_exo_dim')} "
           f"past_exo_cont_dim={pt_kwargs.get('past_exo_cont_dim')} future_cb={_fcb is not None} "
           f"past_exo_cat_dim={pt_kwargs.get('past_exo_cat_dim')}")
 
-    if (use_ssl_mode == "full") and (pretrain_ckpt_path is not None):
-        best_pt_base = train_patchtst_finetune(
-            pt_base,
-            train_loader,
-            val_loader,
-            train_cfg=point_train_cfg,
-            stages=list(stages),
-            future_exo_cb=_fcb,
-            pretrain_ckpt_path=pretrain_ckpt_path,
-            load_strict=False,
-            freeze_encoder_before_ft=bool(ssl_freeze_encoder_before_ft),
-            device=device,
-        )
-    else:
-        best_pt_base = train_patchtst(
-            pt_base,
-            train_loader,
-            val_loader,
-            train_cfg=point_train_cfg,
-            stages=list(stages),
-            future_exo_cb=_fcb,
-            device=device,
+    if run_base:
+        pt_train_cfg = PatchTSTConfig(
+            **pt_kwargs,
+            loss=loss_point_obj,
+            loss_mode=mode,
+            out_mul=int(out_mul),
+            param_names=param_names,
+            dist_name=dist_name,
         )
 
-    if save_root:
-        ckpt_path = _make_ckpt_path(save_root, freq, "PatchTST", lookback, horizon)
-        save_model(pt_base, pt_train_cfg, ckpt_path)
-        best_pt_base["ckpt_path"] = str(ckpt_path)
+        pt_base = build_patchTST(pt_train_cfg)
+        name_base = "PatchTST"
+        print(f"{name_base} ({freq.capitalize()})")
+
         if (use_ssl_mode == "full") and (pretrain_ckpt_path is not None):
-            best_pt_base["pretrain_ckpt_path"] = str(pretrain_ckpt_path)
-    results[name_base] = best_pt_base
+            best_pt_base = train_patchtst_finetune(
+                pt_base,
+                train_loader,
+                val_loader,
+                train_cfg=point_train_cfg,
+                stages=list(stages),
+                future_exo_cb=_fcb,
+                pretrain_ckpt_path=pretrain_ckpt_path,
+                load_strict=False,
+                freeze_encoder_before_ft=bool(ssl_freeze_encoder_before_ft),
+                device=device,
+            )
+        else:
+            best_pt_base = train_patchtst(
+                pt_base,
+                train_loader,
+                val_loader,
+                train_cfg=point_train_cfg,
+                stages=list(stages),
+                future_exo_cb=_fcb,
+                device=device,
+            )
+
+        if save_root:
+            ckpt_path = _make_ckpt_path(save_root, freq, "PatchTST", lookback, horizon)
+            save_model(
+                pt_base,
+                pt_train_cfg,
+                ckpt_path,
+                extra_meta={"model_key": "patchtst_base", "family_key": "patchtst"},
+            )
+            best_pt_base["ckpt_path"] = str(ckpt_path)
+            if (use_ssl_mode == "full") and (pretrain_ckpt_path is not None):
+                best_pt_base["pretrain_ckpt_path"] = str(pretrain_ckpt_path)
+        _store_result(
+            results,
+            result_name=name_base,
+            best=best_pt_base,
+            model_key="patchtst_base",
+            family_key="patchtst",
+        )
 
     # ============================================================
     # 5) Supervised - Quantile
     # ============================================================
-    quantiles = (0.1, 0.5, 0.9)
-    loss_q_obj = coerce_quantile_loss(loss_quantile, quantiles=quantiles)
-    quantile_train_cfg = replace(quantile_train_cfg, loss=loss_q_obj)
+    if run_quantile:
+        quantiles = (0.1, 0.5, 0.9)
+        loss_q_obj = coerce_quantile_loss(loss_quantile, quantiles=quantiles)
+        quantile_train_cfg = replace(quantile_train_cfg, loss=loss_q_obj)
 
-    pt_q_cfg = PatchTSTConfig(**pt_kwargs, quantiles=quantiles, loss=loss_q_obj)
-    pt_q = build_patchTST_quantile(pt_q_cfg)
-    print(f"PatchTST Quantile ({freq.capitalize()})")
+        pt_q_cfg = PatchTSTConfig(**pt_kwargs, quantiles=quantiles, loss=loss_q_obj)
+        pt_q = build_patchTST_quantile(pt_q_cfg)
+        print(f"PatchTST Quantile ({freq.capitalize()})")
 
-    if (use_ssl_mode == "full") and (pretrain_ckpt_path is not None):
-        best_pt_q = train_patchtst_finetune(
-            pt_q,
-            train_loader,
-            val_loader,
-            train_cfg=quantile_train_cfg,
-            stages=list(stages),
-            future_exo_cb=_fcb,
-            pretrain_ckpt_path=pretrain_ckpt_path,
-            load_strict=False,  # head mismatch 허용
-            freeze_encoder_before_ft=bool(ssl_freeze_encoder_before_ft),
-            device=device,
-        )
-    else:
-        best_pt_q = train_patchtst(
-            pt_q,
-            train_loader,
-            val_loader,
-            train_cfg=quantile_train_cfg,
-            stages=list(stages),
-            future_exo_cb=_fcb,
-            device=device,
-        )
-
-    if save_root:
-        ckpt_path_q = _make_ckpt_path(save_root, freq, "PatchTSTQuantile", lookback, horizon)
-        save_model(pt_q, pt_q_cfg, ckpt_path_q)
-        best_pt_q["ckpt_path"] = str(ckpt_path_q)
         if (use_ssl_mode == "full") and (pretrain_ckpt_path is not None):
-            best_pt_q["pretrain_ckpt_path"] = str(pretrain_ckpt_path)
+            best_pt_q = train_patchtst_finetune(
+                pt_q,
+                train_loader,
+                val_loader,
+                train_cfg=quantile_train_cfg,
+                stages=list(stages),
+                future_exo_cb=_fcb,
+                pretrain_ckpt_path=pretrain_ckpt_path,
+                load_strict=False,  # head mismatch 허용
+                freeze_encoder_before_ft=bool(ssl_freeze_encoder_before_ft),
+                device=device,
+            )
+        else:
+            best_pt_q = train_patchtst(
+                pt_q,
+                train_loader,
+                val_loader,
+                train_cfg=quantile_train_cfg,
+                stages=list(stages),
+                future_exo_cb=_fcb,
+                device=device,
+            )
 
-    results["PatchTST Quantile"] = best_pt_q
+        if save_root:
+            ckpt_path_q = _make_ckpt_path(save_root, freq, "PatchTSTQuantile", lookback, horizon)
+            save_model(
+                pt_q,
+                pt_q_cfg,
+                ckpt_path_q,
+                extra_meta={"model_key": "patchtst_quantile", "family_key": "patchtst"},
+            )
+            best_pt_q["ckpt_path"] = str(ckpt_path_q)
+            if (use_ssl_mode == "full") and (pretrain_ckpt_path is not None):
+                best_pt_q["pretrain_ckpt_path"] = str(pretrain_ckpt_path)
+
+        _store_result(
+            results,
+            result_name="PatchTST Quantile",
+            best=best_pt_q,
+            model_key="patchtst_quantile",
+            family_key="patchtst",
+        )
 
 
 def _run_titan(
@@ -777,6 +847,7 @@ def _run_titan(
     point_train_cfg,
     stages,
     device: str,
+    requested_artifact_keys: Optional[Iterable[str]] = None,
 ):
     """
     Titan runner (LMM + Seq2Seq)
@@ -786,6 +857,10 @@ def _run_titan(
     loss_point_obj = loss_point if loss_point is not None else point_train_cfg.loss
     mode, out_mul, param_names, _dist_name = _infer_mode_and_dist(loss_point_obj)
     name_suffix = " Dist" if mode == "dist" else ""
+    requested = _requested_target_set(requested_artifact_keys)
+    run_base = _wants_artifact(requested, "titan_base")
+    run_lmm = _wants_artifact(requested, "titan_lmm")
+    run_seq2seq = _wants_artifact(requested, "titan_seq2seq")
     print(f"[_run_titan] mode={mode} out_mul={out_mul} param_names={param_names}")
 
     # -------------------------
@@ -850,68 +925,125 @@ def _run_titan(
         assert ti_config.past_exo_cont_dim == 0
         assert ti_config.past_exo_cat_dim == 0
 
-    # -------------------------
-    # 4) LMM
-    # -------------------------
-    name_lmm = f"Titan LMM{name_suffix}"
-    ckpt_name_lmm = "TitanLMMDist" if mode == "dist" else "TitanLMM"
-    print(f"{name_lmm} ({freq.capitalize()})")
+    if run_base:
+        name_base = f"Titan Base{name_suffix}"
+        ckpt_name_base = "TitanBaseDist" if mode == "dist" else "TitanBase"
+        print(f"{name_base} ({freq.capitalize()})")
 
-    ti_lmm = build_titan_lmm(
-        ti_config,
-        out_mult=(out_mul if mode == "dist" else 1),
-        param_names=param_names
-    )
+        ti_base = build_titan_base(
+            ti_config,
+            out_mult=(out_mul if mode == "dist" else 1),
+            param_names=param_names,
+        )
 
-    best_ti_lmm = train_titan(
-        ti_lmm,
-        train_loader,
-        val_loader,
-        device=device,
-        train_cfg=point_train_cfg,
-        stages=list(stages),
-        future_exo_cb=_fcb,
-    )
+        best_ti_base = train_titan(
+            ti_base,
+            train_loader,
+            val_loader,
+            device=device,
+            train_cfg=point_train_cfg,
+            stages=list(stages),
+            future_exo_cb=_fcb,
+        )
 
-    if save_root:
-        ckpt_path = _make_ckpt_path(save_root, freq, ckpt_name_lmm, lookback, horizon)
-        save_model(ti_lmm, ti_config, ckpt_path)
-        best_ti_lmm["ckpt_path"] = str(ckpt_path)
+        if save_root:
+            ckpt_path = _make_ckpt_path(save_root, freq, ckpt_name_base, lookback, horizon)
+            save_model(
+                ti_base,
+                ti_config,
+                ckpt_path,
+                extra_meta={"model_key": "titan_base", "family_key": "titan"},
+            )
+            best_ti_base["ckpt_path"] = str(ckpt_path)
 
-    results[name_lmm] = best_ti_lmm
+        _store_result(
+            results,
+            result_name=name_base,
+            best=best_ti_base,
+            model_key="titan_base",
+            family_key="titan",
+        )
 
-    # -------------------------
-    # 5) Seq2Seq
-    # -------------------------
-    name_s2s = f"Titan Seq2Seq{name_suffix}"
-    ckpt_name_s2s = "TitanSeq2SeqDist" if mode == "dist" else "TitanSeq2Seq"
-    print(f"{name_s2s} ({freq.capitalize()})")
+    if run_lmm:
+        name_lmm = f"Titan LMM{name_suffix}"
+        ckpt_name_lmm = "TitanLMMDist" if mode == "dist" else "TitanLMM"
+        print(f"{name_lmm} ({freq.capitalize()})")
 
-    ti_s2s = build_titan_seq2seq(
-        ti_config,
-        out_mult=(out_mul if mode == "dist" else 1),
-        param_names=param_names
-    )
+        ti_lmm = build_titan_lmm(
+            ti_config,
+            out_mult=(out_mul if mode == "dist" else 1),
+            param_names=param_names
+        )
 
-    best_ti_s2s = train_titan(
-        ti_s2s,
-        train_loader,
-        val_loader,
-        device=device,
-        train_cfg=point_train_cfg,
-        stages=list(stages),
-        future_exo_cb=_fcb,
-    )
+        best_ti_lmm = train_titan(
+            ti_lmm,
+            train_loader,
+            val_loader,
+            device=device,
+            train_cfg=point_train_cfg,
+            stages=list(stages),
+            future_exo_cb=_fcb,
+        )
 
-    print("[DEBUG] ti_config.past_exo_cont_dim =", ti_config.past_exo_cont_dim)
-    print("[DEBUG] ti_config.future_exo_dim    =", ti_config.future_exo_dim)
+        if save_root:
+            ckpt_path = _make_ckpt_path(save_root, freq, ckpt_name_lmm, lookback, horizon)
+            save_model(
+                ti_lmm,
+                ti_config,
+                ckpt_path,
+                extra_meta={"model_key": "titan_lmm", "family_key": "titan"},
+            )
+            best_ti_lmm["ckpt_path"] = str(ckpt_path)
 
-    if save_root:
-        ckpt_path = _make_ckpt_path(save_root, freq, ckpt_name_s2s, lookback, horizon)
-        save_model(ti_s2s, ti_config, ckpt_path)
-        best_ti_s2s["ckpt_path"] = str(ckpt_path)
+        _store_result(
+            results,
+            result_name=name_lmm,
+            best=best_ti_lmm,
+            model_key="titan_lmm",
+            family_key="titan",
+        )
 
-    results[name_s2s] = best_ti_s2s
+    if run_seq2seq:
+        name_s2s = f"Titan Seq2Seq{name_suffix}"
+        ckpt_name_s2s = "TitanSeq2SeqDist" if mode == "dist" else "TitanSeq2Seq"
+        print(f"{name_s2s} ({freq.capitalize()})")
+
+        ti_s2s = build_titan_seq2seq(
+            ti_config,
+            out_mult=(out_mul if mode == "dist" else 1),
+            param_names=param_names
+        )
+
+        best_ti_s2s = train_titan(
+            ti_s2s,
+            train_loader,
+            val_loader,
+            device=device,
+            train_cfg=point_train_cfg,
+            stages=list(stages),
+            future_exo_cb=_fcb,
+        )
+
+        print("[DEBUG] ti_config.past_exo_cont_dim =", ti_config.past_exo_cont_dim)
+        print("[DEBUG] ti_config.future_exo_dim    =", ti_config.future_exo_dim)
+
+        if save_root:
+            ckpt_path = _make_ckpt_path(save_root, freq, ckpt_name_s2s, lookback, horizon)
+            save_model(
+                ti_s2s,
+                ti_config,
+                ckpt_path,
+                extra_meta={"model_key": "titan_seq2seq", "family_key": "titan"},
+            )
+            best_ti_s2s["ckpt_path"] = str(ckpt_path)
+
+        _store_result(
+            results,
+            result_name=name_s2s,
+            best=best_ti_s2s,
+            model_key="titan_seq2seq",
+            family_key="titan",
+        )
 
 def _run_patchmixer(
     *,
@@ -937,6 +1069,7 @@ def _run_patchmixer(
     quantile_train_cfg: TrainingConfig = None,  # type: ignore[assignment]
     stages: List[StageConfig] = None,  # type: ignore[assignment]
     device: str = "cuda",
+    requested_artifact_keys: Optional[Iterable[str]] = None,
 ):
     """PatchMixer (Base/Dist + Quantile) runner."""
     if stages is None:
@@ -944,6 +1077,9 @@ def _run_patchmixer(
 
     loss_point_obj = loss if loss is not None else (loss_point if loss_point is not None else point_train_cfg.loss)
     mode, out_mul, param_names, dist_name = _infer_mode_and_dist(loss_point_obj)
+    requested = _requested_target_set(requested_artifact_keys)
+    run_base = _wants_artifact(requested, "patchmixer_base")
+    run_quantile = _wants_artifact(requested, "patchmixer_quantile")
 
     quantiles = (0.1, 0.5, 0.9)
     loss_q_obj = coerce_quantile_loss(loss_quantile, quantiles=quantiles)
@@ -1022,47 +1158,69 @@ def _run_patchmixer(
     print(f"[PatchMixer][EXO] use_exo={use_exogenous_mode} future_exo_dim={pm_kwargs.get('future_exo_dim')} "
           f"past_exo_cont_dim={pm_kwargs.get('past_exo_cont_dim')} future_cb={_fcb is not None} "
           f"past_exo_cat_dim={pm_kwargs.get('past_exo_cat_dim')}")
-    # Base/Dist
-    pm_base_cfg = PatchMixerConfig(**pm_kwargs)
-    pm_base_cfg.loss = loss_point_obj
-    pm_base_model = build_patch_mixer(pm_base_cfg)
+    if run_base:
+        pm_base_cfg = PatchMixerConfig(**pm_kwargs)
+        pm_base_cfg.loss = loss_point_obj
+        pm_base_model = build_patch_mixer(pm_base_cfg)
 
-    print(f"PatchMixer ({freq.capitalize()}) mode={mode}")
-    best_pm_base = train_patchmixer(
-        pm_base_model,
-        train_loader,
-        val_loader,
-        device=device,
-        train_cfg=point_train_cfg,
-        stages=list(stages),
-        future_exo_cb=_fcb,
-    )
-    if save_root:
-        ckpt_path = _make_ckpt_path(save_root, freq, "PatchMixer", lookback, horizon)
-        save_model(pm_base_model, pm_base_cfg, ckpt_path)
-        best_pm_base["ckpt_path"] = str(ckpt_path)
-    results["PatchMixer"] = best_pm_base
+        print(f"PatchMixer ({freq.capitalize()}) mode={mode}")
+        best_pm_base = train_patchmixer(
+            pm_base_model,
+            train_loader,
+            val_loader,
+            device=device,
+            train_cfg=point_train_cfg,
+            stages=list(stages),
+            future_exo_cb=_fcb,
+        )
+        if save_root:
+            ckpt_path = _make_ckpt_path(save_root, freq, "PatchMixer", lookback, horizon)
+            save_model(
+                pm_base_model,
+                pm_base_cfg,
+                ckpt_path,
+                extra_meta={"model_key": "patchmixer_base", "family_key": "patchmixer"},
+            )
+            best_pm_base["ckpt_path"] = str(ckpt_path)
+        _store_result(
+            results,
+            result_name="PatchMixer",
+            best=best_pm_base,
+            model_key="patchmixer_base",
+            family_key="patchmixer",
+        )
 
-    # Quantile
-    pm_q_cfg = PatchMixerConfig(**pm_kwargs)
-    pm_q_cfg.loss = loss_q_obj
-    pm_q_model = build_patch_mixer_quantile(pm_q_cfg)
+    if run_quantile:
+        pm_q_cfg = PatchMixerConfig(**pm_kwargs)
+        pm_q_cfg.loss = loss_q_obj
+        pm_q_model = build_patch_mixer_quantile(pm_q_cfg)
 
-    print(f"PatchMixer Quantile ({freq.capitalize()})")
-    best_pm_q = train_patchmixer(
-        pm_q_model,
-        train_loader,
-        val_loader,
-        device=device,
-        train_cfg=quantile_train_cfg,
-        stages=list(stages),
-        future_exo_cb=_fcb,
-    )
-    if save_root:
-        ckpt_path = _make_ckpt_path(save_root, freq, "PatchMixerQuantile", lookback, horizon)
-        save_model(pm_q_model, pm_q_cfg, ckpt_path)
-        best_pm_q["ckpt_path"] = str(ckpt_path)
-    results["PatchMixer Quantile"] = best_pm_q
+        print(f"PatchMixer Quantile ({freq.capitalize()})")
+        best_pm_q = train_patchmixer(
+            pm_q_model,
+            train_loader,
+            val_loader,
+            device=device,
+            train_cfg=quantile_train_cfg,
+            stages=list(stages),
+            future_exo_cb=_fcb,
+        )
+        if save_root:
+            ckpt_path = _make_ckpt_path(save_root, freq, "PatchMixerQuantile", lookback, horizon)
+            save_model(
+                pm_q_model,
+                pm_q_cfg,
+                ckpt_path,
+                extra_meta={"model_key": "patchmixer_quantile", "family_key": "patchmixer"},
+            )
+            best_pm_q["ckpt_path"] = str(ckpt_path)
+        _store_result(
+            results,
+            result_name="PatchMixer Quantile",
+            best=best_pm_q,
+            model_key="patchmixer_quantile",
+            family_key="patchmixer",
+        )
 
 
 MODEL_REGISTRY: Dict[str, Callable] = {
@@ -1077,14 +1235,8 @@ MODEL_REGISTRY: Dict[str, Callable] = {
 # Orchestration
 # =============================================================================
 
-def _validate_models_to_run(models_to_run: Optional[Iterable[str]]) -> List[str]:
-    selected = _norm_list(models_to_run)
-    if not selected:
-        selected = ["patchtst"]
-    unknown = [m for m in selected if m not in MODEL_REGISTRY]
-    if unknown:
-        raise ValueError(f"Unknown models_to_run={unknown}. allowed={list(MODEL_REGISTRY.keys())}")
-    return selected
+def _resolve_requested_artifact_keys(models_to_run: Optional[Iterable[str]]) -> List[str]:
+    return expand_training_targets(models_to_run)
 
 
 def _build_common_kwargs(
@@ -1213,7 +1365,8 @@ def run_total_train(
 
 
     # model selection
-    selected = _validate_models_to_run(models_to_run)
+    selected_artifact_keys = _resolve_requested_artifact_keys(models_to_run)
+    selected_families = ordered_training_families_for_targets(selected_artifact_keys)
 
     # run
     results: Dict[str, Dict] = {}
@@ -1234,9 +1387,11 @@ def run_total_train(
         loss_quantile=loss_quantile,
     )
 
-    for m in selected:
-        print(f"\n[total_train] === RUN: {m} ({freq_spec.freq}) ===")
+    for m in selected_families:
+        family_targets = filter_targets_for_family(selected_artifact_keys, m)
+        print(f"\n[total_train] === RUN: {m} ({freq_spec.freq}) targets={family_targets} ===")
         kwargs = dict(base_kwargs)
+        kwargs["requested_artifact_keys"] = family_targets
 
         # per-model extras
         if m == "patchtst":

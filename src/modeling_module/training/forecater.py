@@ -868,7 +868,10 @@ class DMSForecaster:
         else:
             return self._predict_point_strategy(
                 x_raw, out0, horizon, device, fwd_kwargs, probe_H,
-                is_IMS=is_IMS, is_linear_decay=is_linear_decay
+                is_IMS=is_IMS,
+                is_linear_decay=is_linear_decay,
+                resolved_policy=resolved_policy,
+                tail_cfg=tail_cfg,
             )
 
     # ---------------------------------------------------------------------

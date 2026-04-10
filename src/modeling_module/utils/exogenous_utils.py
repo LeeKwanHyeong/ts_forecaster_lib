@@ -3,7 +3,9 @@ import torch.nn as nn
 from typing import Literal, Optional, Callable, List
 from typing import Callable, Union, Sequence
 import numpy as np
-from datetime import date
+from datetime import date, datetime
+
+from modeling_module.utils.date_util import DateUtil
 
 def calendar_sin_cos(t: torch.Tensor, period: float, device = 'cpu') -> torch.Tensor:
     """
@@ -35,6 +37,83 @@ def yyyyww_to_week_ordinal(yyyyww: int, *, anchor=(1970, 1, 1)) -> int:
 
     # 주 단위 ordinal
     return (d - a).days // 7
+
+
+def yyyymm_to_month_ordinal(yyyymm: int, *, anchor=(1970, 1)) -> int:
+    year = int(yyyymm) // 100
+    month = int(yyyymm) % 100
+    return (year - int(anchor[0])) * 12 + (month - int(anchor[1]))
+
+
+def yyyymmdd_to_day_ordinal(yyyymmdd: int, *, anchor=date(1970, 1, 1)) -> int:
+    d = DateUtil.yyyymmdd_to_date(int(yyyymmdd))
+    return (d - anchor).days
+
+
+def yyyymmddhh_to_hour_ordinal(yyyymmddhh: int, *, anchor=datetime(1970, 1, 1, 0, 0, 0)) -> int:
+    dt = datetime.strptime(str(int(yyyymmddhh)), "%Y%m%d%H")
+    return int((dt - anchor).total_seconds() // 3600)
+
+
+def compose_exo_calendar_cb(date_type: str = "W", *, sincos: bool = True):
+    dt = str(date_type).strip().lower()
+    dt = {
+        "w": "weekly",
+        "weekly": "weekly",
+        "m": "monthly",
+        "monthly": "monthly",
+        "d": "daily",
+        "daily": "daily",
+        "h": "hourly",
+        "hourly": "hourly",
+    }.get(dt, "weekly")
+
+    if dt == "monthly":
+        periods = [12.0]
+        ordinal_fn = yyyymm_to_month_ordinal
+    elif dt == "weekly":
+        periods = [52.0]
+        ordinal_fn = yyyyww_to_week_ordinal
+    elif dt == "daily":
+        periods = [7.0, 365.25]
+        ordinal_fn = yyyymmdd_to_day_ordinal
+    else:
+        periods = [24.0, 168.0]
+        ordinal_fn = yyyymmddhh_to_hour_ordinal
+
+    def _calendar_sin_cos(t: torch.Tensor, p: float) -> torch.Tensor:
+        ang = 2.0 * np.pi * (t / float(p))
+        ang = torch.as_tensor(ang, device=t.device, dtype=t.dtype)
+        return torch.stack([torch.sin(ang), torch.cos(ang)], dim=-1)
+
+    def cb(start_idx, H: int, device: str = "cpu"):
+        H = int(H)
+        dev = torch.device(device)
+
+        is_scalar = isinstance(start_idx, (int, np.integer))
+        if is_scalar:
+            s_raw = np.array([int(start_idx)], dtype=np.int64)
+        else:
+            s_raw = np.asarray(start_idx, dtype=np.int64).reshape(-1)
+
+        s_ord = np.array([ordinal_fn(v) for v in s_raw], dtype=np.int64)
+        s = torch.as_tensor(s_ord, device=dev, dtype=torch.float32)
+        offs = torch.arange(0, H, device=dev, dtype=torch.float32)
+        t = s[:, None] + offs[None, :]
+
+        feats = []
+        if sincos:
+            for p in periods:
+                feats.append(_calendar_sin_cos(t, p))
+            exo = torch.cat(feats, dim=-1)
+        else:
+            for p in periods:
+                feats.append(((t % float(p)) / float(p)).unsqueeze(-1))
+            exo = torch.cat(feats, dim=-1)
+
+        return exo[0] if is_scalar else exo
+
+    return cb
 
 def compose_exo_calendar_cb_yyyyww(date_type: str = "weekly", *, sincos: bool = True):
     dt = date_type.lower()
@@ -206,4 +285,3 @@ def compose_exo_calendar_age_warranty_cb(
         return torch.cat(feats, dim=-1)
 
     return cb
-

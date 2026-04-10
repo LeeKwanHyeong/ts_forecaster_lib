@@ -131,6 +131,87 @@ def _generate_time_seq(plan_dt: int, length: int, freq: str) -> np.ndarray:
     return np.array(seq[::-1], dtype=np.int64)
 
 
+def _lookup_float_sequence(
+    query_dates: Sequence[int],
+    val_map: Dict[int, float],
+    *,
+    fill_missing: str,
+    target_back_steps: int,
+    freq: str,
+    earliest: int,
+) -> np.ndarray:
+    out = np.empty(len(query_dates), dtype=float)
+
+    for i, curr_dt in enumerate(query_dates):
+        curr_val = val_map.get(int(curr_dt), None)
+        if curr_val is not None and np.isfinite(curr_val):
+            out[i] = curr_val
+            continue
+
+        if fill_missing == "zero":
+            out[i] = 0.0
+            continue
+
+        if fill_missing == "nan":
+            out[i] = np.nan
+            continue
+
+        prev, found = int(curr_dt), False
+        for _ in range(int(target_back_steps)):
+            prev = _add_time(prev, -1, freq)
+            if prev < earliest:
+                break
+            prev_val = val_map.get(prev, None)
+            if prev_val is not None and np.isfinite(prev_val):
+                out[i] = prev_val
+                found = True
+                break
+
+        if not found:
+            out[i] = 0.0
+
+    return out
+
+
+def _lookup_int_sequence(
+    query_dates: Sequence[int],
+    val_map: Dict[int, int],
+    *,
+    fill_missing: str,
+    target_back_steps: int,
+    freq: str,
+    earliest: int,
+    unk: int,
+) -> np.ndarray:
+    out = np.empty(len(query_dates), dtype=np.int64)
+
+    for i, curr_dt in enumerate(query_dates):
+        curr_val = val_map.get(int(curr_dt), None)
+        if curr_val is not None:
+            out[i] = curr_val
+            continue
+
+        if fill_missing in ("zero", "nan"):
+            out[i] = unk
+            continue
+
+        prev, found = int(curr_dt), False
+        for _ in range(int(target_back_steps)):
+            prev = _add_time(prev, -1, freq)
+            if prev < earliest:
+                break
+            prev_val = val_map.get(prev, None)
+            if prev_val is not None:
+                out[i] = prev_val
+                found = True
+                break
+
+        if not found:
+            out[i] = unk
+
+    return out
+
+
 def _build_train_collate_fn(
     *,
     horizon: int,
@@ -223,7 +304,9 @@ class MultiPartExoTrainingDataset(Dataset):
       - x: [L, 1] (float32) - Lookback 구간 타겟 시퀀스
       - y: [H] (float32) - Horizon 구간 정답 시퀀스
       - id: (str) - 시계열 식별자
-      - start_idx: (int) - 미래 외생 변수 조회를 위한 시작 시점 인덱스
+      - future_payload:
+          - known future covariate 컬럼이 있으면 [H, E_future] 텐서
+          - 없으면 callback 조회용 start_idx (int)
       - pe_cont_t: [L, E_cont] (float32) - 과거 연속형 외생 변수
       - pe_cat_t: [L, E_cat] (long) - 과거 범주형 외생 변수
     """
@@ -240,6 +323,7 @@ class MultiPartExoTrainingDataset(Dataset):
             qty_col: str = "y",
             past_exo_cont_cols: Optional[Sequence[str]] = None,
             past_exo_cat_cols: Optional[Sequence[str]] = None,
+            future_exo_cont_cols: Optional[Sequence[str]] = None,
             future_exo_cb: Optional[Callable[[int, int, str], np.ndarray | torch.Tensor]] = None,
             date_indexer: Optional[Callable[[int], int]] = None,
             cat_indexers: Optional[Dict[str, Any]] = None,  # Type hint adjusted
@@ -257,6 +341,7 @@ class MultiPartExoTrainingDataset(Dataset):
         # 외생 변수 컬럼 리스트 초기화
         self.past_exo_cont_cols = list(past_exo_cont_cols) if past_exo_cont_cols else []
         self.past_exo_cat_cols = list(past_exo_cat_cols) if past_exo_cat_cols else []
+        self.future_exo_cont_cols = list(future_exo_cont_cols) if future_exo_cont_cols else []
 
         # 헬퍼 함수 및 인덱서 설정
         self.future_exo_cb = future_exo_cb
@@ -304,6 +389,17 @@ class MultiPartExoTrainingDataset(Dataset):
             # [T, Feature] 형태로 스택
             exo_cont = np.stack(cont_list, axis=-1) if cont_list else np.zeros((T, 0), dtype=np.float32)
 
+            # ----- 연속형 미래 외생 변수 처리 (Known Future Cont Exo) -----
+            future_cont_list = []
+            for col in self.future_exo_cont_cols:
+                if col in g.columns:
+                    future_cont_list.append(_to_numpy(g[col]).astype(np.float32))
+            future_exo_cont = (
+                np.stack(future_cont_list, axis=-1)
+                if future_cont_list
+                else np.zeros((T, 0), dtype=np.float32)
+            )
+
             # ----- 범주형 과거 외생 변수 처리 (Past Categorical Exo) -----
             cat_list = []
             for col in self.past_exo_cat_cols:
@@ -322,20 +418,35 @@ class MultiPartExoTrainingDataset(Dataset):
             exo_cat = np.stack(cat_list, axis=-1) if cat_list else np.zeros((T, 0), dtype=np.int64)
 
             # 처리된 데이터를 메모리에 저장
-            self.series[uid] = {"y": y_all, "d": d_all, "exo_cont": exo_cont, "exo_cat": exo_cat}
+            self.series[uid] = {
+                "y": y_all,
+                "d": d_all,
+                "exo_cont": exo_cont,
+                "exo_cat": exo_cat,
+                "future_exo_cont": future_exo_cont,
+            }
 
             # ----- 슬라이딩 윈도우 인덱스 생성 -----
             n_windows = T - self.lookback - self.horizon + 1
             if n_windows <= 0:
                 continue
 
+            valid_count = 0
             self.id_to_indices[uid] = []
             for i in range(n_windows):
+                # one-table mode allows trailing future rows with y==NaN.
+                # Skip windows whose input/target y range is not fully observed.
+                if not np.isfinite(y_all[i:i + self.lookback + self.horizon]).all():
+                    continue
                 gidx = len(self.index_map)
                 # (ID, 시작 위치) 정보를 전역 맵에 등록
                 self.index_map.append((uid, i))
                 # ID별 인덱스 목록 업데이트
                 self.id_to_indices[uid].append(gidx)
+                valid_count += 1
+
+            if valid_count == 0:
+                self.id_to_indices.pop(uid, None)
 
     def __len__(self):
         """전체 샘플(윈도우) 개수 반환."""
@@ -354,6 +465,7 @@ class MultiPartExoTrainingDataset(Dataset):
         d_all = pack["d"]
         exo_cont = pack["exo_cont"]
         exo_cat = pack["exo_cat"]
+        future_exo_cont = pack["future_exo_cont"]
 
         L = self.lookback
         H = self.horizon
@@ -365,6 +477,11 @@ class MultiPartExoTrainingDataset(Dataset):
         # 외생 변수 슬라이싱 (과거 구간만 필요)
         pe_cont = exo_cont[i:i + L, :] if exo_cont.shape[1] > 0 else np.zeros((L, 0), dtype=np.float32)
         pe_cat = exo_cat[i:i + L, :] if exo_cat.shape[1] > 0 else np.zeros((L, 0), dtype=np.int64)
+        fe_cont = (
+            future_exo_cont[i + L:i + L + H, :]
+            if future_exo_cont.shape[1] > 0
+            else np.zeros((H, 0), dtype=np.float32)
+        )
 
         # 미래 외생 변수 시작 시점 계산
         # Lookback 마지막 시점의 날짜 조회
@@ -378,9 +495,12 @@ class MultiPartExoTrainingDataset(Dataset):
         y = torch.from_numpy(y_win).to(torch.float32)  # [H]
         pe_cont_t = torch.from_numpy(pe_cont).to(torch.float32)  # [L, E_cont]
         pe_cat_t = torch.from_numpy(pe_cat).to(torch.long)  # [L, E_cat]
+        fe_cont_t = torch.from_numpy(fe_cont).to(torch.float32)  # [H, E_future]
 
-        # Future Exo Tensor는 여기서 생성하지 않고 start_idx만 반환 (DataCollator 등에서 처리 유도)
-        return x, y, uid, start_idx, pe_cont_t, pe_cat_t
+        # single-table known future covariates가 있으면 slice를 반환하고,
+        # 없으면 callback mode를 위해 start_idx를 반환한다.
+        future_payload = fe_cont_t if fe_cont_t.size(-1) > 0 else start_idx
+        return x, y, uid, future_payload, pe_cont_t, pe_cat_t
 
 # ============================================================
 # 2) Inference Dataset (Unified for Monthly/Weekly/Daily/Hourly)
@@ -408,6 +528,7 @@ class MultiPartExoAnchoredInferenceDataset(Dataset):
             qty_col: str = "y",
             past_exo_cont_cols: Optional[Sequence[str]] = None,
             past_exo_cat_cols: Optional[Sequence[str]] = None,
+            future_exo_cont_cols: Optional[Sequence[str]] = None,
             fill_missing: str = "ffill",
             target_back_steps: int = 100,  # 결측치 채울 때 얼마나 뒤를 볼지
             future_exo_cb: Optional[Callable[[int, int, str], np.ndarray | torch.Tensor]] = None,
@@ -428,6 +549,7 @@ class MultiPartExoAnchoredInferenceDataset(Dataset):
         # 외생 변수 컬럼 리스트
         self.past_exo_cont_cols = list(past_exo_cont_cols) if past_exo_cont_cols else []
         self.past_exo_cat_cols = list(past_exo_cat_cols) if past_exo_cat_cols else []
+        self.future_exo_cont_cols = list(future_exo_cont_cols) if future_exo_cont_cols else []
 
         # 결측치 처리 및 헬퍼 설정
         self.fill_missing = fill_missing
@@ -463,30 +585,14 @@ class MultiPartExoAnchoredInferenceDataset(Dataset):
             earliest = int(dts.min())
 
             # 1) 타겟 데이터(x) 생성 및 결측치 처리
-            x = np.empty(self.lookback, dtype=float)
-            for i, curr_dt in enumerate(win_dates):
-                if curr_dt in qty_map:
-                    # 데이터 존재 시 할당
-                    x[i] = qty_map[curr_dt]
-                else:
-                    # 데이터 부재 시 전략에 따른 채움
-                    if self.fill_missing == "zero":
-                        x[i] = 0.0
-                    elif self.fill_missing == "nan":
-                        x[i] = np.nan
-                    else:
-                        # ffill 로직: 과거 시점으로 거슬러 올라가며 값 탐색
-                        prev, found = curr_dt, False
-                        for _ in range(self.target_back_steps):
-                            prev = _add_time(prev, -1, self.freq)
-                            if prev < earliest:
-                                break
-                            if prev in qty_map:
-                                x[i] = qty_map[prev]
-                                found = True
-                                break
-                        if not found:
-                            x[i] = 0.0
+            x = _lookup_float_sequence(
+                win_dates,
+                qty_map,
+                fill_missing=self.fill_missing,
+                target_back_steps=self.target_back_steps,
+                freq=self.freq,
+                earliest=earliest,
+            )
 
             # 모든 값이 NaN인 경우(유효 데이터 없음) 해당 샘플 스킵
             if self.fill_missing == "nan" and not np.any(np.isfinite(x)):
@@ -498,30 +604,16 @@ class MultiPartExoAnchoredInferenceDataset(Dataset):
                 if col not in g.columns:
                     continue
                 val_map = {int(d): float(v) for d, v in zip(dts, _to_numpy(g[col]).astype(float))}
-
-                e = np.empty(self.lookback, dtype=float)
-                for i, curr_dt in enumerate(win_dates):
-                    # 타겟 변수와 동일한 결측치 채움 로직 적용
-                    if curr_dt in val_map:
-                        e[i] = val_map[curr_dt]
-                    else:
-                        if self.fill_missing == "zero":
-                            e[i] = 0.0
-                        elif self.fill_missing == "nan":
-                            e[i] = np.nan
-                        else:
-                            prev, found = curr_dt, False
-                            for _ in range(self.target_back_steps):
-                                prev = _add_time(prev, -1, self.freq)
-                                if prev < earliest:
-                                    break
-                                if prev in val_map:
-                                    e[i] = val_map[prev]
-                                    found = True
-                                    break
-                            if not found:
-                                e[i] = 0.0
-                pe_cont_list.append(e)
+                pe_cont_list.append(
+                    _lookup_float_sequence(
+                        win_dates,
+                        val_map,
+                        fill_missing=self.fill_missing,
+                        target_back_steps=self.target_back_steps,
+                        freq=self.freq,
+                        earliest=earliest,
+                    )
+                )
 
             # [L, Features] 형태로 스택
             pe_cont_mat = np.stack(pe_cont_list, axis=-1) if pe_cont_list else np.zeros((self.lookback, 0), dtype=float)
@@ -550,28 +642,17 @@ class MultiPartExoAnchoredInferenceDataset(Dataset):
 
                 val_map = {int(d): int(v) for d, v in zip(dts, vals_int)}
 
-                e = np.empty(self.lookback, dtype=np.int64)
-                for i, curr_dt in enumerate(win_dates):
-                    # 범주형 결측 처리는 UNK(0) 또는 최근 값(ffill) 사용
-                    if curr_dt in val_map:
-                        e[i] = val_map[curr_dt]
-                    else:
-                        if self.fill_missing in ("zero", "nan"):
-                            e[i] = unk
-                        else:
-                            prev, found = curr_dt, False
-                            for _ in range(self.target_back_steps):
-                                prev = _add_time(prev, -1, self.freq)
-                                if prev < earliest:
-                                    break
-                                if prev in val_map:
-                                    e[i] = val_map[prev]
-                                    found = True
-                                    break
-                            if not found:
-                                e[i] = unk
-
-                pe_cat_list.append(e)
+                pe_cat_list.append(
+                    _lookup_int_sequence(
+                        win_dates,
+                        val_map,
+                        fill_missing=self.fill_missing,
+                        target_back_steps=self.target_back_steps,
+                        freq=self.freq,
+                        earliest=earliest,
+                        unk=unk,
+                    )
+                )
 
             # [L, Features] 형태로 스택
             pe_cat_mat = np.stack(pe_cat_list, axis=-1) if pe_cat_list else np.zeros((self.lookback, 0), dtype=np.int64)
@@ -584,8 +665,29 @@ class MultiPartExoAnchoredInferenceDataset(Dataset):
             start_idx = int(self.date_indexer(next_dt))
             self.start_idxs.append(start_idx)
 
-            fe = np.zeros((self.horizon, 0), dtype=float)
-            if self.future_exo_cb is not None:
+            future_dates = np.asarray(
+                [_add_time(self.plan_dt, step, self.freq) for step in range(self.horizon)],
+                dtype=np.int64,
+            )
+
+            future_cont_list = []
+            for col in self.future_exo_cont_cols:
+                if col not in g.columns:
+                    continue
+                val_map = {int(d): float(v) for d, v in zip(dts, _to_numpy(g[col]).astype(float))}
+                future_cont_list.append(
+                    _lookup_float_sequence(
+                        future_dates,
+                        val_map,
+                        fill_missing=self.fill_missing,
+                        target_back_steps=self.target_back_steps,
+                        freq=self.freq,
+                        earliest=earliest,
+                    )
+                )
+
+            fe = np.stack(future_cont_list, axis=-1) if future_cont_list else np.zeros((self.horizon, 0), dtype=float)
+            if fe.shape[-1] == 0 and self.future_exo_cb is not None:
                 # Callback을 통해 미래 시점의 외생 변수 조회
                 res = self.future_exo_cb(start_idx, self.horizon, device="cpu")
                 fe = res.detach().cpu().numpy() if isinstance(res, torch.Tensor) else np.asarray(res, dtype=float)
@@ -609,12 +711,12 @@ class MultiPartExoAnchoredInferenceDataset(Dataset):
         # y dummy: inference에서는 의미 없음 (shape만 horizon 맞추기)
         y_dummy = torch.zeros((self.horizon,), dtype=torch.float32)  # [H]
 
-        # start_idx를 dataset에서 이미 계산해뒀으니 같이 저장해두는 게 정석
-        # 현재 __init__에서 start_idx를 계산만 하고 리스트에 저장하지 않음 → 아래처럼 self.start_idxs를 만들어 저장 필요
         start_idx = int(self.start_idxs[idx])
+        fe = torch.tensor(self.future_exo_conts[idx], dtype=torch.float32)  # [H,E_future]
 
         uid = self.ids[idx]
-        return x, y_dummy, uid, start_idx, peC, peK
+        future_payload = fe if fe.size(-1) > 0 else start_idx
+        return x, y_dummy, uid, future_payload, peC, peK
 
 
 # ============================================================
@@ -658,6 +760,7 @@ class MultiPartExoDataModule:
             y_col: str = "HUFL",
             past_exo_cont_cols: Optional[Sequence[str]] = None,
             past_exo_cat_cols: Optional[Sequence[str]] = None,
+            future_exo_cont_cols: Optional[Sequence[str]] = None,
             fill_missing: str = "ffill",
             target_back_steps: int = 100,
             future_exo_cb: Optional[Callable[[int, int, str], np.ndarray | torch.Tensor]] = None,
@@ -694,6 +797,7 @@ class MultiPartExoDataModule:
 
         self.past_exo_cont_cols = list(past_exo_cont_cols) if past_exo_cont_cols else []
         self.past_exo_cat_cols = list(past_exo_cat_cols) if past_exo_cat_cols else []
+        self.future_exo_cont_cols = list(future_exo_cont_cols) if future_exo_cont_cols else []
 
         # 전처리 및 콜백 설정
         self.fill_missing = fill_missing
@@ -740,6 +844,7 @@ class MultiPartExoDataModule:
             qty_col=self.qty_col,
             past_exo_cont_cols=self.past_exo_cont_cols,
             past_exo_cat_cols=self.past_exo_cat_cols,
+            future_exo_cont_cols=self.future_exo_cont_cols,
             future_exo_cb=self.future_exo_cb,
             date_indexer=self.date_indexer,
             cat_indexers=self.cat_indexers,
@@ -933,6 +1038,7 @@ class MultiPartExoDataModule:
             qty_col=self.qty_col,
             past_exo_cont_cols=self.past_exo_cont_cols,
             past_exo_cat_cols=self.past_exo_cat_cols,
+            future_exo_cont_cols=self.future_exo_cont_cols,
             fill_missing=self.fill_missing,
             target_back_steps=self.target_back_steps,
             future_exo_cb=self.future_exo_cb,
@@ -959,8 +1065,9 @@ class TrainCollateWithFutureExo:
     학습 배치 생성 시 Future Exogenous(미래 외생 변수) 데이터를 동적으로 생성 및 병합하는 Collate 클래스.
 
     특징:
-      - 캐싱(Caching): 빈번히 조회되는 시점의 외생 변수 데이터를 메모리에 저장하여 연산 부하 감소.
-      - 배치 처리 지원: 콜백 함수가 배치 입력을 지원할 경우 한 번에 생성, 실패 시 개별 루프로 Fallback.
+      - single-table mode: sample이 이미 [H,E] future exo slice를 들고 오면 그대로 stack.
+      - callback mode: sample이 start_idx를 들고 오면 callback으로 [B,H,E] 생성.
+      - 캐싱(Caching): callback 기반일 때 빈번히 조회되는 시점의 외생 변수 데이터를 메모리에 저장.
     """
     horizon: int
     future_exo_cb: Optional[Callable] = None
@@ -998,13 +1105,13 @@ class TrainCollateWithFutureExo:
         DataLoader로부터 받은 샘플 리스트를 배치 텐서로 변환.
 
         Args:
-            batch: (x, y, uid, start_idx, pe_cont, pe_cat) 튜플 리스트
+            batch: (x, y, uid, future_payload, pe_cont, pe_cat) 튜플 리스트
 
         Returns:
             x, y, uid_list, fe, pe_cont, pe_cat 텐서 조합
         """
         # 배치 데이터 언패킹 (Unzipping)
-        xs, ys, uids, start_idxs, pe_conts, pe_cats = zip(*batch)
+        xs, ys, uids, future_payloads, pe_conts, pe_cats = zip(*batch)
 
         # 기본 텐서 스택 (Stacking)
         x = torch.stack(xs, dim=0)  # [B, L, 1]
@@ -1013,8 +1120,29 @@ class TrainCollateWithFutureExo:
         pe_cat = torch.stack(pe_cats, 0)  # [B, L, E_cat]
         uid_list = list(uids)
 
-        B = len(start_idxs)
+        B = len(future_payloads)
         H = int(self.horizon)
+
+        first_payload = future_payloads[0]
+        table_mode = torch.is_tensor(first_payload) or isinstance(first_payload, np.ndarray)
+
+        if table_mode:
+            fe_list: List[np.ndarray] = []
+            for payload in future_payloads:
+                if torch.is_tensor(payload):
+                    arr = payload.detach().cpu().numpy()
+                else:
+                    arr = np.asarray(payload, dtype=np.float32)
+
+                if arr.ndim != 2 or arr.shape[0] != H:
+                    raise ValueError(f"future_exo payload must be shaped (H, E). got={arr.shape}")
+                fe_list.append(arr.astype(np.float32))
+
+            fe_np = np.stack(fe_list, axis=0)
+            fe = torch.from_numpy(fe_np).to(torch.float32)
+            return x, y, uid_list, fe, pe_cont, pe_cat
+
+        start_idxs = future_payloads
 
         # Future Exo 콜백이 없는 경우 빈 텐서 반환
         if self.future_exo_cb is None:
@@ -1072,4 +1200,3 @@ class TrainCollateWithFutureExo:
         fe = torch.from_numpy(fe_np).to(torch.float32)
 
         return x, y, uid_list, fe, pe_cont, pe_cat
-

@@ -1,8 +1,9 @@
-# model_io.py
 import os
 import json
 import glob
-from typing import Dict, Callable, Optional, Any
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Dict, Callable, Optional, Any, Mapping
 
 import torch
 from dataclasses import asdict, is_dataclass
@@ -62,6 +63,8 @@ _REBUILDERS_BY_CLS = {
 # helpers: primitive sanitize
 # -----------------------------
 _PRIMITIVE_TYPES = (str, int, float, bool, type(None))
+CHECKPOINT_FORMAT_VERSION = "modeling_module.ckpt.v2"
+TRAINING_MANIFEST_VERSION = "modeling_module.training.v1"
 
 def _is_primitive(x: Any) -> bool:
     return isinstance(x, _PRIMITIVE_TYPES)
@@ -132,34 +135,60 @@ def _drop_or_stringify_loss(cfg_state: Dict[str, Any]) -> Dict[str, Any]:
     return cfg_state
 
 
-def save_model(model, cfg, path: str):
-    """
-    안전한 단일 모델 저장.
-    - cfg 객체를 그대로 저장하지 않음 (pickle 차단)
-    - cfg_state는 primitive-only로 sanitize
-    """
+def sanitize_for_storage(obj: Any) -> Any:
+    return _sanitize(obj)
+
+
+def _cfg_to_primitive_state(cfg: Any) -> tuple[dict[str, Any], Optional[str]]:
+    if cfg is None:
+        return {}, None
+
     if is_dataclass(cfg):
         raw = asdict(cfg)
+        cfg_cls = type(cfg).__name__
     else:
         raw = dict(getattr(cfg, "__dict__", {}) or {})
+        cfg_cls = type(cfg).__name__ if cfg is not None else None
 
-    # 1) loss 등 pickle 위험 필드 문자열화
     raw = _drop_or_stringify_loss(raw)
+    return _sanitize(raw), cfg_cls
 
-    # 2) 전체 sanitize (dict/list 재귀)
-    cfg_state = _sanitize(raw)
 
-    ckpt = {
-        "cfg_state": cfg_state,                 # primitive-only
-        "cfg_cls": type(cfg).__name__,          # class name only
-        "model_class": model.__class__.__name__,# optional but useful
-        "state_dict": model.state_dict(),       # weights only
-        "meta": {
-            "torch_version": torch.__version__,
-        }
+def build_checkpoint_payload(
+    model,
+    cfg,
+    *,
+    extra_meta: Optional[Mapping[str, Any]] = None,
+) -> dict[str, Any]:
+    cfg_state, cfg_cls = _cfg_to_primitive_state(cfg)
+
+    meta = {
+        "format_version": CHECKPOINT_FORMAT_VERSION,
+        "torch_version": torch.__version__,
+        "saved_at": datetime.now(timezone.utc).isoformat(),
+    }
+    if extra_meta:
+        meta.update(_sanitize(dict(extra_meta)))
+
+    return {
+        "format_version": CHECKPOINT_FORMAT_VERSION,
+        "config": cfg_state,
+        "cfg_state": cfg_state,
+        "cfg_cls": cfg_cls,
+        "model_class": model.__class__.__name__,
+        "state_dict": model.state_dict(),
+        "meta": meta,
     }
 
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+
+def save_model(model, cfg, path: str, *, extra_meta: Optional[Mapping[str, Any]] = None):
+    """
+    안전한 단일 모델 저장.
+    """
+    ckpt = build_checkpoint_payload(model, cfg, extra_meta=extra_meta)
+
+    path_obj = Path(path)
+    path_obj.parent.mkdir(parents=True, exist_ok=True)
     torch.save(ckpt, path)
     print(f"[save] model saved to: {path}")
 
@@ -168,13 +197,73 @@ def save_json_config(cfg, path: str):
     """
     config를 json으로 별도 저장(옵션)
     """
-    if is_dataclass(cfg):
-        data = asdict(cfg)
-    else:
-        data = getattr(cfg, "__dict__", None)
-    with open(path, "w", encoding="utf-8") as f:
+    data, _ = _cfg_to_primitive_state(cfg)
+    path_obj = Path(path)
+    path_obj.parent.mkdir(parents=True, exist_ok=True)
+    with open(path_obj, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
     print(f"[save] config saved to: {path}")
+
+
+def summarize_training_results(results: Mapping[str, Any]) -> dict[str, Any]:
+    summary: dict[str, Any] = {}
+
+    for name, info in results.items():
+        if not isinstance(info, Mapping):
+            summary[str(name)] = _sanitize(info)
+            continue
+
+        item: dict[str, Any] = {}
+        for key, value in info.items():
+            if key in {"model", "cfg"}:
+                continue
+
+            if key.endswith("_path") and value is not None:
+                item[key] = str(value)
+                continue
+
+            if _is_primitive(value):
+                item[key] = value
+                continue
+
+            if torch.is_tensor(value):
+                item[key] = _sanitize(value)
+                continue
+
+            item[key] = _sanitize(value)
+
+        summary[str(name)] = item
+
+    return summary
+
+
+def save_training_manifest(
+    save_dir: str | Path,
+    *,
+    request: Optional[Mapping[str, Any]] = None,
+    results: Optional[Mapping[str, Any]] = None,
+    extra_meta: Optional[Mapping[str, Any]] = None,
+    filename: str = "training_manifest.json",
+) -> str:
+    save_dir = Path(save_dir)
+    save_dir.mkdir(parents=True, exist_ok=True)
+
+    manifest = {
+        "format_version": TRAINING_MANIFEST_VERSION,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    if request is not None:
+        manifest["request"] = _sanitize(dict(request))
+    if results is not None:
+        manifest["results"] = summarize_training_results(results)
+    if extra_meta is not None:
+        manifest["meta"] = _sanitize(dict(extra_meta))
+
+    path = save_dir / filename
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(manifest, f, indent=2, ensure_ascii=False)
+    print(f"[save] training manifest saved to: {path}")
+    return str(path)
 
 
 # ------------------------------------------------------------------
@@ -185,6 +274,26 @@ def _canonical_model_key(name: str) -> str:
     ckpt의 model_class / 파일명 / builders key를 최대한 같은 key로 정규화.
     """
     s = str(name).strip()
+    if not s:
+        return ""
+
+    try:
+        from modeling_module.models.registry import (
+            TRAINING_FAMILY_DEFAULTS,
+            resolve_artifact_model_key,
+            resolve_training_request_key,
+        )
+
+        try:
+            return resolve_artifact_model_key(s)
+        except ValueError:
+            request_key = resolve_training_request_key(s)
+            if request_key in TRAINING_FAMILY_DEFAULTS:
+                return TRAINING_FAMILY_DEFAULTS[request_key][0]
+            return request_key
+    except Exception:
+        pass
+
     sl = s.lower()
 
     # 이미 builders가 snake_case로 들어오는 경우
@@ -222,22 +331,51 @@ def _canonical_model_key(name: str) -> str:
     return sl
 
 
+def _norm_search_name(name: str) -> str:
+    return "".join(ch for ch in str(name).lower() if ch.isalnum())
+
+
+def _candidate_ckpt_names(name_key: str) -> list[str]:
+    candidates = [str(name_key)]
+
+    try:
+        from modeling_module.models.registry import get_model_spec
+
+        spec = get_model_spec(name_key)
+        candidates.extend(spec.checkpoint_aliases)
+        candidates.extend(spec.class_names)
+        candidates.extend(spec.aliases)
+        candidates.append(spec.label)
+    except Exception:
+        pass
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        if not candidate:
+            continue
+        key = str(candidate)
+        if key not in seen:
+            seen.add(key)
+            deduped.append(key)
+    return deduped
+
+
 def _find_ckpt_path(save_dir: str, name_key: str) -> Optional[str]:
     """
     기존: {name}.pt만 찾던 방식을 확장.
     1) save_dir/{name}.pt
     2) save_dir/**/*{name}*.pt (예: hourly_PatchTSTBase_L52_H27.pt)
     """
-    exact = os.path.join(save_dir, f"{name_key}.pt")
-    if os.path.exists(exact):
-        return exact
+    candidate_names = _candidate_ckpt_names(name_key)
+    for candidate in candidate_names:
+        exact = os.path.join(save_dir, f"{candidate}.pt")
+        if os.path.exists(exact):
+            return exact
 
     # 패턴 탐색
-    pats = [
-        os.path.join(save_dir, f"*{name_key}*.pt"),
-        os.path.join(save_dir, f"*{name_key.replace('_', '')}*.pt"),
-        os.path.join(save_dir, "*.pt"),
-    ]
+    pats = [os.path.join(save_dir, f"*{candidate}*.pt") for candidate in candidate_names]
+    pats.append(os.path.join(save_dir, "*.pt"))
     cand = []
     for p in pats:
         cand.extend(glob.glob(p))
@@ -246,9 +384,12 @@ def _find_ckpt_path(save_dir: str, name_key: str) -> Optional[str]:
         return None
 
     # 가장 그럴듯한 후보를 우선: name_key 포함 + 짧은 파일명 우선
+    needles = {_norm_search_name(candidate) for candidate in candidate_names}
+
     def score(path: str):
-        base = os.path.basename(path).lower()
-        contains = (name_key in base) or (name_key.replace("_", "") in base)
+        base = os.path.basename(path)
+        base_norm = _norm_search_name(base)
+        contains = any(needle and needle in base_norm for needle in needles)
         return (0 if contains else 1, len(base))
 
     cand = sorted(set(cand), key=score)
@@ -264,7 +405,7 @@ def _extract_cfg_obj(ckpt: dict) -> Any:
       3) 구버전: "config"
       4) cfg_state/cfg_cls로 rebuild
     """
-    # 회사식 신규 포맷
+    # 회사식 신규 포맷 / v2 포맷
     if "config" in ckpt:
         return ckpt["config"]
 
