@@ -47,15 +47,25 @@ def _eval_pretrain(model, loader: DataLoader, device: torch.device, *, mask_rati
     검증 데이터셋에 대한 사전학습 손실(Reconstruction Loss) 평가.
     """
     model.eval()
-    total = 0.0
+    total_scalar = 0.0
+    total_tensor = None
     n = 0
     for batch in loader:
         x = _to_device(_extract_x(batch), device)
         # 마스킹 비율 및 손실 함수 설정 적용
         out = model(x, mask_ratio=mask_ratio, return_loss=True, loss_type=loss_type)
         loss = out["loss"] if isinstance(out, dict) and "loss" in out else out
-        total += float(loss.detach().cpu().item())
+        if torch.is_tensor(loss):
+            loss_detached = loss.detach()
+            if loss_detached.numel() != 1:
+                loss_detached = loss_detached.float().mean()
+            total_tensor = loss_detached if total_tensor is None else total_tensor + loss_detached
+        else:
+            total_scalar += float(loss)
         n += 1
+    total = float(total_scalar)
+    if total_tensor is not None:
+        total += float(total_tensor.item())
     return total / max(n, 1)
 
 
@@ -126,7 +136,8 @@ def train_patchtst_pretrain(
 
         for ep in range(1, epochs + 1):
             model.train()
-            running = 0.0
+            running_scalar = 0.0
+            running_tensor = None
             step = 0
 
             for batch in train_loader:
@@ -163,12 +174,24 @@ def train_patchtst_pretrain(
 
                     optimizer.step()
 
-                running += float(loss.detach().cpu().item())
+                if torch.is_tensor(loss):
+                    loss_detached = loss.detach()
+                    if loss_detached.numel() != 1:
+                        loss_detached = loss_detached.float().mean()
+                    running_tensor = loss_detached if running_tensor is None else running_tensor + loss_detached
+                else:
+                    running_scalar += float(loss)
 
                 if (step % log_every) == 0:
-                    print(f"[Pretrain][stage={si} ep={ep}/{epochs} step={step}] loss={running / step:.6f}")
+                    running_total = float(running_scalar)
+                    if running_tensor is not None:
+                        running_total += float(running_tensor.item())
+                    print(f"[Pretrain][stage={si} ep={ep}/{epochs} step={step}] loss={running_total / step:.6f}")
 
-            train_loss = running / max(step, 1)
+            train_total = float(running_scalar)
+            if running_tensor is not None:
+                train_total += float(running_tensor.item())
+            train_loss = train_total / max(step, 1)
 
             # 검증 및 체크포인트 저장
             if val_loader is not None:

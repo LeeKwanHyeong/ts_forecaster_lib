@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 from dataclasses import MISSING, dataclass, field, fields, is_dataclass
 from datetime import datetime
@@ -466,6 +467,42 @@ def _merged_data_config(payload: Mapping[str, Any]) -> dict[str, Any]:
     return _materialize_data_payload(merged)
 
 
+def _build_loader_runtime_kwargs(
+    data_cfg: Mapping[str, Any],
+    *,
+    stage: str,
+) -> dict[str, Any]:
+    kwargs: dict[str, Any] = {}
+
+    for key in ("batch_size", "num_workers", "pin_memory", "persistent_workers", "prefetch_factor"):
+        value = data_cfg.get(key)
+        if value is not None:
+            kwargs[key] = value
+
+    if stage == "train":
+        shuffle = data_cfg.get("shuffle")
+        if shuffle is not None:
+            kwargs["shuffle"] = shuffle
+
+    drop_last = data_cfg.get("drop_last")
+    if drop_last is not None:
+        kwargs["drop_last"] = drop_last
+
+    return kwargs
+
+
+def _call_loader_method(datamodule: Any, method_name: str, kwargs: Mapping[str, Any]) -> Any:
+    method = getattr(datamodule, method_name)
+    signature = inspect.signature(method)
+
+    accepted: dict[str, Any] = {}
+    for name, value in kwargs.items():
+        if name in signature.parameters:
+            accepted[name] = value
+
+    return method(**accepted)
+
+
 def _resolve_loaders(payload: dict[str, Any]) -> tuple[Any, Any, Any]:
     train_loader = payload.get("train_loader")
     val_loader = payload.get("val_loader")
@@ -480,8 +517,16 @@ def _resolve_loaders(payload: dict[str, Any]) -> tuple[Any, Any, Any]:
             raise ValueError("Provide either (`train_loader`, `val_loader`) or a `data` config.")
 
         datamodule = build_datamodule(data_cfg)
-        train_loader = datamodule.get_train_loader()
-        val_loader = datamodule.get_val_loader()
+        train_loader = _call_loader_method(
+            datamodule,
+            "get_train_loader",
+            _build_loader_runtime_kwargs(data_cfg, stage="train"),
+        )
+        val_loader = _call_loader_method(
+            datamodule,
+            "get_val_loader",
+            _build_loader_runtime_kwargs(data_cfg, stage="val"),
+        )
 
         for key in ("lookback", "horizon", "freq", "use_exogenous_mode"):
             if payload.get(key) is None and data_cfg.get(key) is not None:

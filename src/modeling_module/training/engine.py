@@ -551,7 +551,8 @@ class CommonTrainer:
             #   tensorboard --logdir tb_prof
         """
         device = self.device
-        total = 0.0
+        total_scalar = 0.0
+        total_tensor = None
 
         # 모델 모드(학습/평가) 전환
         model.train() if train else model.eval()
@@ -564,28 +565,35 @@ class CommonTrainer:
                 return self.cfg.get(key, default)
             return getattr(self.cfg, key, default)
 
-        do_prof = bool(_cfg_get("profile", True))
+        do_prof = bool(_cfg_get("profile", False))
         prof_steps = int(_cfg_get("profile_steps", 30))
         prof_warmup = int(_cfg_get("profile_warmup", 10))
         prof_dir = str(_cfg_get("profile_dir", r"C:\Users\USER\PycharmProjects\ts_forecaster_lib\tb_prof"))
+        simple_prof_enabled = bool(_cfg_get("simple_profile", False))
 
         # CUDA synchronize는 CUDA에서만
         is_cuda = (hasattr(device, "type") and device.type == "cuda") or str(device).lower().startswith("cuda")
         activities = [ProfilerActivity.CPU, ProfilerActivity.CUDA] if is_cuda else [ProfilerActivity.CPU]
 
         def _sync():
-            if is_cuda:
+            if is_cuda and (do_prof or simple_prof_enabled):
                 torch.cuda.synchronize()
 
         # ----------------------
         # 간이 profile(load vs compute) 준비
         # ----------------------
         import time
-        if not hasattr(self, "_prof_simple"):
+        if simple_prof_enabled and not hasattr(self, "_prof_simple"):
             self._prof_simple = {"load": 0.0, "compute": 0.0, "n": 0}
             self._prof_simple_warmup = int(_cfg_get("simple_profile_warmup", 10))
             self._prof_simple_steps = int(_cfg_get("simple_profile_steps", 200))
             self._prof_simple_i = 0
+
+        def _finalize_epoch_total(denom: int) -> float:
+            total = float(total_scalar)
+            if total_tensor is not None:
+                total += float(total_tensor.item())
+            return total / max(1, denom)
 
         def _print_top_ops_with_stack(prof, *, sort_by="cpu_time_total", topk=15, stack_depth=8):
             """
@@ -640,7 +648,7 @@ class CommonTrainer:
         # - 여기서는 "unpack + H2D(to(device))"를 load로 근사하고,
         #   "forward~(backward/step)"을 compute로 근사합니다.
         def _run_one_step(batch):
-            nonlocal total
+            nonlocal total_scalar, total_tensor
 
             t0 = time.perf_counter()
 
@@ -734,7 +742,7 @@ class CommonTrainer:
             t3 = time.perf_counter()
 
             # ---- 간이 프로파일 누적 ----
-            if train:
+            if train and simple_prof_enabled:
                 self._prof_simple_i += 1
                 if self._prof_simple_i > self._prof_simple_warmup and self._prof_simple["n"] < self._prof_simple_steps:
                     self._prof_simple["load"] += (t2 - t0)       # unpack + H2D
@@ -751,9 +759,12 @@ class CommonTrainer:
 
             # loss 누적
             if torch.is_tensor(loss):
-                total += float(loss.detach())
+                loss_detached = loss.detach()
+                if loss_detached.numel() != 1:
+                    loss_detached = loss_detached.float().mean()
+                total_tensor = loss_detached if total_tensor is None else total_tensor + loss_detached
             else:
-                total += float(loss)
+                total_scalar += float(loss)
 
         # ----------------------
         # 루프 실행 (profiler on/off)
@@ -805,13 +816,13 @@ class CommonTrainer:
 
                 # 프로파일 모드에서는 epoch 전체를 다 돌지 않았으므로 len(loader) 대신 실제 step로 평균
                 denom = max(1, max_steps)
-                return total / denom
+                return _finalize_epoch_total(denom)
 
             # 일반 학습/검증 (전체 epoch)
             for batch in loader:
                 _run_one_step(batch)
 
-        return total / max(1, len(loader))
+        return _finalize_epoch_total(len(loader))
 
     # ----------------- 학습 진입 -----------------
     def fit(self, model, train_loader, val_loader, *, tta_steps: int = 0):
@@ -845,7 +856,8 @@ class CommonTrainer:
 
             # 2. 검증 루프 진입
             model.eval()
-            val_total = 0.0
+            val_total_scalar = 0.0
+            val_total_tensor = None
             with torch.no_grad():
                 for batch in val_loader:
                     x, y, part_ids, fe_cont, pe_cont, pe_cat = self._unpack_batch(batch)
@@ -883,7 +895,13 @@ class CommonTrainer:
                                 if self.extra_loss_fn is not None:
                                     loss = loss + self.extra_loss_fn(x_val, pred, self.cfg)
                                 loss = float(loss.detach())
-                        val_total += loss
+                        if torch.is_tensor(loss):
+                            loss_detached = loss.detach()
+                            if loss_detached.numel() != 1:
+                                loss_detached = loss_detached.float().mean()
+                            val_total_tensor = loss_detached if val_total_tensor is None else val_total_tensor + loss_detached
+                        else:
+                            val_total_scalar += float(loss)
                     else:
                         # 일반 평가 (Standard Validation)
                         _ac_kwargs = {"device_type": self.amp_device, "enabled": self.enabled}
@@ -905,7 +923,10 @@ class CommonTrainer:
 
                             if self.extra_loss_fn is not None:
                                 vloss = vloss + self.extra_loss_fn(x_val, pred, self.cfg)
-                            val_total += float(vloss.detach())
+                            vloss_detached = vloss.detach()
+                            if vloss_detached.numel() != 1:
+                                vloss_detached = vloss_detached.float().mean()
+                            val_total_tensor = vloss_detached if val_total_tensor is None else val_total_tensor + vloss_detached
 
                     # 메트릭 계산 (선택 사항)
                     if self.metrics_fn:
@@ -913,6 +934,9 @@ class CommonTrainer:
 
 
             # 에폭별 검증 손실 집계 및 스케줄러 갱신
+            val_total = float(val_total_scalar)
+            if val_total_tensor is not None:
+                val_total += float(val_total_tensor.item())
             val_loss = val_total / max(1, len(val_loader))
             self.sched.step()
 

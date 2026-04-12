@@ -351,6 +351,9 @@ class MultiPartExoTrainingDataset(Dataset):
         # 데이터 저장소 초기화
         # self.series[id] = {key: np.array} 구조로 원본 데이터 보관
         self.series: Dict[str, Dict[str, np.ndarray]] = {}
+        self._empty_past_exo_cont = np.empty((self.lookback, 0), dtype=np.float32)
+        self._empty_past_exo_cat = np.empty((self.lookback, 0), dtype=np.int64)
+        self._empty_future_exo_cont = np.empty((self.horizon, 0), dtype=np.float32)
 
         # 전역 인덱스 맵: 전체 데이터셋의 i번째 샘플이 (어떤 series의, 몇 번째 시점인지) 매핑
         self.index_map: List[Tuple[str, int]] = []
@@ -373,8 +376,8 @@ class MultiPartExoTrainingDataset(Dataset):
             uid = str(g[self.id_col][0])
 
             # 타겟 및 날짜 데이터를 NumPy 배열로 변환
-            y_all = _to_numpy(g[self.qty_col]).astype(np.float32)  # [T]
-            d_all = _to_numpy(g[self.date_col]).astype(np.int64)  # [T]
+            y_all = _to_numpy(g[self.qty_col]).astype(np.float32, copy=False)  # [T]
+            d_all = _to_numpy(g[self.date_col]).astype(np.int64, copy=False)  # [T]
 
             T = len(y_all)
             # 데이터 길이가 학습에 필요한 최소 길이(Lookback + Horizon)보다 짧으면 스킵
@@ -385,19 +388,23 @@ class MultiPartExoTrainingDataset(Dataset):
             cont_list = []
             for col in self.past_exo_cont_cols:
                 if col in g.columns:
-                    cont_list.append(_to_numpy(g[col]).astype(np.float32))
+                    cont_list.append(_to_numpy(g[col]).astype(np.float32, copy=False))
             # [T, Feature] 형태로 스택
-            exo_cont = np.stack(cont_list, axis=-1) if cont_list else np.zeros((T, 0), dtype=np.float32)
+            exo_cont = (
+                np.stack(cont_list, axis=-1).astype(np.float32, copy=False)
+                if cont_list
+                else np.empty((T, 0), dtype=np.float32)
+            )
 
             # ----- 연속형 미래 외생 변수 처리 (Known Future Cont Exo) -----
             future_cont_list = []
             for col in self.future_exo_cont_cols:
                 if col in g.columns:
-                    future_cont_list.append(_to_numpy(g[col]).astype(np.float32))
+                    future_cont_list.append(_to_numpy(g[col]).astype(np.float32, copy=False))
             future_exo_cont = (
-                np.stack(future_cont_list, axis=-1)
+                np.stack(future_cont_list, axis=-1).astype(np.float32, copy=False)
                 if future_cont_list
-                else np.zeros((T, 0), dtype=np.float32)
+                else np.empty((T, 0), dtype=np.float32)
             )
 
             # ----- 범주형 과거 외생 변수 처리 (Past Categorical Exo) -----
@@ -408,14 +415,18 @@ class MultiPartExoTrainingDataset(Dataset):
                 s = g[col]
                 # 이미 정수형 ID인 경우 그대로 사용
                 if s.dtype in (pl.Int8, pl.Int16, pl.Int32, pl.Int64, pl.UInt8, pl.UInt16, pl.UInt32, pl.UInt64):
-                    cat_list.append(_to_numpy(s).astype(np.int64))
+                    cat_list.append(_to_numpy(s).astype(np.int64, copy=False))
                 else:
                     # 문자열 등인 경우 Indexer를 통해 정수 ID로 변환
                     if col not in self.cat_indexers:
                         raise TypeError(f"Categorical '{col}' needs a CategoryIndexer or integer IDs.")
-                    cat_list.append(self.cat_indexers[col].map_series(s))
+                    cat_list.append(self.cat_indexers[col].map_series(s).astype(np.int64, copy=False))
             # [T, Feature] 형태로 스택
-            exo_cat = np.stack(cat_list, axis=-1) if cat_list else np.zeros((T, 0), dtype=np.int64)
+            exo_cat = (
+                np.stack(cat_list, axis=-1).astype(np.int64, copy=False)
+                if cat_list
+                else np.empty((T, 0), dtype=np.int64)
+            )
 
             # 처리된 데이터를 메모리에 저장
             self.series[uid] = {
@@ -475,12 +486,12 @@ class MultiPartExoTrainingDataset(Dataset):
         y_win = y_all[i + L:i + L + H]  # [H]
 
         # 외생 변수 슬라이싱 (과거 구간만 필요)
-        pe_cont = exo_cont[i:i + L, :] if exo_cont.shape[1] > 0 else np.zeros((L, 0), dtype=np.float32)
-        pe_cat = exo_cat[i:i + L, :] if exo_cat.shape[1] > 0 else np.zeros((L, 0), dtype=np.int64)
+        pe_cont = exo_cont[i:i + L, :] if exo_cont.shape[1] > 0 else self._empty_past_exo_cont
+        pe_cat = exo_cat[i:i + L, :] if exo_cat.shape[1] > 0 else self._empty_past_exo_cat
         fe_cont = (
             future_exo_cont[i + L:i + L + H, :]
             if future_exo_cont.shape[1] > 0
-            else np.zeros((H, 0), dtype=np.float32)
+            else self._empty_future_exo_cont
         )
 
         # 미래 외생 변수 시작 시점 계산
@@ -490,17 +501,13 @@ class MultiPartExoTrainingDataset(Dataset):
         # 인덱서를 통해 '예측 시작 시점(Horizon 첫 번째)'의 정수형 날짜/인덱스 계산
         start_idx = int(self.date_indexer(next_dt))
 
-        # Tensor 변환 (최소한의 연산으로 수행)
-        x = torch.from_numpy(x_win).to(torch.float32).unsqueeze(-1)  # [L, 1]
-        y = torch.from_numpy(y_win).to(torch.float32)  # [H]
-        pe_cont_t = torch.from_numpy(pe_cont).to(torch.float32)  # [L, E_cont]
-        pe_cat_t = torch.from_numpy(pe_cat).to(torch.long)  # [L, E_cat]
-        fe_cont_t = torch.from_numpy(fe_cont).to(torch.float32)  # [H, E_future]
+        # collate에서 batched tensor로 한 번에 묶기 위해 numpy view를 그대로 반환한다.
+        x_np = x_win[:, None]  # [L, 1]
 
         # single-table known future covariates가 있으면 slice를 반환하고,
         # 없으면 callback mode를 위해 start_idx를 반환한다.
-        future_payload = fe_cont_t if fe_cont_t.size(-1) > 0 else start_idx
-        return x, y, uid, future_payload, pe_cont_t, pe_cat_t
+        future_payload = fe_cont if fe_cont.shape[-1] > 0 else start_idx
+        return x_np, y_win, uid, future_payload, pe_cont, pe_cat
 
 # ============================================================
 # 2) Inference Dataset (Unified for Monthly/Weekly/Daily/Hourly)
@@ -1100,6 +1107,26 @@ class TrainCollateWithFutureExo:
             old = self.cache_keys.pop(0)
             self.cache.pop(old, None)
 
+    @staticmethod
+    def _stack_float_batch(items, *, name: str) -> torch.Tensor:
+        first = items[0]
+        if torch.is_tensor(first):
+            out = torch.stack(items, dim=0)
+            return out if out.dtype == torch.float32 else out.to(torch.float32)
+
+        arr = np.stack([np.asarray(item, dtype=np.float32) for item in items], axis=0).astype(np.float32, copy=False)
+        return torch.from_numpy(arr)
+
+    @staticmethod
+    def _stack_int_batch(items, *, name: str) -> torch.Tensor:
+        first = items[0]
+        if torch.is_tensor(first):
+            out = torch.stack(items, dim=0)
+            return out if out.dtype == torch.long else out.to(torch.long)
+
+        arr = np.stack([np.asarray(item, dtype=np.int64) for item in items], axis=0).astype(np.int64, copy=False)
+        return torch.from_numpy(arr)
+
     def __call__(self, batch):
         """
         DataLoader로부터 받은 샘플 리스트를 배치 텐서로 변환.
@@ -1114,10 +1141,10 @@ class TrainCollateWithFutureExo:
         xs, ys, uids, future_payloads, pe_conts, pe_cats = zip(*batch)
 
         # 기본 텐서 스택 (Stacking)
-        x = torch.stack(xs, dim=0)  # [B, L, 1]
-        y = torch.stack(ys, dim=0)  # [B, H]
-        pe_cont = torch.stack(pe_conts, 0)  # [B, L, E_cont]
-        pe_cat = torch.stack(pe_cats, 0)  # [B, L, E_cat]
+        x = self._stack_float_batch(xs, name="x")  # [B, L, 1]
+        y = self._stack_float_batch(ys, name="y")  # [B, H]
+        pe_cont = self._stack_float_batch(pe_conts, name="past_exo_cont")  # [B, L, E_cont]
+        pe_cat = self._stack_int_batch(pe_cats, name="past_exo_cat")  # [B, L, E_cat]
         uid_list = list(uids)
 
         B = len(future_payloads)
@@ -1127,19 +1154,28 @@ class TrainCollateWithFutureExo:
         table_mode = torch.is_tensor(first_payload) or isinstance(first_payload, np.ndarray)
 
         if table_mode:
-            fe_list: List[np.ndarray] = []
-            for payload in future_payloads:
-                if torch.is_tensor(payload):
-                    arr = payload.detach().cpu().numpy()
-                else:
+            first_shape = tuple(first_payload.shape)
+            if len(first_shape) != 2 or first_shape[0] != H:
+                raise ValueError(f"future_exo payload must be shaped (H, E). got={first_shape}")
+
+            if torch.is_tensor(first_payload):
+                for payload in future_payloads[1:]:
+                    shape = tuple(payload.shape)
+                    if len(shape) != 2 or shape[0] != H:
+                        raise ValueError(f"future_exo payload must be shaped (H, E). got={shape}")
+                fe = torch.stack(future_payloads, dim=0)
+                if fe.dtype != torch.float32:
+                    fe = fe.to(torch.float32)
+            else:
+                fe_list: List[np.ndarray] = []
+                for payload in future_payloads:
                     arr = np.asarray(payload, dtype=np.float32)
+                    if arr.ndim != 2 or arr.shape[0] != H:
+                        raise ValueError(f"future_exo payload must be shaped (H, E). got={arr.shape}")
+                    fe_list.append(arr.astype(np.float32, copy=False))
 
-                if arr.ndim != 2 or arr.shape[0] != H:
-                    raise ValueError(f"future_exo payload must be shaped (H, E). got={arr.shape}")
-                fe_list.append(arr.astype(np.float32))
-
-            fe_np = np.stack(fe_list, axis=0)
-            fe = torch.from_numpy(fe_np).to(torch.float32)
+                fe_np = np.stack(fe_list, axis=0).astype(np.float32, copy=False)
+                fe = torch.from_numpy(fe_np)
             return x, y, uid_list, fe, pe_cont, pe_cat
 
         start_idxs = future_payloads
@@ -1196,7 +1232,7 @@ class TrainCollateWithFutureExo:
                     self._cache_put(s_val, fe_arr)
 
         # 3) 최종 결과 스택 및 텐서 변환
-        fe_np = np.stack(fe_list, axis=0).astype(np.float32)  # [B, H, E]
-        fe = torch.from_numpy(fe_np).to(torch.float32)
+        fe_np = np.stack(fe_list, axis=0).astype(np.float32, copy=False)  # [B, H, E]
+        fe = torch.from_numpy(fe_np)
 
         return x, y, uid_list, fe, pe_cont, pe_cat

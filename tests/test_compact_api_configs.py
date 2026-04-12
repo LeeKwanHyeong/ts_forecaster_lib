@@ -119,3 +119,104 @@ def test_train_accepts_compact_nested_configs(monkeypatch, tmp_path):
     assert captured["ssl_mask_ratio"] == 0.4
     assert result.requested_models == ("patchtst_base",)
     assert result.ckpt_paths["patchtst_base"].endswith("patchtst.pt")
+
+
+def test_train_honors_loader_runtime_kwargs(monkeypatch, tmp_path):
+    train_module = importlib.import_module("modeling_module.api.train")
+    captured: dict[str, object] = {}
+
+    class FakeDataModule:
+        def get_train_loader(
+            self,
+            batch_size=None,
+            shuffle=None,
+            drop_last=True,
+            num_workers=0,
+            pin_memory=True,
+            persistent_workers=True,
+            prefetch_factor=2,
+        ):
+            captured["train_loader_kwargs"] = {
+                "batch_size": batch_size,
+                "shuffle": shuffle,
+                "drop_last": drop_last,
+                "num_workers": num_workers,
+                "pin_memory": pin_memory,
+                "persistent_workers": persistent_workers,
+                "prefetch_factor": prefetch_factor,
+            }
+            return "TRAIN_LOADER"
+
+        def get_val_loader(
+            self,
+            batch_size=None,
+            drop_last=False,
+            num_workers=0,
+            pin_memory=True,
+            persistent_workers=True,
+            prefetch_factor=2,
+        ):
+            captured["val_loader_kwargs"] = {
+                "batch_size": batch_size,
+                "drop_last": drop_last,
+                "num_workers": num_workers,
+                "pin_memory": pin_memory,
+                "persistent_workers": persistent_workers,
+                "prefetch_factor": prefetch_factor,
+            }
+            return "VAL_LOADER"
+
+    def fake_build_datamodule(_cfg):
+        return FakeDataModule()
+
+    def fake_run_total_train(train_loader, val_loader, **kwargs):
+        captured["train_loader"] = train_loader
+        captured["val_loader"] = val_loader
+        captured["run_kwargs"] = dict(kwargs)
+        return {
+            "TitanBase": {
+                "ckpt_path": str(tmp_path / "titan_base.pt"),
+                "model_key": "titan_base",
+                "family_key": "titan",
+            }
+        }
+
+    monkeypatch.setattr(train_module, "build_datamodule", fake_build_datamodule)
+    monkeypatch.setattr(train_module, "run_total_train", fake_run_total_train)
+
+    req = TrainRequest(
+        data=DataRequest(
+            df=_make_daily_df(),
+            window=DataWindowConfig(lookback=14, horizon=2, freq="daily"),
+            columns=DataColumnConfig(id_col="unique_id", date_col="date", y_col="y"),
+            loader=LoaderConfig(
+                batch_size=32,
+                shuffle=False,
+                num_workers=6,
+                pin_memory=True,
+                persistent_workers=True,
+                prefetch_factor=5,
+                drop_last=False,
+            ),
+        ),
+        models=["titan_base"],
+        trainer=TrainerConfig(epochs=1, lr=1e-3),
+        runtime=RuntimeConfig(device="cpu"),
+        artifacts=ArtifactConfig(save_dir=str(tmp_path), auto_save_dir=False),
+    )
+
+    result = train(req)
+
+    assert captured["train_loader"] == "TRAIN_LOADER"
+    assert captured["val_loader"] == "VAL_LOADER"
+
+    assert captured["train_loader_kwargs"] == {
+        "batch_size": 32,
+        "shuffle": False,
+        "drop_last": False,
+        "num_workers": 6,
+        "pin_memory": True,
+        "persistent_workers": True,
+        "prefetch_factor": 5,
+    }
+    assert captured["val_loader_kwargs"] == {
