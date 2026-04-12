@@ -3,6 +3,8 @@ from __future__ import annotations
 import importlib
 from types import SimpleNamespace
 
+import torch
+
 
 def test_run_total_train_forwards_family_architecture_overrides(monkeypatch):
     total_train = importlib.import_module("modeling_module.training.model_trainers.total_train")
@@ -61,3 +63,23 @@ def test_run_total_train_forwards_family_architecture_overrides(monkeypatch):
         "d_model": 512,
         "n_layers": 5,
     }
+
+
+def test_store_result_does_not_keep_gpu_model_reference():
+    total_train = importlib.import_module("modeling_module.training.model_trainers.total_train")
+
+    results: dict[str, dict] = {}
+    model = torch.nn.Linear(4, 2)
+
+    total_train._store_result(
+        results,
+        result_name="PatchTST",
+        best={"model": model, "cfg": {"epochs": 1}, "ckpt_path": "/tmp/model.pt"},
+        model_key="patchtst_base",
+        family_key="patchtst",
+    )
+
+    assert "PatchTST" in results
+    assert "model" not in results["PatchTST"]
+    assert results["PatchTST"]["model_key"] == "patchtst_base"
+    assert results["PatchTST"]["family_key"] == "patchtst"

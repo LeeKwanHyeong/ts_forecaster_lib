@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import os
 from dataclasses import asdict, replace
 from pathlib import Path
@@ -354,12 +355,23 @@ def _store_result(
     family_key: Optional[str] = None,
 ) -> None:
     record = dict(best)
+    model_obj = record.pop("model", None)
+    if model_obj is not None and isinstance(model_obj, torch.nn.Module):
+        # Sequential family training should not keep previous GPU models alive.
+        try:
+            model_obj.to("cpu")
+        except Exception:
+            pass
+        del model_obj
     if model_key is not None:
         record.setdefault("model_key", model_key)
     if family_key is not None:
         record.setdefault("family_key", family_key)
     record.setdefault("display_name", result_name)
     results[result_name] = record
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
 
 def _build_common_train_configs(
@@ -1449,6 +1461,9 @@ def run_total_train(
             kwargs.update(dict(patch_len=freq_spec.patch_len, stride=freq_spec.stride))
 
         MODEL_REGISTRY[m](**kwargs)
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     return results
 

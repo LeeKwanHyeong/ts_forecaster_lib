@@ -9,6 +9,31 @@ ARTIFACT_ROOT="${ARTIFACT_ROOT:-$REPO_ROOT/artifacts/total_train}"
 MODE="${MODE:-both}"
 ENDO_MODELS="${ENDO_MODELS:-patchtst patchmixer titan}"
 EXO_MODELS="${EXO_MODELS:-patchtst patchmixer titan exotst}"
+CLEAN_OUTPUT="${CLEAN_OUTPUT:-0}"
+LOG_TO_FILE="${LOG_TO_FILE:-1}"
+LOG_DIR="${LOG_DIR:-$REPO_ROOT/logs}"
+RUN_TAG="${RUN_TAG:-$(date +%Y%m%d_%H%M%S)}"
+LOG_FILE="${LOG_FILE:-$LOG_DIR/dsio_total_train_${RUN_TAG}.log}"
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
+
+read -r -a ENDO_MODELS_ARR <<< "$ENDO_MODELS"
+read -r -a EXO_MODELS_ARR <<< "$EXO_MODELS"
+
+CMD=(
+  "$PYTHON_BIN" "$REPO_ROOT/src/model_test/total_train/dsio_total_running.py"
+  --mode "$MODE"
+  --artifact-root "$ARTIFACT_ROOT"
+  --endo-models "${ENDO_MODELS_ARR[@]}"
+  --exo-models "${EXO_MODELS_ARR[@]}"
+)
+
+if [[ "$CLEAN_OUTPUT" == "1" ]]; then
+  CMD+=(--clean-output)
+fi
+
+if [[ "$#" -gt 0 ]]; then
+  CMD+=("$@")
+fi
 
 echo "[run] REPO_ROOT=$REPO_ROOT"
 echo "[run] PYTHON_BIN=$PYTHON_BIN"
@@ -16,11 +41,20 @@ echo "[run] ARTIFACT_ROOT=$ARTIFACT_ROOT"
 echo "[run] MODE=$MODE"
 echo "[run] ENDO_MODELS=$ENDO_MODELS"
 echo "[run] EXO_MODELS=$EXO_MODELS"
+echo "[run] CLEAN_OUTPUT=$CLEAN_OUTPUT"
+echo "[run] PYTORCH_CUDA_ALLOC_CONF=$PYTORCH_CUDA_ALLOC_CONF"
+if [[ "$LOG_TO_FILE" == "1" ]]; then
+  mkdir -p "$LOG_DIR"
+  echo "[run] LOG_FILE=$LOG_FILE"
+fi
 
-exec "$PYTHON_BIN" "$REPO_ROOT/src/model_test/total_train/dsio_total_running.py" \
-  --mode "$MODE" \
-  --artifact-root "$ARTIFACT_ROOT" \
-  --endo-models $ENDO_MODELS \
-  --exo-models $EXO_MODELS \
-  --clean-output \
-  "$@"
+if [[ "$LOG_TO_FILE" == "1" ]]; then
+  {
+    printf '[run] CMD='
+    printf '%q ' "${CMD[@]}"
+    printf '\n'
+    "${CMD[@]}"
+  } 2>&1 | tee -a "$LOG_FILE"
+else
+  exec "${CMD[@]}"
+fi
