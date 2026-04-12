@@ -43,6 +43,18 @@ notebook 환경까지 같이 쓰려면:
 pip install "modeling-module[notebook]"
 ```
 
+이미 `torch`, CUDA, `sktime`, `gluonts`, `datasets` 같은 패키지가 깔려 있는 기존 ML 환경에서
+wheel만 교체하고 싶다면 dependency 재해결을 피하는 편이 안전합니다.
+
+```bash
+pip install --no-deps --force-reinstall /path/to/modeling_module-0.1.1-py3-none-any.whl
+```
+
+즉:
+
+- 새 가상환경: 일반 `pip install ...`
+- 기존 GPU / 연구용 환경: 보통 `--no-deps` 로 library wheel만 교체
+
 개발 환경이나 editable install은 repository의 개발자 문서를 참고하면 됩니다.
 
 ## Supported Models

@@ -145,6 +145,13 @@ notebook/manual check까지 같이 쓰려면:
 pip install -e .[notebook]
 ```
 
+이미 `torch`, CUDA, `sktime`, `gluonts`, `datasets` 등이 깔린 기존 환경에서
+wheel만 다시 설치할 때는 dependency 재해결을 피하는 편이 안전합니다.
+
+```bash
+pip install --no-deps --force-reinstall /path/to/modeling_module-0.1.1-py3-none-any.whl
+```
+
 최소 의존성만 수동 설치하려면:
 
 ```bash
@@ -189,7 +196,7 @@ python3 tools/build_private_wheel.py
 원하는 public wheel이 이미 있으면 직접 넘길 수도 있습니다.
 
 ```bash
-python3 tools/build_private_wheel.py --wheel dist/modeling_module-0.1.0-py3-none-any.whl
+python3 tools/build_private_wheel.py --wheel dist/modeling_module-<version>-py3-none-any.whl
 ```
 
 ## Data Expectations
