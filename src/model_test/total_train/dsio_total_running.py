@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import os
 import random
+import shutil
 import sys
 from pathlib import Path
 
@@ -22,6 +23,7 @@ from modeling_module import (
     DataColumnConfig,
     DataRequest,
     DataWindowConfig,
+    ExoTSTArchitectureConfig,
     ExogenousConfig,
     LoaderConfig,
     PatchMixerArchitectureConfig,
@@ -82,7 +84,8 @@ FUTURE_EXO_CONT_COLS = [
 ]
 
 PAST_EXO_CAT_COLS: list[str] = []
-TOTAL_FAMILY_MODELS = ["patchtst", "patchmixer", "titan"]
+DEFAULT_ENDO_FAMILY_MODELS = ["patchtst", "patchmixer", "titan"]
+DEFAULT_EXO_FAMILY_MODELS = ["patchtst", "patchmixer", "titan", "exotst"]
 
 
 def set_global_seed(seed: int) -> None:
@@ -280,6 +283,20 @@ def build_model_architecture(args: argparse.Namespace) -> ArchitectureConfig:
             use_revin=True,
             final_clamp_nonneg=False,
         ),
+        exotst=ExoTSTArchitectureConfig(
+            d_model=args.exotst_d_model,
+            n_heads=args.exotst_heads,
+            d_ff=args.exotst_d_ff,
+            dropout=args.exotst_dropout,
+            attn_dropout=args.exotst_attn_dropout,
+            exo_enc_layers=args.exotst_exo_enc_layers,
+            fusion_layers=args.exotst_fusion_layers,
+            endo_dec_layers=args.exotst_endo_dec_layers,
+            exo_memory_mode=args.exotst_exo_memory_mode,
+            exo_nan_policy=args.exotst_exo_nan_policy,
+            use_revin=args.exotst_use_revin,
+            subtract_last=args.exotst_subtract_last,
+        ),
     )
 
 
@@ -303,7 +320,34 @@ def build_loader_config(
     )
 
 
-def run_endo(args: argparse.Namespace, *, device: str, architecture: ArchitectureConfig) -> None:
+def _resolve_model_groups(args: argparse.Namespace) -> tuple[list[str], list[str]]:
+    if args.models:
+        shared = [str(m).strip() for m in args.models if str(m).strip()]
+        return shared, shared
+
+    endo_models = [str(m).strip() for m in args.endo_models if str(m).strip()]
+    exo_models = [str(m).strip() for m in args.exo_models if str(m).strip()]
+    if not endo_models:
+        endo_models = list(DEFAULT_ENDO_FAMILY_MODELS)
+    if not exo_models:
+        exo_models = list(DEFAULT_EXO_FAMILY_MODELS)
+    return endo_models, exo_models
+
+
+def _clean_output_dirs(*dirs: Path) -> None:
+    for directory in dirs:
+        if directory.exists():
+            print(f"[clean] removing existing output directory: {directory}")
+            shutil.rmtree(directory)
+
+
+def run_endo(
+    args: argparse.Namespace,
+    *,
+    device: str,
+    architecture: ArchitectureConfig,
+    models: list[str],
+) -> None:
     min_obs = args.lookback + args.horizon
     target_raw = load_polars_table(TARGET_SOURCE, "tb_master_target")
     target_df = prepare_target_df(
@@ -347,12 +391,14 @@ def run_endo(args: argparse.Namespace, *, device: str, architecture: Architectur
         describe_batch(batch, "ENDO/train")
 
     save_dir = args.artifact_root / "endo_only"
+    if args.clean_output:
+        _clean_output_dirs(save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
     result = train(
         TrainRequest(
             data=data_req,
             freq=FREQ,
-            models=TOTAL_FAMILY_MODELS,
+            models=models,
             architecture=architecture,
             trainer=TrainerConfig(
                 warmup_epochs=args.warmup_epochs,
@@ -375,7 +421,13 @@ def run_endo(args: argparse.Namespace, *, device: str, architecture: Architectur
     print_training_result(result, "ENDO")
 
 
-def run_exo(args: argparse.Namespace, *, device: str, architecture: ArchitectureConfig) -> None:
+def run_exo(
+    args: argparse.Namespace,
+    *,
+    device: str,
+    architecture: ArchitectureConfig,
+    models: list[str],
+) -> None:
     min_obs = args.lookback + args.horizon
     target_raw = load_polars_table(TARGET_SOURCE, "tb_master_target")
     target_df = prepare_target_df(
@@ -439,11 +491,13 @@ def run_exo(args: argparse.Namespace, *, device: str, architecture: Architecture
         describe_batch(batch, "EXO/train")
 
     save_dir = args.artifact_root / "endo_plus_exo"
+    if args.clean_output:
+        _clean_output_dirs(save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
     result = train(
         TrainRequest(
             data=data_req,
-            models=TOTAL_FAMILY_MODELS,
+            models=models,
             architecture=architecture,
             trainer=TrainerConfig(
                 warmup_epochs=args.warmup_epochs,
@@ -471,11 +525,14 @@ def build_parser() -> argparse.ArgumentParser:
         description="Run DSIO weekly total training for endogenous-only and/or endogenous+exogenous models."
     )
     parser.add_argument("--mode", choices=["endo", "exo", "both"], default="both")
-    parser.add_argument("--artifact-root", type=Path, default=REPO_ROOT / "artifacts" / "total_train" / "dsio")
+    parser.add_argument("--artifact-root", type=Path, default=REPO_ROOT / "artifacts" / "total_train")
+    parser.add_argument("--models", nargs="+", default=None)
+    parser.add_argument("--endo-models", nargs="+", default=list(DEFAULT_ENDO_FAMILY_MODELS))
+    parser.add_argument("--exo-models", nargs="+", default=list(DEFAULT_EXO_FAMILY_MODELS))
     parser.add_argument("--lookback", type=int, default=104)
     parser.add_argument("--horizon", type=int, default=27)
-    parser.add_argument("--endo-batch-size", type=int, default=2048)
-    parser.add_argument("--exo-batch-size", type=int, default=1024)
+    parser.add_argument("--endo-batch-size", type=int, default=1024)
+    parser.add_argument("--exo-batch-size", type=int, default=512)
     parser.add_argument("--warmup-epochs", type=int, default=3)
     parser.add_argument("--spike-epochs", type=int, default=2)
     parser.add_argument("--lr", type=float, default=1e-3)
@@ -492,6 +549,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-persistent-workers", action="store_false", dest="persistent_workers")
     parser.add_argument("--no-shuffle", action="store_true")
     parser.add_argument("--skip-batch-check", action="store_true")
+    parser.add_argument("--clean-output", action="store_true")
     parser.add_argument("--use-id-sample", action="store_true")
     parser.add_argument("--max-ids", type=int, default=256)
     parser.add_argument("--seed", type=int, default=42)
@@ -500,16 +558,30 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--patchtst-d-model", type=int, default=384)
     parser.add_argument("--patchtst-layers", type=int, default=5)
     parser.add_argument("--patchtst-d-ff", type=int, default=1536)
-    parser.add_argument("--patchmixer-d-model", type=int, default=256)
-    parser.add_argument("--patchmixer-layers", type=int, default=8)
-    parser.add_argument("--patchmixer-f-out", type=int, default=384)
-    parser.add_argument("--patchmixer-head-hidden", type=int, default=384)
+    parser.add_argument("--patchmixer-d-model", type=int, default=192)
+    parser.add_argument("--patchmixer-layers", type=int, default=6)
+    parser.add_argument("--patchmixer-f-out", type=int, default=256)
+    parser.add_argument("--patchmixer-head-hidden", type=int, default=256)
     parser.add_argument("--titan-d-model", type=int, default=384)
     parser.add_argument("--titan-layers", type=int, default=4)
     parser.add_argument("--titan-heads", type=int, default=8)
     parser.add_argument("--titan-d-ff", type=int, default=1536)
     parser.add_argument("--titan-contextual-mem-size", type=int, default=384)
     parser.add_argument("--titan-persistent-mem-size", type=int, default=96)
+    parser.add_argument("--exotst-d-model", type=int, default=128)
+    parser.add_argument("--exotst-heads", type=int, default=8)
+    parser.add_argument("--exotst-d-ff", type=int, default=256)
+    parser.add_argument("--exotst-dropout", type=float, default=0.1)
+    parser.add_argument("--exotst-attn-dropout", type=float, default=0.1)
+    parser.add_argument("--exotst-exo-enc-layers", type=int, default=2)
+    parser.add_argument("--exotst-fusion-layers", type=int, default=2)
+    parser.add_argument("--exotst-endo-dec-layers", type=int, default=2)
+    parser.add_argument("--exotst-exo-memory-mode", type=str, default="all")
+    parser.add_argument("--exotst-exo-nan-policy", type=str, default="zero+indicator")
+    parser.add_argument("--exotst-use-revin", action="store_true", default=True)
+    parser.add_argument("--no-exotst-use-revin", action="store_false", dest="exotst_use_revin")
+    parser.add_argument("--exotst-subtract-last", action="store_true", default=True)
+    parser.add_argument("--no-exotst-subtract-last", action="store_false", dest="exotst_subtract_last")
     return parser
 
 
@@ -524,6 +596,7 @@ def main() -> None:
     default_device, device_note = configure_torch_runtime()
     device = default_device if args.device == "auto" else args.device
     architecture = build_model_architecture(args)
+    endo_models, exo_models = _resolve_model_groups(args)
 
     print("REPO_ROOT           :", REPO_ROOT)
     print("PYTHON              :", sys.executable)
@@ -546,14 +619,16 @@ def main() -> None:
     print("SPIKE_EPOCHS        :", args.spike_epochs)
     print("SSL_MODE            :", args.ssl_mode)
     print("SSL_PRETRAIN_EPOCHS :", args.ssl_pretrain_epochs)
-    print("MODELS              :", TOTAL_FAMILY_MODELS)
+    print("ENDO_MODELS         :", endo_models)
+    print("EXO_MODELS          :", exo_models)
     print("ARTIFACT_ROOT       :", args.artifact_root)
+    print("CLEAN_OUTPUT        :", args.clean_output)
     print("ARCHITECTURE        :", architecture)
 
     if args.mode in {"endo", "both"}:
-        run_endo(args, device=device, architecture=architecture)
+        run_endo(args, device=device, architecture=architecture, models=endo_models)
     if args.mode in {"exo", "both"}:
-        run_exo(args, device=device, architecture=architecture)
+        run_exo(args, device=device, architecture=architecture, models=exo_models)
 
 
 if __name__ == "__main__":
