@@ -4,17 +4,21 @@ import importlib
 from datetime import date, timedelta
 
 import polars as pl
+import pytest
 import torch
 
 from modeling_module import (
     ArtifactConfig,
+    ArchitectureConfig,
     DataColumnConfig,
     DataRequest,
     DataWindowConfig,
     ExogenousConfig,
     LoaderConfig,
+    PatchTSTArchitectureConfig,
     RuntimeConfig,
     SSLConfig,
+    TitanArchitectureConfig,
     TrainRequest,
     TrainerConfig,
     build_dataloader,
@@ -220,3 +224,84 @@ def test_train_honors_loader_runtime_kwargs(monkeypatch, tmp_path):
         "prefetch_factor": 5,
     }
     assert captured["val_loader_kwargs"] == {
+        "batch_size": 32,
+        "drop_last": False,
+        "num_workers": 6,
+        "pin_memory": True,
+        "persistent_workers": True,
+        "prefetch_factor": 5,
+    }
+    assert result.requested_models == ("titan_base",)
+    assert result.ckpt_paths["titan_base"].endswith("titan_base.pt")
+
+
+def test_train_accepts_family_architecture_overrides(monkeypatch, tmp_path):
+    train_module = importlib.import_module("modeling_module.api.train")
+    captured: dict[str, object] = {}
+
+    def fake_run_total_train(train_loader, val_loader, **kwargs):
+        captured.update(kwargs)
+        return {
+            "PatchTST": {
+                "ckpt_path": str(tmp_path / "patchtst.pt"),
+                "model_key": "patchtst_base",
+                "family_key": "patchtst",
+            }
+        }
+
+    monkeypatch.setattr(train_module, "run_total_train", fake_run_total_train)
+
+    req = TrainRequest(
+        data=DataRequest(
+            df=_make_daily_df(),
+            window=DataWindowConfig(lookback=14, horizon=2, freq="daily"),
+        ),
+        models=["patchtst_base"],
+        trainer=TrainerConfig(epochs=1, lr=1e-3),
+        architecture=ArchitectureConfig(
+            patchtst=PatchTSTArchitectureConfig(
+                patch_len=12,
+                stride=6,
+                d_model=384,
+                n_layers=5,
+            ),
+            titan=TitanArchitectureConfig(d_model=512),
+        ),
+        runtime=RuntimeConfig(device="cpu"),
+        artifacts=ArtifactConfig(save_dir=str(tmp_path), auto_save_dir=False),
+    )
+
+    train(req)
+
+    assert captured["model_architecture"] == {
+        "patchtst": {
+            "patch_len": 12,
+            "stride": 6,
+            "d_model": 384,
+            "n_layers": 5,
+        },
+        "titan": {
+            "d_model": 512,
+        },
+    }
+
+
+def test_train_validates_patch_len_from_architecture_override(tmp_path):
+    req = TrainRequest(
+        data=DataRequest(
+            df=_make_daily_df(),
+            window=DataWindowConfig(lookback=14, horizon=2, freq="daily"),
+        ),
+        models=["patchtst_base"],
+        trainer=TrainerConfig(epochs=1, lr=1e-3),
+        architecture=ArchitectureConfig(
+            patchtst=PatchTSTArchitectureConfig(
+                patch_len=16,
+            )
+        ),
+        runtime=RuntimeConfig(device="cpu"),
+        artifacts=ArtifactConfig(save_dir=str(tmp_path), auto_save_dir=False),
+    )
+
+    with pytest.raises(ValueError, match="lookback=14 is too short"):
+        train(req)

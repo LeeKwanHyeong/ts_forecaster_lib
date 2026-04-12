@@ -124,6 +124,101 @@ class ArtifactConfig:
 
 
 @dataclass
+class PatchTSTArchitectureConfig:
+    """
+    PatchTST family architecture overrides.
+
+    These values override the frequency-policy defaults for PatchTST artifacts.
+    """
+    patch_len: Optional[int] = None
+    stride: Optional[int] = None
+    d_model: Optional[int] = None
+    n_layers: Optional[int] = None
+    d_ff: Optional[int] = None
+    dropout: Optional[float] = None
+    norm: Optional[str] = None
+    pre_norm: Optional[bool] = None
+    act: Optional[str] = None
+    use_revin: Optional[bool] = None
+    pe: Optional[str] = None
+    learn_pe: Optional[bool] = None
+    padding_patch: Optional[str] = None
+
+
+@dataclass
+class TitanArchitectureConfig:
+    """
+    Titan family architecture overrides.
+    """
+    d_model: Optional[int] = None
+    n_layers: Optional[int] = None
+    n_heads: Optional[int] = None
+    d_ff: Optional[int] = None
+    dropout: Optional[float] = None
+    contextual_mem_size: Optional[int] = None
+    persistent_mem_size: Optional[int] = None
+    use_revin: Optional[bool] = None
+    final_clamp_nonneg: Optional[bool] = None
+
+
+@dataclass
+class PatchMixerArchitectureConfig:
+    """
+    PatchMixer family architecture overrides.
+    """
+    patch_len: Optional[int] = None
+    stride: Optional[int] = None
+    d_model: Optional[int] = None
+    e_layers: Optional[int] = None
+    f_out: Optional[int] = None
+    head_hidden: Optional[int] = None
+    dropout: Optional[float] = None
+    head_dropout: Optional[float] = None
+    use_revin: Optional[bool] = None
+    final_nonneg: Optional[bool] = None
+    expander_n_harmonics: Optional[int] = None
+
+
+@dataclass
+class ExoTSTArchitectureConfig:
+    """
+    ExoTST family architecture overrides.
+    """
+    patch_len: Optional[int] = None
+    stride: Optional[int] = None
+    d_model: Optional[int] = None
+    n_heads: Optional[int] = None
+    d_ff: Optional[int] = None
+    dropout: Optional[float] = None
+    attn_dropout: Optional[float] = None
+    exo_enc_layers: Optional[int] = None
+    fusion_layers: Optional[int] = None
+    endo_dec_layers: Optional[int] = None
+    exo_memory_mode: Optional[str] = None
+    exo_nan_policy: Optional[str] = None
+    use_revin: Optional[bool] = None
+    subtract_last: Optional[bool] = None
+
+
+@dataclass
+class ArchitectureConfig:
+    """
+    Family-level model architecture overrides.
+
+    Notes
+    - Overrides are applied per family. For example, `patchtst` settings affect
+      both `patchtst_base` and `patchtst_quantile`.
+    - Mapping-style input is also supported. Keys may be family names such as
+      `patchtst`, `patchmixer`, `titan`, `exotst`, or canonical artifact keys
+      such as `titan_base`.
+    """
+    patchtst: Optional[PatchTSTArchitectureConfig | Mapping[str, Any]] = None
+    titan: Optional[TitanArchitectureConfig | Mapping[str, Any]] = None
+    patchmixer: Optional[PatchMixerArchitectureConfig | Mapping[str, Any]] = None
+    exotst: Optional[ExoTSTArchitectureConfig | Mapping[str, Any]] = None
+
+
+@dataclass
 class TrainRequest:
     """
     Preferred public request object for `train(...)`.
@@ -134,6 +229,7 @@ class TrainRequest:
     - `ssl`: Optional SSL pretraining options
     - `runtime`: Device selection
     - `artifacts`: Checkpoint / manifest output settings
+    - `architecture`: Family-level model architecture overrides
 
     Flat fields such as `lookback`, `horizon`, `device`, `save_dir`, `use_ssl_mode`,
     and `loss_point` are still accepted for backward compatibility, but new code should
@@ -170,6 +266,7 @@ class TrainRequest:
     ssl: Optional[SSLConfig | Mapping[str, Any]] = None
     runtime: Optional[RuntimeConfig | Mapping[str, Any]] = None
     artifacts: Optional[ArtifactConfig | Mapping[str, Any]] = None
+    architecture: Optional[ArchitectureConfig | Mapping[str, Any]] = None
 
     # Flat aliases kept for backward compatibility.
     freq: Optional[str] = None
@@ -278,6 +375,107 @@ def _coerce_mapping(value: Any) -> Optional[dict[str, Any]]:
     return None
 
 
+_ARCHITECTURE_ALLOWED_KEYS: dict[str, set[str]] = {
+    "patchtst": {
+        "patch_len",
+        "stride",
+        "d_model",
+        "n_layers",
+        "d_ff",
+        "dropout",
+        "norm",
+        "pre_norm",
+        "act",
+        "use_revin",
+        "pe",
+        "learn_pe",
+        "padding_patch",
+    },
+    "titan": {
+        "d_model",
+        "n_layers",
+        "n_heads",
+        "d_ff",
+        "dropout",
+        "contextual_mem_size",
+        "persistent_mem_size",
+        "use_revin",
+        "final_clamp_nonneg",
+    },
+    "patchmixer": {
+        "patch_len",
+        "stride",
+        "d_model",
+        "e_layers",
+        "f_out",
+        "head_hidden",
+        "dropout",
+        "head_dropout",
+        "use_revin",
+        "final_nonneg",
+        "expander_n_harmonics",
+    },
+    "exotst": {
+        "patch_len",
+        "stride",
+        "d_model",
+        "n_heads",
+        "d_ff",
+        "dropout",
+        "attn_dropout",
+        "exo_enc_layers",
+        "fusion_layers",
+        "endo_dec_layers",
+        "exo_memory_mode",
+        "exo_nan_policy",
+        "use_revin",
+        "subtract_last",
+    },
+}
+
+
+def _family_from_training_target(name: str) -> str:
+    canonical = resolve_training_request_key(name)
+    if canonical == "patchtst" or canonical.startswith("patchtst_"):
+        return "patchtst"
+    if canonical == "patchmixer" or canonical.startswith("patchmixer_"):
+        return "patchmixer"
+    if canonical == "titan" or canonical.startswith("titan_"):
+        return "titan"
+    if canonical == "exotst" or canonical.startswith("exotst_"):
+        return "exotst"
+    raise ValueError(f"Unsupported architecture override target: {name!r}")
+
+
+def _normalize_model_architecture(value: Any) -> Optional[dict[str, dict[str, Any]]]:
+    mapping = _coerce_mapping(value)
+    if not mapping:
+        return None
+
+    normalized: dict[str, dict[str, Any]] = {}
+    for raw_key, raw_section in mapping.items():
+        section = _coerce_mapping(raw_section)
+        if not section:
+            continue
+
+        family = _family_from_training_target(str(raw_key))
+        allowed = _ARCHITECTURE_ALLOWED_KEYS[family]
+        unknown = sorted(key for key in section if key not in allowed)
+        if unknown:
+            allowed_list = ", ".join(sorted(allowed))
+            raise ValueError(
+                f"Unsupported architecture override keys for {family}: {', '.join(unknown)}. "
+                f"Supported keys: {allowed_list}."
+            )
+
+        family_section = normalized.setdefault(family, {})
+        for key, item in section.items():
+            if item is not None:
+                family_section[key] = item
+
+    return normalized or None
+
+
 def _load_config_file(path: str) -> dict[str, Any]:
     cfg_path = Path(path)
     if not cfg_path.exists():
@@ -380,6 +578,15 @@ def _normalize_payload(raw: Mapping[str, Any]) -> dict[str, Any]:
             continue
         for raw_key, value in section.items():
             payload.setdefault(key_mapping.get(raw_key, raw_key), value)
+
+    architecture_cfg = payload.get("architecture")
+    if architecture_cfg is None:
+        architecture_cfg = payload.get("model_architecture")
+    if architecture_cfg is None:
+        architecture_cfg = payload.get("architecture_overrides")
+    normalized_architecture = _normalize_model_architecture(architecture_cfg)
+    if normalized_architecture is not None:
+        payload["model_architecture"] = normalized_architecture
 
     if "frequency" in payload and "freq" not in payload:
         payload["freq"] = payload["frequency"]
@@ -661,16 +868,26 @@ def _validate_training_request(
         raise ValueError("`lookback` and `horizon` must be positive integers.")
 
     freq_spec = get_freq_spec(freq_value)
-    patch_based_targets = {
-        key for key in requested_models if key.startswith(("patchtst_", "patchmixer_", "exotst_"))
-    }
-    if patch_based_targets and lookback_i < int(freq_spec.patch_len):
-        model_list = ", ".join(sorted(patch_based_targets))
-        raise ValueError(
-            "Invalid training request: "
-            f"lookback={lookback_i} is too short for {model_list} at freq='{freq_value}'. "
-            f"This frequency uses patch_len={freq_spec.patch_len}, so set lookback >= {freq_spec.patch_len}."
-        )
+    architecture = payload.get("model_architecture") or {}
+    patch_requirements: dict[str, int] = {}
+    for key in requested_models:
+        family = _family_from_training_target(key)
+        if family not in {"patchtst", "patchmixer", "exotst"}:
+            continue
+        family_arch = architecture.get(family) or {}
+        patch_requirements[key] = int(family_arch.get("patch_len", freq_spec.patch_len))
+
+    if patch_requirements:
+        required_patch_len = max(patch_requirements.values())
+        if lookback_i < required_patch_len:
+            model_list = ", ".join(
+                f"{name}(patch_len={patch_requirements[name]})" for name in sorted(patch_requirements)
+            )
+            raise ValueError(
+                "Invalid training request: "
+                f"lookback={lookback_i} is too short for {model_list} at freq='{freq_value}'. "
+                f"Set lookback >= {required_patch_len}."
+            )
 
     if "exotst_base" not in requested_models:
         return
@@ -776,6 +993,7 @@ def train(req: TrainRequest | Mapping[str, Any]) -> TrainResult:
         save_dir=payload.get("save_dir"),
         use_exogenous_mode=bool(payload.get("use_exogenous_mode", False)),
         models_to_run=requested_models,
+        model_architecture=payload.get("model_architecture"),
         loss_point=payload.get("loss_point"),
         loss_quantile=payload.get("loss_quantile"),
         loss=payload.get("loss"),
@@ -802,8 +1020,13 @@ def train(req: TrainRequest | Mapping[str, Any]) -> TrainResult:
 
 __all__ = [
     "ArtifactConfig",
+    "ArchitectureConfig",
+    "ExoTSTArchitectureConfig",
+    "PatchMixerArchitectureConfig",
+    "PatchTSTArchitectureConfig",
     "RuntimeConfig",
     "SSLConfig",
+    "TitanArchitectureConfig",
     "TrainRequest",
     "TrainResult",
     "TrainerConfig",

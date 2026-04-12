@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from dataclasses import asdict, replace
 from pathlib import Path
-from typing import Dict, Optional, Iterable, List, Callable, Any, Literal, Tuple, Union
+from typing import Dict, Optional, Iterable, List, Callable, Any, Literal, Tuple, Union, Mapping
 
 import torch
 import torch.nn as nn
@@ -263,6 +263,18 @@ def infer_supervised_mode(loss_obj) -> str:
     return "point"
 
 
+def _family_architecture_override(
+    model_architecture: Optional[Mapping[str, Mapping[str, Any]]],
+    family: str,
+) -> Dict[str, Any]:
+    if not model_architecture:
+        return {}
+    section = model_architecture.get(family)
+    if not section:
+        return {}
+    return {key: value for key, value in dict(section).items() if value is not None}
+
+
 def default_loss_point():
     return MAE()
 
@@ -504,6 +516,7 @@ def _run_exotst(
     past_cat_dim: int,
     save_root: Optional[Path] = None,
     requested_artifact_keys: Optional[Iterable[str]] = None,
+    architecture_override: Optional[Mapping[str, Any]] = None,
     **kwargs,
 ):
     """
@@ -548,6 +561,8 @@ def _run_exotst(
             subtract_last=True,
         )
     )
+    if architecture_override:
+        cfg_kwargs.update({key: value for key, value in dict(architecture_override).items() if value is not None})
 
     exotst_cfg = ExoTSTConfig(**cfg_kwargs)
     exotst_model = build_exotst(exotst_cfg).to(device)
@@ -605,6 +620,7 @@ def _run_patchtst(
     ssl_freeze_encoder_before_ft: bool = False,
     ssl_pretrained_ckpt_path: Optional[str] = None,
     requested_artifact_keys: Optional[Iterable[str]] = None,
+    architecture_override: Optional[Mapping[str, Any]] = None,
 ):
     """
     PatchTST 학습 파이프라인.
@@ -639,6 +655,8 @@ def _run_patchtst(
         pe="sincos",
         learn_pe=True,
     )
+    if architecture_override:
+        pt_kwargs.update({key: value for key, value in dict(architecture_override).items() if value is not None})
 
     if use_exogenous_mode:
         pt_kwargs.update(
@@ -848,6 +866,7 @@ def _run_titan(
     stages,
     device: str,
     requested_artifact_keys: Optional[Iterable[str]] = None,
+    architecture_override: Optional[Mapping[str, Any]] = None,
 ):
     """
     Titan runner (LMM + Seq2Seq)
@@ -908,6 +927,8 @@ def _run_titan(
         use_revin=True,
         final_clamp_nonneg=False,
     )
+    if architecture_override:
+        ti_kwargs.update({key: value for key, value in dict(architecture_override).items() if value is not None})
 
     print(
         f"[Titan][EXO] use_exo={use_exogenous_mode} "
@@ -1070,6 +1091,7 @@ def _run_patchmixer(
     stages: List[StageConfig] = None,  # type: ignore[assignment]
     device: str = "cuda",
     requested_artifact_keys: Optional[Iterable[str]] = None,
+    architecture_override: Optional[Mapping[str, Any]] = None,
 ):
     """PatchMixer (Base/Dist + Quantile) runner."""
     if stages is None:
@@ -1135,6 +1157,8 @@ def _run_patchmixer(
         learn_dw_gain=True,
         past_exo_mode="z_gate",
     )
+    if architecture_override:
+        pm_kwargs.update({key: value for key, value in dict(architecture_override).items() if value is not None})
 
     _fcb = future_exo_cb if use_exogenous_mode else None
     if use_exogenous_mode:
@@ -1298,6 +1322,7 @@ def run_total_train(
     save_dir: Optional[str] = None,
     use_exogenous_mode: bool = False,
     models_to_run: Optional[Iterable[str]] = None,
+    model_architecture: Optional[Mapping[str, Mapping[str, Any]]] = None,
 
     # loss routing
     loss_point: Optional[nn.Module] = None,
@@ -1392,6 +1417,7 @@ def run_total_train(
         print(f"\n[total_train] === RUN: {m} ({freq_spec.freq}) targets={family_targets} ===")
         kwargs = dict(base_kwargs)
         kwargs["requested_artifact_keys"] = family_targets
+        kwargs["architecture_override"] = _family_architecture_override(model_architecture, m)
 
         # per-model extras
         if m == "patchtst":
@@ -1448,6 +1474,7 @@ def run_total_train_weekly(
     save_dir=None,
     use_exogenous_mode: bool = False,
     models_to_run=None,
+    model_architecture: Optional[Mapping[str, Mapping[str, Any]]] = None,
     loss_point: Optional[nn.Module] = None,
     loss_quantile: Optional[nn.Module] = None,
     loss: Optional[nn.Module] = None,
@@ -1473,6 +1500,7 @@ def run_total_train_weekly(
         save_dir=save_dir,
         use_exogenous_mode=use_exogenous_mode,
         models_to_run=models_to_run,
+        model_architecture=model_architecture,
         loss_point=loss_point,
         loss_quantile=loss_quantile,
         loss=loss,
@@ -1500,6 +1528,7 @@ def run_total_train_monthly(
     save_dir=None,
     use_exogenous_mode: bool = False,
     models_to_run=None,
+    model_architecture: Optional[Mapping[str, Mapping[str, Any]]] = None,
     loss_point: Optional[nn.Module] = None,
     loss_quantile: Optional[nn.Module] = None,
     loss: Optional[nn.Module] = None,
@@ -1525,6 +1554,7 @@ def run_total_train_monthly(
         save_dir=save_dir,
         use_exogenous_mode=use_exogenous_mode,
         models_to_run=models_to_run,
+        model_architecture=model_architecture,
         loss_point=loss_point,
         loss_quantile=loss_quantile,
         loss=loss,
@@ -1552,6 +1582,7 @@ def run_total_train_daily(
     save_dir=None,
     use_exogenous_mode: bool = False,
     models_to_run=None,
+    model_architecture: Optional[Mapping[str, Mapping[str, Any]]] = None,
     loss_point: Optional[nn.Module] = None,
     loss_quantile: Optional[nn.Module] = None,
     loss: Optional[nn.Module] = None,
@@ -1577,6 +1608,7 @@ def run_total_train_daily(
         save_dir=save_dir,
         use_exogenous_mode=use_exogenous_mode,
         models_to_run=models_to_run,
+        model_architecture=model_architecture,
         loss_point=loss_point,
         loss_quantile=loss_quantile,
         loss=loss,
@@ -1604,6 +1636,7 @@ def run_total_train_hourly(
     save_dir=None,
     use_exogenous_mode: bool = False,
     models_to_run=None,
+    model_architecture: Optional[Mapping[str, Mapping[str, Any]]] = None,
     loss_point: Optional[nn.Module] = None,
     loss_quantile: Optional[nn.Module] = None,
     loss: Optional[nn.Module] = None,
@@ -1629,6 +1662,7 @@ def run_total_train_hourly(
         save_dir=save_dir,
         use_exogenous_mode=use_exogenous_mode,
         models_to_run=models_to_run,
+        model_architecture=model_architecture,
         loss_point=loss_point,
         loss_quantile=loss_quantile,
         loss=loss,

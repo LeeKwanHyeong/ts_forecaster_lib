@@ -10,8 +10,13 @@ from .data import (
 from .infer import LoadedPredictor, load_predictor, predict
 from .train import (
     ArtifactConfig,
+    ArchitectureConfig,
+    ExoTSTArchitectureConfig,
+    PatchMixerArchitectureConfig,
+    PatchTSTArchitectureConfig,
     RuntimeConfig,
     SSLConfig,
+    TitanArchitectureConfig,
     TrainRequest,
     TrainResult,
     TrainerConfig,
@@ -20,14 +25,19 @@ from .train import (
 
 __all__ = [
     "ArtifactConfig",
+    "ArchitectureConfig",
     "DataColumnConfig",
     "DataRequest",
     "DataWindowConfig",
+    "ExoTSTArchitectureConfig",
     "ExogenousConfig",
     "LoadedPredictor",
     "LoaderConfig",
+    "PatchMixerArchitectureConfig",
+    "PatchTSTArchitectureConfig",
     "RuntimeConfig",
     "SSLConfig",
+    "TitanArchitectureConfig",
     "TrainRequest",
     "TrainResult",
     "TrainerConfig",

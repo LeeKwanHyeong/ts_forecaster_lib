@@ -27,7 +27,9 @@ from modeling_module import train, load_predictor, predict, build_dataloader
 - 타입: `TrainRequest`, `TrainResult`, `DataRequest`
 - nested config:
   `TrainerConfig`, `SSLConfig`, `RuntimeConfig`, `ArtifactConfig`,
-  `DataWindowConfig`, `DataColumnConfig`, `ExogenousConfig`, `LoaderConfig`
+  `DataWindowConfig`, `DataColumnConfig`, `ExogenousConfig`, `LoaderConfig`,
+  `ArchitectureConfig`, `PatchTSTArchitectureConfig`, `TitanArchitectureConfig`,
+  `PatchMixerArchitectureConfig`
 
 ## Installation
 
@@ -155,6 +157,38 @@ req = TrainRequest(
 
 result = train(req)
 print(result.ckpt_paths)
+```
+
+### Model Architecture Override
+
+```python
+from modeling_module import (
+    ArchitectureConfig,
+    PatchTSTArchitectureConfig,
+    TitanArchitectureConfig,
+)
+
+req = TrainRequest(
+    data=DataRequest(
+        df=target_df,
+        window=DataWindowConfig(lookback=104, horizon=27, freq="weekly"),
+    ),
+    models=["patchtst_base", "titan_base"],
+    architecture=ArchitectureConfig(
+        patchtst=PatchTSTArchitectureConfig(
+            patch_len=13,
+            stride=6,
+            d_model=384,
+            n_layers=5,
+        ),
+        titan=TitanArchitectureConfig(
+            d_model=512,
+            n_layers=5,
+            n_heads=8,
+        ),
+    ),
+    trainer=TrainerConfig(warmup_epochs=3, spike_epochs=2, base_lr=1e-3),
+)
 ```
 
 ### Endogenous + Exogenous
