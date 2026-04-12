@@ -478,6 +478,58 @@ artifact directory에는 보통 아래가 생성됩니다.
 
 를 포함합니다.
 
+## DSIO Total Train Script
+
+리눅스 서버에서 장시간 학습을 안정적으로 돌릴 때는 notebook보다 운영용 Python 스크립트를 쓰는 편이 좋습니다.
+
+- `src/model_test/total_train/dsio_total_running.py`
+
+이 스크립트는 현재 DSIO 본사 데이터 기준 total train 실행용입니다.
+
+- `tb_master_target.parquet` 기반 endogenous-only 학습
+- `tb_master_target_exo.parquet` 우선, 없으면 `tb_master_exo.parquet` + target join 기반 endogenous + exogenous 학습
+- family 단위 `patchtst`, `patchmixer`, `titan` 전체 학습
+- `TrainRequest(architecture=...)` 기반 모델 구조 override 지원
+
+기본값은 현재 운영 기준 balanced weekly 설정입니다.
+
+- `lookback=104`
+- `endo_batch_size=2048`
+- `exo_batch_size=1024`
+- `warmup_epochs=3`
+- `spike_epochs=2`
+- `ssl_mode="full"`
+- `ssl_pretrain_epochs=2`
+
+예시:
+
+```bash
+python src/model_test/total_train/dsio_total_running.py --mode both
+python src/model_test/total_train/dsio_total_running.py --mode endo
+python src/model_test/total_train/dsio_total_running.py --mode exo
+```
+
+자주 바꾸는 옵션은 CLI로 바로 조절할 수 있습니다.
+
+```bash
+python src/model_test/total_train/dsio_total_running.py \
+  --mode both \
+  --lookback 104 \
+  --endo-batch-size 2048 \
+  --exo-batch-size 1024 \
+  --num-workers 8 \
+  --patch-len 13 \
+  --stride 6 \
+  --patchtst-d-model 384 \
+  --patchmixer-d-model 256 \
+  --titan-d-model 384
+```
+
+artifact 기본 저장 경로는 아래입니다.
+
+- `artifacts/total_train/dsio/endo_only`
+- `artifacts/total_train/dsio/endo_plus_exo`
+
 ## Tests
 
 대표 smoke test는 아래로 실행할 수 있습니다.
