@@ -18,6 +18,7 @@ from modeling_module import (
     PatchTSTArchitectureConfig,
     RuntimeConfig,
     SSLConfig,
+    TimexerArchitectureConfig,
     TitanArchitectureConfig,
     TrainRequest,
     TrainerConfig,
@@ -305,3 +306,55 @@ def test_train_validates_patch_len_from_architecture_override(tmp_path):
 
     with pytest.raises(ValueError, match="lookback=14 is too short"):
         train(req)
+
+
+def test_train_accepts_timexer_architecture_overrides(monkeypatch, tmp_path):
+    train_module = importlib.import_module("modeling_module.api.train")
+    captured: dict[str, object] = {}
+
+    def fake_run_total_train(train_loader, val_loader, **kwargs):
+        captured.update(kwargs)
+        return {
+            "TimeXer": {
+                "ckpt_path": str(tmp_path / "timexer.pt"),
+                "model_key": "timexer_base",
+                "family_key": "timexer",
+            }
+        }
+
+    monkeypatch.setattr(train_module, "run_total_train", fake_run_total_train)
+    monkeypatch.setattr(train_module, "_validate_training_request", lambda **kwargs: None)
+
+    req = TrainRequest(
+        data=DataRequest(
+            df=_make_daily_df(),
+            window=DataWindowConfig(lookback=14, horizon=2, freq="daily"),
+            exogenous=ExogenousConfig(use_exogenous_mode=True, past_exo_cont_cols=["exo"]),
+        ),
+        models=["timexer_base"],
+        trainer=TrainerConfig(epochs=1, lr=1e-3),
+        architecture=ArchitectureConfig(
+            timexer=TimexerArchitectureConfig(
+                patch_len=7,
+                d_model=192,
+                e_layers=2,
+                use_norm=False,
+            )
+        ),
+        runtime=RuntimeConfig(device="cpu"),
+        artifacts=ArtifactConfig(save_dir=str(tmp_path), auto_save_dir=False),
+    )
+
+    # A tiny exogenous column is enough because validation is stubbed in this normalization test.
+    req.data.df = req.data.df.with_columns(pl.lit(1.0).alias("exo"))
+
+    train(req)
+
+    assert captured["model_architecture"] == {
+        "timexer": {
+            "patch_len": 7,
+            "d_model": 192,
+            "e_layers": 2,
+            "use_norm": False,
+        }
+    }

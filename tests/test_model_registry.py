@@ -16,6 +16,7 @@ def test_expand_training_targets_supports_family_and_artifact_keys():
         "titan_lmm",
         "titan_seq2seq",
     ]
+    assert expand_training_targets(["timexer"]) == ["timexer_base"]
 
 
 def test_expand_training_targets_preserves_single_artifact_requests():
@@ -24,6 +25,7 @@ def test_expand_training_targets_preserves_single_artifact_requests():
     assert expand_training_targets(["titan_base"]) == ["titan_base"]
     assert expand_training_targets(["patchmixer_quantile"]) == ["patchmixer_quantile"]
     assert expand_training_targets(["patchtst_quantile"]) == ["patchtst_quantile"]
+    assert expand_training_targets(["timexer_base"]) == ["timexer_base"]
 
 
 def test_infer_artifact_model_key_from_checkpoint_prefers_meta():

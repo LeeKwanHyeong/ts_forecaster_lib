@@ -5,6 +5,7 @@ from modeling_module.models.ExoTST.configs import ExoTSTConfig
 from modeling_module.models.PatchMixer.PatchMixer import PatchMixerModel, PatchMixerQuantileModel
 from modeling_module.models.PatchMixer.common.configs import PatchMixerConfig
 from modeling_module.models.PatchTST.common.configs import PatchTSTConfig
+from modeling_module.models.TimeXer.configs import TimeXerConfig
 from modeling_module.models.Titan import TitanBaseModel, TitanLMMModel, TitanSeq2SeqModel
 from modeling_module.models.Titan.common.configs import TitanConfig
 
@@ -262,3 +263,32 @@ def build_exotst(cfg):
     cfg = _ensure_exotst_config(cfg)
     from modeling_module.models.ExoTST.ExoTST import ExoTST
     return ExoTST.from_config(cfg)
+
+
+def _ensure_timexer_config(cfg: Union[TimeXerConfig, dict, Any]) -> TimeXerConfig:
+    """
+    Normalize config-like inputs into TimeXerConfig.
+
+    TimeXer v1 is intentionally strict because the architecture depends on a
+    non-overlapping patching contract and historical exogenous inputs.
+    """
+    if isinstance(cfg, TimeXerConfig):
+        return cfg
+
+    if isinstance(cfg, Mapping):
+        return TimeXerConfig(**dict(cfg))
+
+    if is_dataclass(cfg):
+        return TimeXerConfig(**asdict(cfg))
+
+    if hasattr(cfg, "__dict__"):
+        return TimeXerConfig(**dict(cfg.__dict__))
+
+    raise TypeError(f"Unsupported config type for TimeXer: {type(cfg)}")
+
+
+def build_timexer(cfg):
+    """TimeXer 점 예측(Point) 모델 인스턴스 생성."""
+    cfg = _ensure_timexer_config(cfg)
+    from modeling_module.models.TimeXer.TimeXer import TimeXerModel
+    return TimeXerModel.from_config(cfg)

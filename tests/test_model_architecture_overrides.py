@@ -83,3 +83,47 @@ def test_store_result_does_not_keep_gpu_model_reference():
     assert "model" not in results["PatchTST"]
     assert results["PatchTST"]["model_key"] == "patchtst_base"
     assert results["PatchTST"]["family_key"] == "patchtst"
+
+
+def test_run_total_train_relaxes_future_exo_requirement_for_timexer_only(monkeypatch):
+    total_train = importlib.import_module("modeling_module.training.model_trainers.total_train")
+    captured: dict[str, object] = {}
+
+    def fake_runner(**kwargs):
+        captured["runner_kwargs"] = dict(kwargs)
+
+    def fake_resolve_exogenous(*args, **kwargs):
+        captured["allow_past_only"] = kwargs.get("allow_past_only")
+        return SimpleNamespace(
+            use_exogenous_mode=True,
+            source="none",
+            exo_dim=0,
+            future_exo_cb=None,
+            past_cont_dim=4,
+            past_cat_dim=0,
+        )
+
+    monkeypatch.setitem(total_train.MODEL_REGISTRY, "timexer", fake_runner)
+    monkeypatch.setattr(total_train, "resolve_exogenous", fake_resolve_exogenous)
+
+    total_train.run_total_train(
+        train_loader=None,
+        val_loader=None,
+        freq="weekly",
+        lookback=52,
+        horizon=27,
+        device="cpu",
+        warmup_epochs=1,
+        spike_epochs=None,
+        base_lr=1e-3,
+        save_dir=None,
+        use_exogenous_mode=True,
+        models_to_run=["timexer_base"],
+        model_architecture=None,
+    )
+
+    assert captured["allow_past_only"] is True
+    runner_kwargs = captured["runner_kwargs"]
+    assert runner_kwargs["requested_artifact_keys"] == ["timexer_base"]
+    assert runner_kwargs["exo_dim"] == 0
+    assert runner_kwargs["future_exo_cb"] is None

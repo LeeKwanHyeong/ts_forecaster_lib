@@ -201,6 +201,27 @@ class ExoTSTArchitectureConfig:
 
 
 @dataclass
+class TimexerArchitectureConfig:
+    """
+    TimeXer family architecture overrides.
+
+    Notes
+    - TimeXer v1 intentionally keeps the original paper contract:
+      past continuous exogenous inputs only, point forecast only.
+    """
+
+    patch_len: Optional[int] = None
+    d_model: Optional[int] = None
+    n_heads: Optional[int] = None
+    d_ff: Optional[int] = None
+    e_layers: Optional[int] = None
+    dropout: Optional[float] = None
+    factor: Optional[int] = None
+    activation: Optional[str] = None
+    use_norm: Optional[bool] = None
+
+
+@dataclass
 class ArchitectureConfig:
     """
     Family-level model architecture overrides.
@@ -216,6 +237,7 @@ class ArchitectureConfig:
     titan: Optional[TitanArchitectureConfig | Mapping[str, Any]] = None
     patchmixer: Optional[PatchMixerArchitectureConfig | Mapping[str, Any]] = None
     exotst: Optional[ExoTSTArchitectureConfig | Mapping[str, Any]] = None
+    timexer: Optional[TimexerArchitectureConfig | Mapping[str, Any]] = None
 
 
 @dataclass
@@ -431,6 +453,17 @@ _ARCHITECTURE_ALLOWED_KEYS: dict[str, set[str]] = {
         "use_revin",
         "subtract_last",
     },
+    "timexer": {
+        "patch_len",
+        "d_model",
+        "n_heads",
+        "d_ff",
+        "e_layers",
+        "dropout",
+        "factor",
+        "activation",
+        "use_norm",
+    },
 }
 
 
@@ -444,6 +477,8 @@ def _family_from_training_target(name: str) -> str:
         return "titan"
     if canonical == "exotst" or canonical.startswith("exotst_"):
         return "exotst"
+    if canonical == "timexer" or canonical.startswith("timexer_"):
+        return "timexer"
     raise ValueError(f"Unsupported architecture override target: {name!r}")
 
 
@@ -872,7 +907,7 @@ def _validate_training_request(
     patch_requirements: dict[str, int] = {}
     for key in requested_models:
         family = _family_from_training_target(key)
-        if family not in {"patchtst", "patchmixer", "exotst"}:
+        if family not in {"patchtst", "patchmixer", "exotst", "timexer"}:
             continue
         family_arch = architecture.get(family) or {}
         patch_requirements[key] = int(family_arch.get("patch_len", freq_spec.patch_len))
@@ -889,6 +924,50 @@ def _validate_training_request(
                 f"Set lookback >= {required_patch_len}."
             )
 
+    if "timexer_base" in requested_models:
+        timexer_patch_len = patch_requirements.get("timexer_base", freq_spec.patch_len)
+        if lookback_i % timexer_patch_len != 0:
+            raise ValueError(
+                "Invalid training request for timexer_base: "
+                f"TimeXer requires non-overlapping patches, so lookback={lookback_i} "
+                f"must be divisible by patch_len={timexer_patch_len}."
+            )
+
+    has_future_exo, future_exo_dim = infer_future_exo_spec_from_loader(
+        train_loader,
+        lookback=lookback_i,
+        horizon=horizon_i,
+    )
+    past_cont_dim, past_cat_dim = infer_past_exo_dim_from_loader_for_exotst(
+        train_loader,
+        lookback=lookback_i,
+        horizon=horizon_i,
+    )
+
+    if "timexer_base" in requested_models:
+        if not bool(payload.get("use_exogenous_mode", False)):
+            raise ValueError(
+                "Invalid training request for timexer_base: TimeXer requires use_exogenous_mode=True."
+            )
+
+        if int(future_exo_dim) > 0:
+            raise ValueError(
+                "Invalid training request for timexer_base: TimeXer v1 does not support future exogenous inputs. "
+                "Remove `future_exo_cont_cols` or `future_exo_cb`."
+            )
+
+        if int(past_cont_dim) <= 0:
+            raise ValueError(
+                "Invalid training request for timexer_base: TimeXer requires past continuous exogenous inputs. "
+                "Provide `past_exo_cont_cols`."
+            )
+
+        if int(past_cat_dim) > 0:
+            raise ValueError(
+                "Invalid training request for timexer_base: TimeXer v1 does not consume past categorical "
+                "exogenous inputs. Encode them into continuous channels first."
+            )
+
     if "exotst_base" not in requested_models:
         return
 
@@ -896,17 +975,6 @@ def _validate_training_request(
         raise ValueError(
             "Invalid training request for exotst_base: ExoTST requires use_exogenous_mode=True."
         )
-
-    has_future_exo, future_exo_dim = infer_future_exo_spec_from_loader(
-        train_loader,
-        lookback=lookback_i,
-        horizon=horizon_i,
-    )
-    past_cont_dim, _past_cat_dim = infer_past_exo_dim_from_loader_for_exotst(
-        train_loader,
-        lookback=lookback_i,
-        horizon=horizon_i,
-    )
 
     if not has_future_exo or future_exo_dim <= 0:
         raise ValueError(
@@ -1026,6 +1094,7 @@ __all__ = [
     "PatchTSTArchitectureConfig",
     "RuntimeConfig",
     "SSLConfig",
+    "TimexerArchitectureConfig",
     "TitanArchitectureConfig",
     "TrainRequest",
     "TrainResult",

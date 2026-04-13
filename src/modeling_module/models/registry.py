@@ -109,6 +109,16 @@ MODEL_SPECS: dict[str, ModelSpec] = {
         class_names=("ExoTST",),
         checkpoint_aliases=("ExoTST", "ExoTSTBase"),
     ),
+    "timexer_base": ModelSpec(
+        key="timexer_base",
+        family="timexer",
+        builder_module="modeling_module.models.model_builder",
+        builder_attr="build_timexer",
+        label="TimeXer Base",
+        aliases=("timexer", "timexerbase"),
+        class_names=("TimeXerModel",),
+        checkpoint_aliases=("TimeXer", "TimeXerBase"),
+    ),
 }
 
 
@@ -117,6 +127,7 @@ TRAINING_FAMILY_DEFAULTS: dict[str, tuple[str, ...]] = {
     "patchmixer": ("patchmixer_base", "patchmixer_quantile"),
     "titan": ("titan_base", "titan_lmm", "titan_seq2seq"),
     "exotst": ("exotst_base",),
+    "timexer": ("timexer_base",),
 }
 
 
@@ -125,6 +136,7 @@ TRAINING_FAMILY_ALIASES: dict[str, tuple[str, ...]] = {
     "patchmixer": ("patchmixer",),
     "titan": ("titan",),
     "exotst": ("exotst",),
+    "timexer": ("timexer",),
 }
 
 

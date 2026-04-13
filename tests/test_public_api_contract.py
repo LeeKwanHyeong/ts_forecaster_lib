@@ -66,6 +66,7 @@ def test_public_api_exports_official_surface():
         "TitanArchitectureConfig",
         "PatchMixerArchitectureConfig",
         "ExoTSTArchitectureConfig",
+        "TimexerArchitectureConfig",
         "DataWindowConfig",
         "DataColumnConfig",
         "ExogenousConfig",

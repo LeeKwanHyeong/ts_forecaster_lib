@@ -18,6 +18,7 @@ from modeling_module.models.PatchTST.common.configs import (
     HeadConfig,
     AttentionConfig,
 )
+from modeling_module.models.TimeXer.configs import TimeXerConfig
 from modeling_module.models.Titan.common.configs import TitanConfig
 from modeling_module.training.config import DecompositionConfig
 
@@ -48,6 +49,10 @@ def _rebuild_titan(cfgd: dict):
     return TitanConfig(**cfgd)
 
 
+def _rebuild_timexer(cfgd: dict):
+    return TimeXerConfig(**cfgd)
+
+
 _REBUILDERS_BY_CLS = {
     # PatchTST
     "PatchTSTConfig": _rebuild_patchtst,
@@ -57,6 +62,8 @@ _REBUILDERS_BY_CLS = {
     "PatchMixerConfigWeekly": _rebuild_patchmixer_weekly,
     # Titan
     "TitanConfig": _rebuild_titan,
+    # TimeXer
+    "TimeXerConfig": _rebuild_timexer,
 }
 
 # -----------------------------
@@ -300,7 +307,7 @@ def _canonical_model_key(name: str) -> str:
     if sl in {
         "patchmixer_base", "patchmixer_quantile", "patchmixer_dist"
         "titan_base", "titan_lmm", "titan_seq2seq",
-        "patchtst_base", "patchtst_quantile", 'exotst_base'
+        "patchtst_base", "patchtst_quantile", 'exotst_base', 'timexer_base'
     }:
         return sl
 
@@ -326,6 +333,9 @@ def _canonical_model_key(name: str) -> str:
 
     if 'exotst' in sl and ('base' in sl):
         return 'exotst_base'
+
+    if "timexer" in sl:
+        return "timexer_base"
 
     # fallback
     return sl

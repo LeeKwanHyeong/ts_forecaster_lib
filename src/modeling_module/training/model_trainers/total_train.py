@@ -18,6 +18,7 @@ from modeling_module.models.registry import (
 from modeling_module.models.PatchMixer.common.configs import PatchMixerConfig
 from modeling_module.models.PatchTST.common.configs import PatchTSTConfig
 from modeling_module.models.PatchTST.self_supervised.PatchTST import PatchTSTPretrainModel
+from modeling_module.models.TimeXer.configs import TimeXerConfig
 from modeling_module.models.Titan.common.configs import TitanConfig
 from modeling_module.models.model_builder import (
     build_titan_base,
@@ -28,6 +29,7 @@ from modeling_module.models.model_builder import (
     build_patchTST,
     build_patchTST_quantile,
     build_exotst,
+    build_timexer,
 )
 from modeling_module.training.config import SpikeLossConfig, TrainingConfig, StageConfig
 from modeling_module.training.model_losses.loss_module import (
@@ -42,6 +44,7 @@ from modeling_module.training.model_trainers.patchmixer_train import train_patch
 from modeling_module.training.model_trainers.patchtst_finetune import train_patchtst_finetune
 from modeling_module.training.model_trainers.patchtst_pretrain import train_patchtst_pretrain
 from modeling_module.training.model_trainers.patchtst_train import train_patchtst
+from modeling_module.training.model_trainers.timexer_train import train_timexer
 from modeling_module.training.model_trainers.titan_train import train_titan
 from .exotst_train import train_exotst
 from ...models.ExoTST.configs import ExoTSTConfig
@@ -601,6 +604,97 @@ def _run_exotst(
         best["ckpt_path"] = str(ckpt_path)
 
     _store_result(results, result_name="ExoTST", best=best, model_key="exotst_base", family_key="exotst")
+
+
+def _run_timexer(
+    *,
+    results: Dict[str, Dict],
+    freq: str,
+    train_loader,
+    val_loader,
+    point_train_cfg: TrainingConfig,
+    stages: List[StageConfig],
+    device: str,
+    lookback: int,
+    horizon: int,
+    patch_len: int,
+    use_exogenous_mode: bool,
+    exo_dim: int,
+    future_exo_cb: Optional[Callable],
+    past_cont_dim: int,
+    past_cat_dim: int,
+    save_root: Optional[Path] = None,
+    requested_artifact_keys: Optional[Iterable[str]] = None,
+    architecture_override: Optional[Mapping[str, Any]] = None,
+    **kwargs,
+):
+    """
+    TimeXer runner aligned to the paper contract.
+
+    v1 assumptions:
+    - historical continuous exogenous inputs are required
+    - future exogenous inputs are intentionally rejected
+    - point forecasting only
+    """
+
+    requested = _requested_target_set(requested_artifact_keys)
+    if not _wants_artifact(requested, "timexer_base"):
+        return
+
+    if not use_exogenous_mode:
+        raise RuntimeError("[total_train] TimeXer requires use_exogenous_mode=True.")
+    if int(past_cont_dim) <= 0:
+        raise RuntimeError("[total_train] TimeXer requires past_exo_cont from loader (pe_cont dim > 0).")
+    if int(exo_dim) > 0 or future_exo_cb is not None:
+        raise RuntimeError("[total_train] TimeXer v1 does not support future exogenous inputs.")
+    if int(past_cat_dim) > 0:
+        raise RuntimeError(
+            "[total_train] TimeXer v1 supports only past continuous exogenous inputs. "
+            "Encode categorical exogenous features into continuous channels first."
+        )
+
+    loss_obj = getattr(point_train_cfg, "loss", None)
+    mode = infer_supervised_mode(loss_obj)
+    if mode != "point":
+        raise NotImplementedError(f"[total_train] TimeXer v1 supports only point mode, got {mode!r}.")
+
+    cfg_kwargs = asdict(point_train_cfg)
+    cfg_kwargs["loss"] = loss_obj
+    cfg_kwargs.update(
+        dict(
+            y_dim=1,
+            past_exo_cont_dim=int(past_cont_dim),
+            patch_len=patch_len,
+            use_norm=True,
+        )
+    )
+    if architecture_override:
+        cfg_kwargs.update({key: value for key, value in dict(architecture_override).items() if value is not None})
+
+    timexer_cfg = TimeXerConfig(**cfg_kwargs)
+    timexer_model = build_timexer(timexer_cfg).to(device)
+
+    print(f"TimeXer ({freq.capitalize()})")
+    best = train_timexer(
+        model=timexer_model,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        stages=list(stages),
+        train_cfg=point_train_cfg,
+        device=device,
+    )
+
+    if save_root:
+        ckpt_path = _make_ckpt_path(save_root, freq, "TimeXerBase", lookback, horizon)
+        save_model(
+            timexer_model,
+            timexer_cfg,
+            ckpt_path,
+            extra_meta={"model_key": "timexer_base", "family_key": "timexer"},
+        )
+        best["ckpt_path"] = str(ckpt_path)
+
+    _store_result(results, result_name="TimeXer", best=best, model_key="timexer_base", family_key="timexer")
 
 
 def _run_patchtst(
@@ -1264,6 +1358,7 @@ MODEL_REGISTRY: Dict[str, Callable] = {
     "titan": _run_titan,
     "patchmixer": _run_patchmixer,
     "exotst": _run_exotst,
+    "timexer": _run_timexer,
 }
 
 
@@ -1387,6 +1482,12 @@ def run_total_train(
         val_use_weights=bool(val_use_weights),
     )
 
+    # Decide family routing early so exo_policy can relax future-exo requirements
+    # for the pure TimeXer case while preserving the existing fallback for other families.
+    selected_artifact_keys = _resolve_requested_artifact_keys(models_to_run)
+    selected_families = ordered_training_families_for_targets(selected_artifact_keys)
+    timexer_only = bool(selected_families) and set(selected_families) == {"timexer"}
+
     # exogenous SSOT
     exo_spec = resolve_exogenous(
         train_loader,
@@ -1394,16 +1495,13 @@ def run_total_train(
         use_exogenous_mode=bool(use_exogenous_mode),
         lookback=lookback,
         horizon=horizon,
+        allow_past_only=timexer_only,
     )
     print(f"[total_train][EXO] use_exo={exo_spec.use_exogenous_mode} "
           f"source={exo_spec.source} exo_dim={exo_spec.exo_dim} "
           f"future_cb={(exo_spec.future_exo_cb is not None)} "
           f"past_cont={exo_spec.past_cont_dim} past_cat={exo_spec.past_cat_dim}")
 
-
-    # model selection
-    selected_artifact_keys = _resolve_requested_artifact_keys(models_to_run)
-    selected_families = ordered_training_families_for_targets(selected_artifact_keys)
 
     # run
     results: Dict[str, Dict] = {}
@@ -1459,6 +1557,9 @@ def run_total_train(
             kwargs.pop("loss_quantile", None)
         elif m == "exotst":
             kwargs.update(dict(patch_len=freq_spec.patch_len, stride=freq_spec.stride))
+        elif m == "timexer":
+            # TimeXer v1 intentionally ignores the library's future-exo fallback callback.
+            kwargs.update(dict(patch_len=freq_spec.patch_len, exo_dim=0, future_exo_cb=None))
 
         MODEL_REGISTRY[m](**kwargs)
         gc.collect()

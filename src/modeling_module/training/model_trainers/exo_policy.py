@@ -210,12 +210,14 @@ def resolve_exogenous(
     use_exogenous_mode: bool,
     lookback: Optional[int] = None,
     horizon: Optional[int] = None,
+    allow_past_only: bool = False,
 ) -> ExoSpec:
     """
     Future + Past를 한 번에 resolve.
     - use_exogenous_mode=False면 future/past 모두 0으로 강제
     - future: loader(fe_cont) 우선, 없으면 callback(compose_exo_calendar_cb)
     - past : loader(pe_cont/pe_cat)에서 dim만 추론(없으면 0)
+    - allow_past_only=True면 future exo가 없어도 callback fallback 없이 past exo만 유지
     """
     has_fe, fe_dim = infer_future_exo_spec_from_loader(train_loader, lookback=lookback, horizon=horizon)
     d_past_cont, d_past_cat = infer_past_exo_dim_from_loader_for_exotst(train_loader, lookback=lookback, horizon=horizon)
@@ -243,17 +245,32 @@ def resolve_exogenous(
     # use_exogenous_mode == True
     if has_fe:
         if fe_dim <= 0:
-            raise RuntimeError(
-                "[exo_policy] use_exogenous_mode=True but loader future-exo dim is invalid. "
-                f"fe_dim={fe_dim}. Check datamodule wiring / feature selection."
+            if not allow_past_only:
+                raise RuntimeError(
+                    "[exo_policy] use_exogenous_mode=True but loader future-exo dim is invalid. "
+                    f"fe_dim={fe_dim}. Check datamodule wiring / feature selection."
+                )
+        else:
+            return ExoSpec(
+                use_exogenous_mode=True,
+                has_loader_future_exo=True,
+                loader_exo_dim=int(fe_dim),
+                exo_dim=int(fe_dim),
+                future_exo_cb=None,   # loader provides it
+                source="loader",
+                past_cont_dim=int(d_past_cont),
+                past_cat_dim=int(d_past_cat),
+                has_loader_past_exo=has_past,
             )
+
+    if allow_past_only:
         return ExoSpec(
             use_exogenous_mode=True,
-            has_loader_future_exo=True,
-            loader_exo_dim=int(fe_dim),
-            exo_dim=int(fe_dim),
-            future_exo_cb=None,   # loader provides it
-            source="loader",
+            has_loader_future_exo=False,
+            loader_exo_dim=0,
+            exo_dim=0,
+            future_exo_cb=None,
+            source="none",
             past_cont_dim=int(d_past_cont),
             past_cat_dim=int(d_past_cat),
             has_loader_past_exo=has_past,

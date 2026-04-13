@@ -26,6 +26,7 @@ __all__ = [
     "build_patchTST",
     "build_patchTST_quantile",
     "build_exotst",
+    "build_timexer",
 ]
 
 if TYPE_CHECKING:
@@ -38,6 +39,7 @@ if TYPE_CHECKING:
         build_titan_seq2seq,
         build_patchTST,
         build_patchTST_quantile,
+        build_timexer,
     )
 
 # Lazy import map: import modeling_module.models 시점에 heavy import 방지
@@ -50,6 +52,7 @@ _LAZY = {
     "build_patchTST": (".model_builder", "build_patchTST"),
     "build_patchTST_quantile": (".model_builder", "build_patchTST_quantile"),
     "build_exotst": (".model_builder", "build_exotst"),
+    "build_timexer": (".model_builder", "build_timexer"),
 }
 
 
