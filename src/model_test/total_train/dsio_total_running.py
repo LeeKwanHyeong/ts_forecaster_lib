@@ -501,6 +501,7 @@ def run_exo(
     result = train(
         TrainRequest(
             data=data_req,
+            freq=FREQ,
             models=models,
             architecture=architecture,
             trainer=TrainerConfig(

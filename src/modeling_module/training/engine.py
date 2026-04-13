@@ -452,22 +452,31 @@ class CommonTrainer:
             self._nan_stat("future_exo", exo)
         return exo
 
-    # def _nan_stat(self, name, t):
-    #     """텐서 내 NaN/Inf 존재 여부 검사 및 로깅."""
-    #     if not torch.is_tensor(t):
-    #         return
-    #     has_nan = torch.isnan(t).any().item()
-    #     has_inf = torch.isinf(t).any().item()
-    #     finite_mask = torch.isfinite(t)
-    #     if finite_mask.any():
-    #         try:
-    #             mx = t[finite_mask].abs().max().item()
-    #         except Exception:
-    #             mx = t[finite_mask].to(torch.float32).abs().max().item()
-    #     else:
-    #         mx = float("inf")
-    #     if has_nan or has_inf:
-    #         print(f"[NaN-{name}] has_nan={has_nan} has_inf={has_inf} max|x|={mx}")
+    def _nan_stat(self, name, t):
+        """텐서 내 NaN/Inf 존재 여부를 선택적으로 검사하고 이상 시에만 로깅."""
+        cfg = self.cfg
+        enabled = False
+        if isinstance(cfg, dict):
+            enabled = bool(cfg.get("debug_nan_stats", False))
+        else:
+            enabled = bool(getattr(cfg, "debug_nan_stats", False))
+
+        # Keep the hot path cheap in normal training runs.
+        if not enabled or not torch.is_tensor(t):
+            return
+
+        has_nan = torch.isnan(t).any().item()
+        has_inf = torch.isinf(t).any().item()
+        finite_mask = torch.isfinite(t)
+        if finite_mask.any():
+            try:
+                mx = t[finite_mask].abs().max().item()
+            except Exception:
+                mx = t[finite_mask].to(torch.float32).abs().max().item()
+        else:
+            mx = float("inf")
+        if has_nan or has_inf:
+            self.logger(f"[NaN-{name}] has_nan={has_nan} has_inf={has_inf} max|x|={mx}")
 
     def _unpack_batch(self, batch) -> Tuple[
         torch.Tensor, torch.Tensor, Optional[list], Optional[torch.Tensor], Optional[torch.Tensor], Optional[
