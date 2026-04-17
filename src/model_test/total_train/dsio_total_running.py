@@ -36,6 +36,7 @@ from modeling_module import (
     build_dataloader,
     train,
 )
+from modeling_module._internal.model_registry import expand_training_targets, family_for_artifact_key
 from modeling_module.utils.device import select_default_device
 
 
@@ -89,7 +90,13 @@ DEFAULT_ENDO_FAMILY_MODELS = [
     "patchmixer",
     "titan"
 ]
-DEFAULT_EXO_FAMILY_MODELS = ["patchtst", "patchmixer", "titan", "exotst"]
+DEFAULT_EXO_FAMILY_MODELS = [
+    # "patchtst",
+    # "patchmixer",
+    # "titan",
+    "exotst",
+    "timexer"
+]
 
 
 def set_global_seed(seed: int) -> None:
@@ -345,6 +352,106 @@ def _clean_output_dirs(*dirs: Path) -> None:
             shutil.rmtree(directory)
 
 
+def _split_exo_training_targets(models: list[str]) -> tuple[list[str], list[str]]:
+    future_required: list[str] = []
+    past_only: list[str] = []
+
+    for key in expand_training_targets(models):
+        family = family_for_artifact_key(key)
+        if family == "timexer":
+            past_only.append(key)
+        else:
+            future_required.append(key)
+
+    return future_required, past_only
+
+
+def _build_exo_data_request(
+    *,
+    args: argparse.Namespace,
+    one_table: pl.DataFrame,
+    use_future_exogenous: bool,
+) -> DataRequest:
+    return DataRequest(
+        df=one_table,
+        window=DataWindowConfig(
+            lookback=args.lookback,
+            horizon=args.horizon,
+            freq=FREQ,
+        ),
+        columns=DataColumnConfig(
+            id_col=ID_COL,
+            date_col=DATE_COL,
+            y_col=Y_COL,
+        ),
+        exogenous=ExogenousConfig(
+            use_exogenous_mode=True,
+            use_past_exogenous=True,
+            use_future_exogenous=use_future_exogenous,
+            past_exo_cont_cols=PAST_EXO_CONT_COLS,
+            past_exo_cat_cols=PAST_EXO_CAT_COLS,
+            future_exo_cont_cols=(FUTURE_EXO_CONT_COLS if use_future_exogenous else []),
+        ),
+        loader=build_loader_config(
+            batch_size=args.exo_batch_size,
+            num_workers=args.num_workers,
+            pin_memory=args.pin_memory,
+            persistent_workers=args.persistent_workers,
+            prefetch_factor=args.prefetch_factor,
+            shuffle=not args.no_shuffle,
+        ),
+    )
+
+
+def _run_exo_stage(
+    *,
+    label: str,
+    args: argparse.Namespace,
+    device: str,
+    architecture: ArchitectureConfig,
+    models: list[str],
+    data_req: DataRequest,
+    save_dir: Path,
+) -> None:
+    if not models:
+        print(f"[{label}] skipped: no models requested")
+        return
+
+    if not args.skip_batch_check:
+        batch = next(iter(build_dataloader(data_req)))
+        describe_batch(batch, f"{label}/train")
+
+    if args.clean_output:
+        _clean_output_dirs(save_dir)
+    save_dir.mkdir(parents=True, exist_ok=True)
+
+    result = train(
+        TrainRequest(
+            data=data_req,
+            freq=FREQ,
+            models=models,
+            architecture=architecture,
+            trainer=TrainerConfig(
+                warmup_epochs=args.warmup_epochs,
+                spike_epochs=args.spike_epochs,
+                lr=args.lr,
+            ),
+            ssl=SSLConfig(
+                mode=args.ssl_mode,
+                pretrain_epochs=args.ssl_pretrain_epochs,
+                mask_ratio=args.ssl_mask_ratio,
+                loss_type=args.ssl_loss_type,
+            ),
+            runtime=RuntimeConfig(device=device),
+            artifacts=ArtifactConfig(
+                save_dir=str(save_dir),
+                auto_save_dir=False,
+            ),
+        )
+    )
+    print_training_result(result, label)
+
+
 def run_endo(
     args: argparse.Namespace,
     *,
@@ -445,84 +552,69 @@ def run_exo(
     )
     exo_source = resolve_exo_source(TARGET_EXO_SOURCE, EXO_SOURCE_FALLBACK)
     exo_raw = load_polars_table(exo_source, exo_source.name)
-    exo_one_table = prepare_exo_one_table(
-        target_df=target_df,
-        exo_df=exo_raw,
-        id_col=ID_COL,
-        date_col=DATE_COL,
-        y_col=Y_COL,
-        past_exo_cont_cols=PAST_EXO_CONT_COLS,
-        future_exo_cont_cols=FUTURE_EXO_CONT_COLS,
-        past_exo_cat_cols=PAST_EXO_CAT_COLS,
-    )
+    future_required_models, past_only_models = _split_exo_training_targets(models)
 
     print("[EXO] exo_source        :", exo_source)
     print("[EXO] target_df shape   :", target_df.shape)
     print("[EXO] exo_raw shape     :", exo_raw.shape)
-    print("[EXO] exo_one_table     :", exo_one_table.shape)
-    print("[EXO] n_unique ids      :", exo_one_table.select(ID_COL).n_unique())
+    print("[EXO] future_models     :", future_required_models)
+    print("[EXO] past_only_models  :", past_only_models)
 
-    data_req = DataRequest(
-        df=exo_one_table,
-        window=DataWindowConfig(
-            lookback=args.lookback,
-            horizon=args.horizon,
-            freq=FREQ,
-        ),
-        columns=DataColumnConfig(
+    if future_required_models:
+        exo_one_table_future = prepare_exo_one_table(
+            target_df=target_df,
+            exo_df=exo_raw,
             id_col=ID_COL,
             date_col=DATE_COL,
             y_col=Y_COL,
-        ),
-        exogenous=ExogenousConfig(
-            use_exogenous_mode=True,
             past_exo_cont_cols=PAST_EXO_CONT_COLS,
-            past_exo_cat_cols=PAST_EXO_CAT_COLS,
             future_exo_cont_cols=FUTURE_EXO_CONT_COLS,
-        ),
-        loader=build_loader_config(
-            batch_size=args.exo_batch_size,
-            num_workers=args.num_workers,
-            pin_memory=args.pin_memory,
-            persistent_workers=args.persistent_workers,
-            prefetch_factor=args.prefetch_factor,
-            shuffle=not args.no_shuffle,
-        ),
-    )
-
-    if not args.skip_batch_check:
-        batch = next(iter(build_dataloader(data_req)))
-        describe_batch(batch, "EXO/train")
-
-    save_dir = args.artifact_root / "endo_plus_exo"
-    if args.clean_output:
-        _clean_output_dirs(save_dir)
-    save_dir.mkdir(parents=True, exist_ok=True)
-    result = train(
-        TrainRequest(
-            data=data_req,
-            freq=FREQ,
-            models=models,
-            architecture=architecture,
-            trainer=TrainerConfig(
-                warmup_epochs=args.warmup_epochs,
-                spike_epochs=args.spike_epochs,
-                lr=args.lr,
-            ),
-            ssl=SSLConfig(
-                mode=args.ssl_mode,
-                pretrain_epochs=args.ssl_pretrain_epochs,
-                mask_ratio=args.ssl_mask_ratio,
-                loss_type=args.ssl_loss_type,
-            ),
-            runtime=RuntimeConfig(device=device),
-            artifacts=ArtifactConfig(
-                save_dir=str(save_dir),
-                auto_save_dir=False,
-            ),
+            past_exo_cat_cols=PAST_EXO_CAT_COLS,
         )
-    )
-    print_training_result(result, "EXO")
+        print("[EXO/FUTURE] one_table   :", exo_one_table_future.shape)
+        print("[EXO/FUTURE] n_unique ids:", exo_one_table_future.select(ID_COL).n_unique())
+        future_req = _build_exo_data_request(
+            args=args,
+            one_table=exo_one_table_future,
+            use_future_exogenous=True,
+        )
+        _run_exo_stage(
+            label="EXO/FUTURE",
+            args=args,
+            device=device,
+            architecture=architecture,
+            models=future_required_models,
+            data_req=future_req,
+            save_dir=args.artifact_root / "exo_future",
+        )
+
+    if past_only_models:
+        exo_one_table_past = prepare_exo_one_table(
+            target_df=target_df,
+            exo_df=exo_raw,
+            id_col=ID_COL,
+            date_col=DATE_COL,
+            y_col=Y_COL,
+            past_exo_cont_cols=PAST_EXO_CONT_COLS,
+            future_exo_cont_cols=[],
+            past_exo_cat_cols=PAST_EXO_CAT_COLS,
+        )
+        print("[EXO/PAST_ONLY] one_table   :", exo_one_table_past.shape)
+        print("[EXO/PAST_ONLY] n_unique ids:", exo_one_table_past.select(ID_COL).n_unique())
+        past_req = _build_exo_data_request(
+            args=args,
+            one_table=exo_one_table_past,
+            use_future_exogenous=False,
+        )
+        _run_exo_stage(
+            label="EXO/PAST_ONLY",
+            args=args,
+            device=device,
+            architecture=architecture,
+            models=past_only_models,
+            data_req=past_req,
+            save_dir=args.artifact_root / "exo_past_only",
+        )
 
 
 def build_parser() -> argparse.ArgumentParser:

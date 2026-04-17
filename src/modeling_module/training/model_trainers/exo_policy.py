@@ -125,7 +125,7 @@ class ExoSpec:
     loader_exo_dim: int
     exo_dim: int
     future_exo_cb: Optional[Callable]
-    source: str  # "none" | "loader" | "callback"
+    source: str  # "none" | "loader" | "callback" | "past_only"
 
     # past
     past_cont_dim: int = 0
@@ -208,6 +208,8 @@ def resolve_exogenous(
     *,
     freq_spec: FreqSpec,
     use_exogenous_mode: bool,
+    use_past_exogenous: bool = True,
+    use_future_exogenous: bool = True,
     lookback: Optional[int] = None,
     horizon: Optional[int] = None,
     allow_past_only: bool = False,
@@ -215,15 +217,22 @@ def resolve_exogenous(
     """
     Future + Past를 한 번에 resolve.
     - use_exogenous_mode=False면 future/past 모두 0으로 강제
+    - use_exogenous_mode=True면 use_past_exogenous / use_future_exogenous로 개별 제어
     - future: loader(fe_cont) 우선, 없으면 callback(compose_exo_calendar_cb)
     - past : loader(pe_cont/pe_cat)에서 dim만 추론(없으면 0)
-    - allow_past_only=True면 future exo가 없어도 callback fallback 없이 past exo만 유지
+    - allow_past_only=True는 legacy compat 용도이며, future가 없을 때 callback fallback 없이 past-only 유지
     """
     has_fe, fe_dim = infer_future_exo_spec_from_loader(train_loader, lookback=lookback, horizon=horizon)
     d_past_cont, d_past_cat = infer_past_exo_dim_from_loader_for_exotst(train_loader, lookback=lookback, horizon=horizon)
     has_past = bool(d_past_cont > 0 or d_past_cat > 0)
 
-    print(f"[exo_policy] use_exo={use_exogenous_mode} | future(has={has_fe}, dim={fe_dim}) | past(cont={d_past_cont}, cat={d_past_cat})")
+    print(
+        f"[exo_policy] use_exo={use_exogenous_mode}, "
+        f"use_past={use_past_exogenous}, "
+        f"use_future={use_future_exogenous} | "
+        f"future(has={has_fe}, dim={fe_dim}) | "
+        f"past(cont={d_past_cont}, cat={d_past_cat})"
+    )
 
     if not use_exogenous_mode:
         if has_fe and fe_dim > 0:
@@ -242,45 +251,77 @@ def resolve_exogenous(
             has_loader_past_exo=has_past,
         )
 
-    # use_exogenous_mode == True
-    if has_fe:
-        if fe_dim <= 0:
-            if not allow_past_only:
-                raise RuntimeError(
-                    "[exo_policy] use_exogenous_mode=True but loader future-exo dim is invalid. "
-                    f"fe_dim={fe_dim}. Check datamodule wiring / feature selection."
-                )
-        else:
-            return ExoSpec(
-                use_exogenous_mode=True,
-                has_loader_future_exo=True,
-                loader_exo_dim=int(fe_dim),
-                exo_dim=int(fe_dim),
-                future_exo_cb=None,   # loader provides it
-                source="loader",
-                past_cont_dim=int(d_past_cont),
-                past_cat_dim=int(d_past_cat),
-                has_loader_past_exo=has_past,
+    effective_past_cont_dim = int(d_past_cont) if use_past_exogenous else 0
+    effective_past_cat_dim = int(d_past_cat) if use_past_exogenous else 0
+    effective_has_past = bool(
+        use_past_exogenous and (effective_past_cont_dim > 0 or effective_past_cat_dim > 0)
+    )
+
+    if use_past_exogenous and not has_past:
+        print(
+            "[exo_policy][WARN] use_past_exogenous=True but loader past exo not found. "
+            "Proceeding without past exo."
+        )
+
+    if (not use_past_exogenous) and has_past:
+        print(
+            f"[exo_policy][INFO] use_past_exogenous=False, ignoring loader past exo "
+            f"(cont={d_past_cont}, cat={d_past_cat})."
+        )
+
+    if not use_future_exogenous:
+        if has_fe and fe_dim > 0:
+            print(
+                f"[exo_policy][INFO] use_future_exogenous=False, ignoring loader future exo dim={fe_dim}."
             )
+
+        return ExoSpec(
+            use_exogenous_mode=bool(effective_has_past),
+            has_loader_future_exo=bool(has_fe),
+            loader_exo_dim=int(fe_dim),
+            exo_dim=0,
+            future_exo_cb=None,
+            source="past_only" if effective_has_past else "none",
+            past_cont_dim=effective_past_cont_dim,
+            past_cat_dim=effective_past_cat_dim,
+            has_loader_past_exo=effective_has_past,
+        )
+
+    if has_fe and fe_dim > 0:
+        return ExoSpec(
+            use_exogenous_mode=True,
+            has_loader_future_exo=True,
+            loader_exo_dim=int(fe_dim),
+            exo_dim=int(fe_dim),
+            future_exo_cb=None,
+            source="loader",
+            past_cont_dim=effective_past_cont_dim,
+            past_cat_dim=effective_past_cat_dim,
+            has_loader_past_exo=effective_has_past,
+        )
+
+    if has_fe and fe_dim <= 0:
+        print(
+            f"[exo_policy][WARN] loader future exo detected but dim={fe_dim}. "
+            "Treating as no valid loader future exo."
+        )
 
     if allow_past_only:
         return ExoSpec(
-            use_exogenous_mode=True,
+            use_exogenous_mode=bool(effective_has_past),
             has_loader_future_exo=False,
             loader_exo_dim=0,
             exo_dim=0,
             future_exo_cb=None,
-            source="none",
-            past_cont_dim=int(d_past_cont),
-            past_cat_dim=int(d_past_cat),
-            has_loader_past_exo=has_past,
+            source="past_only" if effective_has_past else "none",
+            past_cont_dim=effective_past_cont_dim,
+            past_cat_dim=effective_past_cat_dim,
+            has_loader_past_exo=effective_has_past,
         )
 
-    # fallback: calendar callback
     cb = compose_exo_calendar_cb(date_type=freq_spec.dt_char)
     cb = wrap_future_exo_cb(cb)
 
-    # 가능하면 callback 실행으로 dim 추론(heuristic 제거)
     cb_dim = infer_exo_dim_from_cb(cb, int(horizon) if horizon is not None else 1, device="cpu")
     exo_dim = int(cb_dim) if cb_dim > 0 else (4 if freq_spec.freq in ("daily", "hourly") else 2)
 
@@ -291,9 +332,9 @@ def resolve_exogenous(
         exo_dim=exo_dim,
         future_exo_cb=cb,
         source="callback",
-        past_cont_dim=int(d_past_cont),
-        past_cat_dim=int(d_past_cat),
-        has_loader_past_exo=has_past,
+        past_cont_dim=effective_past_cont_dim,
+        past_cat_dim=effective_past_cat_dim,
+        has_loader_past_exo=effective_has_past,
     )
 
 

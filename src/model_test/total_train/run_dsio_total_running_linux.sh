@@ -8,7 +8,7 @@ PYTHON_BIN="${PYTHON_BIN:-python}"
 ARTIFACT_ROOT="${ARTIFACT_ROOT:-$REPO_ROOT/artifacts/total_train}"
 MODE="${MODE:-exo}"
 ENDO_MODELS="${ENDO_MODELS:-patchtst patchmixer titan}"
-EXO_MODELS="${EXO_MODELS:-titan exotst}"
+EXO_MODELS="${EXO_MODELS:-exotst timexer}"
 CLEAN_OUTPUT="${CLEAN_OUTPUT:-0}"
 LOG_TO_FILE="${LOG_TO_FILE:-1}"
 LOG_DIR="${LOG_DIR:-$REPO_ROOT/logs}"
@@ -23,9 +23,15 @@ CMD=(
   "$PYTHON_BIN" "$REPO_ROOT/src/model_test/total_train/dsio_total_running.py"
   --mode "$MODE"
   --artifact-root "$ARTIFACT_ROOT"
-  --endo-models "${ENDO_MODELS_ARR[@]}"
-  --exo-models "${EXO_MODELS_ARR[@]}"
 )
+
+if [[ ${#ENDO_MODELS_ARR[@]} -gt 0 ]]; then
+  CMD+=(--endo-models "${ENDO_MODELS_ARR[@]}")
+fi
+
+if [[ ${#EXO_MODELS_ARR[@]} -gt 0 ]]; then
+  CMD+=(--exo-models "${EXO_MODELS_ARR[@]}")
+fi
 
 if [[ "$CLEAN_OUTPUT" == "1" ]]; then
   CMD+=(--clean-output)

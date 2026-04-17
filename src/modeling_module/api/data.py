@@ -57,23 +57,30 @@ class ExogenousConfig:
 
     Parameters
     - `use_exogenous_mode`: Enable exogenous-aware model / loader paths.
+    - `use_past_exogenous`: Whether training should consume historical exogenous inputs.
+    - `use_future_exogenous`: Whether training should consume future exogenous inputs.
     - `past_exo_cont_cols`: Continuous covariates sliced from the lookback window.
     - `past_exo_cat_cols`: Categorical covariates sliced from the lookback window.
     - `future_exo_cont_cols`: Known future covariates sliced from the horizon window.
     - `fill_missing`: Missing-value policy forwarded to the exogenous datamodule.
     - `target_back_steps`: Backward steps used by categorical indexer helpers.
     - `future_exo_cb`: Optional callback that generates future exogenous tensors.
+    - `part_future_exo_fn`: Optional batch callback that builds part-specific future exogenous tensors
+      from `(uid_list, start_idxs, horizon)`.
     - `date_indexer`: Optional external date indexer used by callback-based workflows.
     - `build_cat_indexer_from`: Source columns for categorical index construction.
     - `cat_indexer_target_col`: Target column for categorical index construction.
     """
     use_exogenous_mode: Optional[bool] = None
+    use_past_exogenous: Optional[bool] = None
+    use_future_exogenous: Optional[bool] = None
     past_exo_cont_cols: Optional[list[str]] = None
     past_exo_cat_cols: Optional[list[str]] = None
     future_exo_cont_cols: Optional[list[str]] = None
     fill_missing: str = "ffill"
     target_back_steps: int = 100
     future_exo_cb: Any = None
+    part_future_exo_fn: Any = None
     date_indexer: Any = None
     build_cat_indexer_from: Optional[list[str]] = None
     cat_indexer_target_col: Optional[str] = None
@@ -143,6 +150,8 @@ class DataRequest:
     seed: int = 42
 
     use_exogenous_mode: bool = False
+    use_past_exogenous: Optional[bool] = None
+    use_future_exogenous: Optional[bool] = None
     backend: Optional[str] = None
     stage: str = "train"
     plan_dt: Optional[int] = None
@@ -156,6 +165,7 @@ class DataRequest:
     fill_missing: str = "ffill"
     target_back_steps: int = 100
     future_exo_cb: Any = None
+    part_future_exo_fn: Any = None
     date_indexer: Any = None
     build_cat_indexer_from: Optional[list[str]] = None
     cat_indexer_target_col: Optional[str] = None
@@ -257,6 +267,8 @@ def _materialize_payload(cfg: DataRequest | Mapping[str, Any]) -> dict[str, Any]
         {
             "use_mode": "use_exogenous_mode",
             "use_exogenous_mode": "use_exogenous_mode",
+            "use_past_exogenous": "use_past_exogenous",
+            "use_future_exogenous": "use_future_exogenous",
             "past_cont": "past_exo_cont_cols",
             "past_cat": "past_exo_cat_cols",
             "future_cont": "future_exo_cont_cols",
@@ -266,6 +278,7 @@ def _materialize_payload(cfg: DataRequest | Mapping[str, Any]) -> dict[str, Any]
             "fill_missing": "fill_missing",
             "target_back_steps": "target_back_steps",
             "future_exo_cb": "future_exo_cb",
+            "part_future_exo_fn": "part_future_exo_fn",
             "date_indexer": "date_indexer",
             "build_cat_indexer_from": "build_cat_indexer_from",
             "cat_indexer_target_col": "cat_indexer_target_col",
@@ -393,6 +406,7 @@ def build_datamodule(cfg: DataRequest | Mapping[str, Any]) -> Any:
         fill_missing=str(payload.get("fill_missing", "ffill")),
         target_back_steps=int(payload.get("target_back_steps", 100)),
         future_exo_cb=payload.get("future_exo_cb"),
+        part_future_exo_fn=payload.get("part_future_exo_fn"),
         date_indexer=payload.get("date_indexer"),
         build_cat_indexer_from=payload.get("build_cat_indexer_from"),
         cat_indexer_target_col=payload.get("cat_indexer_target_col"),

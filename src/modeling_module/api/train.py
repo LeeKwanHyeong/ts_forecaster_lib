@@ -270,7 +270,7 @@ class TrainRequest:
     - `freq`, `lookback`, `horizon`, `device`
     - `warmup_epochs`, `spike_epochs`, `base_lr`
     - `save_dir`, `auto_save_dir`
-    - `use_exogenous_mode`
+    - `use_exogenous_mode`, `use_past_exogenous`, `use_future_exogenous`
     - `loss`, `loss_point`, `loss_quantile`
     - `use_ssl_mode`, `ssl_pretrain_epochs`, `ssl_mask_ratio`, `ssl_loss_type`,
       `ssl_freeze_encoder_before_ft`, `ssl_pretrained_ckpt_path`
@@ -303,6 +303,8 @@ class TrainRequest:
     auto_save_dir: bool = True
 
     use_exogenous_mode: Optional[bool] = None
+    use_past_exogenous: Optional[bool] = None
+    use_future_exogenous: Optional[bool] = None
     models_to_run: Optional[Sequence[str]] = None
     model: Any = None
     models: Any = None
@@ -695,6 +697,7 @@ def _merged_data_config(payload: Mapping[str, Any]) -> dict[str, Any]:
         "fill_missing",
         "target_back_steps",
         "future_exo_cb",
+        "part_future_exo_fn",
         "date_indexer",
         "build_cat_indexer_from",
         "cat_indexer_target_col",

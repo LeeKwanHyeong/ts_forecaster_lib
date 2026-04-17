@@ -216,10 +216,16 @@ def _build_train_collate_fn(
     *,
     horizon: int,
     future_exo_cb: Optional[Callable] = None,
+    part_future_exo_fn: Optional[Callable] = None,
     cache_size: int = 4096,
 ):
     # 주의: future_exo_cb도 반드시 pickle 가능한 “top-level 함수/클래스”여야 합니다.
-    return TrainCollateWithFutureExo(horizon=int(horizon), future_exo_cb=future_exo_cb, cache_size=int(cache_size))
+    return TrainCollateWithFutureExo(
+        horizon=int(horizon),
+        future_exo_cb=future_exo_cb,
+        part_future_exo_fn=part_future_exo_fn,
+        cache_size=int(cache_size),
+    )
 
 
 class CategoryIndexer:
@@ -693,11 +699,9 @@ class MultiPartExoAnchoredInferenceDataset(Dataset):
                     )
                 )
 
+            # Callback-based future exogenous should be composed in collate so batch-level
+            # generators can use both uid_list and start_idxs together.
             fe = np.stack(future_cont_list, axis=-1) if future_cont_list else np.zeros((self.horizon, 0), dtype=float)
-            if fe.shape[-1] == 0 and self.future_exo_cb is not None:
-                # Callback을 통해 미래 시점의 외생 변수 조회
-                res = self.future_exo_cb(start_idx, self.horizon, device="cpu")
-                fe = res.detach().cpu().numpy() if isinstance(res, torch.Tensor) else np.asarray(res, dtype=float)
 
             # 처리된 샘플 저장
             self.inputs.append(x)
@@ -771,6 +775,7 @@ class MultiPartExoDataModule:
             fill_missing: str = "ffill",
             target_back_steps: int = 100,
             future_exo_cb: Optional[Callable[[int, int, str], np.ndarray | torch.Tensor]] = None,
+            part_future_exo_fn: Optional[Callable] = None,
             date_indexer: Optional[Callable[[int], int]] = None,
             build_cat_indexer_from: Optional[Sequence[str]] = None,
             cat_indexer_target_col: Optional[str] = None,
@@ -810,6 +815,7 @@ class MultiPartExoDataModule:
         self.fill_missing = fill_missing
         self.target_back_steps = int(target_back_steps)
         self.future_exo_cb = future_exo_cb
+        self.part_future_exo_fn = part_future_exo_fn
         self.date_indexer = date_indexer or identity_date_indexer
 
         self.cat_indexers: Dict[str, CategoryIndexer] = {}
@@ -964,6 +970,7 @@ class MultiPartExoDataModule:
         collate_fn = _build_train_collate_fn(
             horizon=self.horizon,
             future_exo_cb=self.future_exo_cb,
+            part_future_exo_fn=self.part_future_exo_fn,
             cache_size=15000,
         )
 
@@ -1006,6 +1013,7 @@ class MultiPartExoDataModule:
         collate_fn = _build_train_collate_fn(
             horizon=self.horizon,
             future_exo_cb=self.future_exo_cb,
+            part_future_exo_fn=self.part_future_exo_fn,
             cache_size=15000,
         )
 
@@ -1056,6 +1064,7 @@ class MultiPartExoDataModule:
         collate_fn = _build_train_collate_fn(
             horizon=self.horizon,
             future_exo_cb=self.future_exo_cb,
+            part_future_exo_fn=self.part_future_exo_fn,
             cache_size=15000,
         )
         return DataLoader(ds, batch_size=self.batch_size, shuffle=False, collate_fn=collate_fn)
@@ -1078,6 +1087,7 @@ class TrainCollateWithFutureExo:
     """
     horizon: int
     future_exo_cb: Optional[Callable] = None
+    part_future_exo_fn: Optional[Callable] = None
     cache_size: int = 15000
 
     # 캐시 저장소 (Key: start_idx, Value: Exo Array)
@@ -1126,6 +1136,93 @@ class TrainCollateWithFutureExo:
 
         arr = np.stack([np.asarray(item, dtype=np.int64) for item in items], axis=0).astype(np.int64, copy=False)
         return torch.from_numpy(arr)
+
+    @staticmethod
+    def _ensure_future_batch(
+        value,
+        *,
+        batch_size: int,
+        horizon: int,
+        source_name: str,
+    ) -> np.ndarray:
+        if isinstance(value, torch.Tensor):
+            value = value.detach().cpu().numpy()
+
+        arr = np.asarray(value, dtype=np.float32)
+        if arr.ndim == 2:
+            if batch_size != 1 or arr.shape[0] != horizon:
+                raise ValueError(
+                    f"{source_name} must return (B,H,E) or single-sample (H,E); got={arr.shape}"
+                )
+            arr = arr[None, ...]
+
+        if arr.ndim != 3 or arr.shape[0] != batch_size or arr.shape[1] != horizon:
+            raise ValueError(
+                f"{source_name} must return shape ({batch_size}, {horizon}, E); got={arr.shape}"
+            )
+
+        return arr.astype(np.float32, copy=False)
+
+    def _build_calendar_future_batch(self, start_idxs, *, horizon: int) -> Optional[np.ndarray]:
+        if self.future_exo_cb is None:
+            return None
+
+        fe_list: List[Optional[np.ndarray]] = []
+        miss: List[int] = []
+        miss_pos: List[int] = []
+
+        for bi, s in enumerate(start_idxs):
+            s_int = int(s)
+            cached = self._cache_get(s_int)
+            if cached is None:
+                miss.append(s_int)
+                miss_pos.append(bi)
+                fe_list.append(None)
+            else:
+                fe_list.append(cached)
+
+        if miss:
+            try:
+                res = self.future_exo_cb(miss, horizon, device="cpu")
+                res = self._ensure_future_batch(
+                    res,
+                    batch_size=len(miss),
+                    horizon=horizon,
+                    source_name="future_exo_cb",
+                )
+
+                for k, bi in enumerate(miss_pos):
+                    fe_arr = res[k]
+                    fe_list[bi] = fe_arr
+                    self._cache_put(miss[k], fe_arr)
+            except Exception:
+                for s_val, bi in zip(miss, miss_pos):
+                    res = self.future_exo_cb(s_val, horizon, device="cpu")
+                    fe_arr = self._ensure_future_batch(
+                        res,
+                        batch_size=1,
+                        horizon=horizon,
+                        source_name="future_exo_cb",
+                    )[0]
+                    fe_list[bi] = fe_arr
+                    self._cache_put(s_val, fe_arr)
+
+        if not fe_list:
+            return None
+
+        return np.stack(fe_list, axis=0).astype(np.float32, copy=False)
+
+    def _build_part_future_batch(self, uid_list, start_idxs, *, horizon: int) -> Optional[np.ndarray]:
+        if self.part_future_exo_fn is None:
+            return None
+
+        res = self.part_future_exo_fn(uid_list, start_idxs, horizon)
+        return self._ensure_future_batch(
+            res,
+            batch_size=len(uid_list),
+            horizon=horizon,
+            source_name="part_future_exo_fn",
+        )
 
     def __call__(self, batch):
         """
@@ -1180,59 +1277,15 @@ class TrainCollateWithFutureExo:
 
         start_idxs = future_payloads
 
-        # Future Exo 콜백이 없는 경우 빈 텐서 반환
-        if self.future_exo_cb is None:
+        calendar_fe = self._build_calendar_future_batch(start_idxs, horizon=H)
+        part_fe = self._build_part_future_batch(uid_list, start_idxs, horizon=H)
+
+        if calendar_fe is None and part_fe is None:
             fe = torch.zeros((B, H, 0), dtype=torch.float32)
             return x, y, uid_list, fe, pe_cont, pe_cat
 
-        # 1) 캐시 조회 및 미적중(Miss) 데이터 식별
-        fe_list: List[Optional[np.ndarray]] = []
-        miss: List[int] = []  # 캐시에 없는 start_idx 리스트
-        miss_pos: List[int] = []  # 해당 샘플의 배치 내 인덱스
-
-        for bi, s in enumerate(start_idxs):
-            s_int = int(s)
-            cached = self._cache_get(s_int)
-            if cached is None:
-                miss.append(s_int)
-                miss_pos.append(bi)
-                fe_list.append(None)
-            else:
-                fe_list.append(cached)
-
-        # 2) 미적중(Miss) 데이터 생성
-        if miss:
-            try:
-                # 우선 배치 단위 생성 시도 (속도 최적화)
-                res = self.future_exo_cb(miss, H, device="cpu")
-
-                if isinstance(res, torch.Tensor):
-                    res = res.detach().cpu().numpy()
-                res = np.asarray(res, dtype=np.float32)
-
-                # 형태(Shape) 검증
-                if res.ndim != 3 or res.shape[0] != len(miss) or res.shape[1] != H:
-                    raise ValueError(f"Batch shape mismatch. got={res.shape}, expected=({len(miss)}, {H}, E)")
-
-                # 결과 매핑 및 캐시 업데이트
-                for k, bi in enumerate(miss_pos):
-                    fe_arr = res[k]
-                    fe_list[bi] = fe_arr
-                    self._cache_put(miss[k], fe_arr)
-
-            except Exception:
-                # 배치 생성 실패 시 개별(Loop) 생성으로 Fallback
-                for s_val, bi in zip(miss, miss_pos):
-                    res = self.future_exo_cb(s_val, H, device="cpu")
-                    if isinstance(res, torch.Tensor):
-                        res = res.detach().cpu().numpy()
-                    fe_arr = np.asarray(res, dtype=np.float32)
-
-                    fe_list[bi] = fe_arr
-                    self._cache_put(s_val, fe_arr)
-
-        # 3) 최종 결과 스택 및 텐서 변환
-        fe_np = np.stack(fe_list, axis=0).astype(np.float32, copy=False)  # [B, H, E]
+        components = [arr for arr in (calendar_fe, part_fe) if arr is not None]
+        fe_np = components[0] if len(components) == 1 else np.concatenate(components, axis=-1)
         fe = torch.from_numpy(fe_np)
 
         return x, y, uid_list, fe, pe_cont, pe_cat

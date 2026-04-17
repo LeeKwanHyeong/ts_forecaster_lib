@@ -1391,6 +1391,9 @@ def _build_common_kwargs(
     모든 runner가 공유하는 kwargs.
     - exo_spec으로부터 exo_dim/future_exo_cb/past dims를 주입 (SSOT)
     """
+    point_train_cfg = replace(point_train_cfg, use_exogenous_mode=bool(exo_spec.use_exogenous_mode))
+    quantile_train_cfg = replace(quantile_train_cfg, use_exogenous_mode=bool(exo_spec.use_exogenous_mode))
+
     return dict(
         results=results,
         freq=freq_spec.freq,
@@ -1428,6 +1431,8 @@ def run_total_train(
     base_lr: Optional[float] = None,
     save_dir: Optional[str] = None,
     use_exogenous_mode: bool = False,
+    use_past_exogenous: bool = True,
+    use_future_exogenous: bool = True,
     models_to_run: Optional[Iterable[str]] = None,
     model_architecture: Optional[Mapping[str, Mapping[str, Any]]] = None,
 
@@ -1456,7 +1461,7 @@ def run_total_train(
     Flow
       1) freq_policy -> patch/stride/season_period
       2) common train cfg + stages
-      3) exo_policy.resolve_exogenous -> exo_spec (future + past)
+      3) exo_policy.resolve_exogenous -> exo_spec (future + past, individual toggles)
       4) run selected model runners with common kwargs
     """
     freq_spec = get_freq_spec(freq)
@@ -1482,20 +1487,25 @@ def run_total_train(
         val_use_weights=bool(val_use_weights),
     )
 
-    # Decide family routing early so exo_policy can relax future-exo requirements
-    # for the pure TimeXer case while preserving the existing fallback for other families.
+    # Decide family routing early so pure TimeXer runs can force past-only semantics.
     selected_artifact_keys = _resolve_requested_artifact_keys(models_to_run)
     selected_families = ordered_training_families_for_targets(selected_artifact_keys)
     timexer_only = bool(selected_families) and set(selected_families) == {"timexer"}
+    effective_use_future_exogenous = bool(use_future_exogenous)
+    if timexer_only and effective_use_future_exogenous:
+        print("[total_train][INFO] timexer-only run forces use_future_exogenous=False.")
+        effective_use_future_exogenous = False
 
     # exogenous SSOT
     exo_spec = resolve_exogenous(
         train_loader,
         freq_spec=freq_spec,
         use_exogenous_mode=bool(use_exogenous_mode),
+        use_past_exogenous=bool(use_past_exogenous),
+        use_future_exogenous=bool(effective_use_future_exogenous),
         lookback=lookback,
         horizon=horizon,
-        allow_past_only=timexer_only,
+        allow_past_only=False,
     )
     print(f"[total_train][EXO] use_exo={exo_spec.use_exogenous_mode} "
           f"source={exo_spec.source} exo_dim={exo_spec.exo_dim} "
@@ -1589,6 +1599,8 @@ def run_total_train_weekly(
     base_lr=None,
     save_dir=None,
     use_exogenous_mode: bool = False,
+    use_past_exogenous: bool = True,
+    use_future_exogenous: bool = True,
     models_to_run=None,
     model_architecture: Optional[Mapping[str, Mapping[str, Any]]] = None,
     loss_point: Optional[nn.Module] = None,
@@ -1615,6 +1627,8 @@ def run_total_train_weekly(
         base_lr=base_lr,
         save_dir=save_dir,
         use_exogenous_mode=use_exogenous_mode,
+        use_past_exogenous=use_past_exogenous,
+        use_future_exogenous=use_future_exogenous,
         models_to_run=models_to_run,
         model_architecture=model_architecture,
         loss_point=loss_point,
@@ -1643,6 +1657,8 @@ def run_total_train_monthly(
     base_lr=None,
     save_dir=None,
     use_exogenous_mode: bool = False,
+    use_past_exogenous: bool = True,
+    use_future_exogenous: bool = True,
     models_to_run=None,
     model_architecture: Optional[Mapping[str, Mapping[str, Any]]] = None,
     loss_point: Optional[nn.Module] = None,
@@ -1669,6 +1685,8 @@ def run_total_train_monthly(
         base_lr=base_lr,
         save_dir=save_dir,
         use_exogenous_mode=use_exogenous_mode,
+        use_past_exogenous=use_past_exogenous,
+        use_future_exogenous=use_future_exogenous,
         models_to_run=models_to_run,
         model_architecture=model_architecture,
         loss_point=loss_point,
@@ -1697,6 +1715,8 @@ def run_total_train_daily(
     base_lr=None,
     save_dir=None,
     use_exogenous_mode: bool = False,
+    use_past_exogenous: bool = True,
+    use_future_exogenous: bool = True,
     models_to_run=None,
     model_architecture: Optional[Mapping[str, Mapping[str, Any]]] = None,
     loss_point: Optional[nn.Module] = None,
@@ -1723,6 +1743,8 @@ def run_total_train_daily(
         base_lr=base_lr,
         save_dir=save_dir,
         use_exogenous_mode=use_exogenous_mode,
+        use_past_exogenous=use_past_exogenous,
+        use_future_exogenous=use_future_exogenous,
         models_to_run=models_to_run,
         model_architecture=model_architecture,
         loss_point=loss_point,
@@ -1751,6 +1773,8 @@ def run_total_train_hourly(
     base_lr=None,
     save_dir=None,
     use_exogenous_mode: bool = False,
+    use_past_exogenous: bool = True,
+    use_future_exogenous: bool = True,
     models_to_run=None,
     model_architecture: Optional[Mapping[str, Mapping[str, Any]]] = None,
     loss_point: Optional[nn.Module] = None,
@@ -1777,6 +1801,8 @@ def run_total_train_hourly(
         base_lr=base_lr,
         save_dir=save_dir,
         use_exogenous_mode=use_exogenous_mode,
+        use_past_exogenous=use_past_exogenous,
+        use_future_exogenous=use_future_exogenous,
         models_to_run=models_to_run,
         model_architecture=model_architecture,
         loss_point=loss_point,
