@@ -773,7 +773,14 @@ def _resolve_loaders(payload: dict[str, Any]) -> tuple[Any, Any, Any]:
             _build_loader_runtime_kwargs(data_cfg, stage="val"),
         )
 
-        for key in ("lookback", "horizon", "freq", "use_exogenous_mode"):
+        for key in (
+            "lookback",
+            "horizon",
+            "freq",
+            "use_exogenous_mode",
+            "use_past_exogenous",
+            "use_future_exogenous",
+        ):
             if payload.get(key) is None and data_cfg.get(key) is not None:
                 payload[key] = data_cfg[key]
 
@@ -1063,6 +1070,8 @@ def train(req: TrainRequest | Mapping[str, Any]) -> TrainResult:
         base_lr=payload.get("base_lr"),
         save_dir=payload.get("save_dir"),
         use_exogenous_mode=bool(payload.get("use_exogenous_mode", False)),
+        use_past_exogenous=bool(payload.get("use_past_exogenous", True)),
+        use_future_exogenous=bool(payload.get("use_future_exogenous", True)),
         models_to_run=requested_models,
         model_architecture=payload.get("model_architecture"),
         loss_point=payload.get("loss_point"),

@@ -133,25 +133,52 @@ class LoadedPredictor:
             raise ValueError("`horizon` is required for prediction.")
 
         runtime_device = kwargs.pop("device", None) or self.device
+        missing = object()
+
+        def _resolve_forward_arg(name: str, default: Any = missing) -> Any:
+            # kwargs에 명시적으로 들어온 값이 있으면 그 값을 우선 사용하고,
+            # payload의 동일 키는 소비만 하고 무시한다.
+            # 이렇게 해야 wrapper 기본값과 caller kwargs가 중복 전달되지 않는다.
+            value = kwargs.pop(name, missing)
+            if value is not missing:
+                payload.pop(name, None)
+                return value
+            if default is missing:
+                return payload.pop(name, None)
+            return payload.pop(name, default)
+
+        mode = _resolve_forward_arg("mode", "eval")
+        part_ids = _resolve_forward_arg("part_ids", None)
+        past_exo_cont = _resolve_forward_arg("past_exo_cont", None)
+        past_exo_cat = _resolve_forward_arg("past_exo_cat", None)
+        future_exo_batch = _resolve_forward_arg("future_exo_batch", None)
+        future_exo_cb = _resolve_forward_arg("future_exo_cb", None)
+        extension_policy = _resolve_forward_arg("extension_policy", None)
+        tail_model = _resolve_forward_arg("tail_model", "exp")
+        tail_fit_window = _resolve_forward_arg("tail_fit_window", 18)
+        tail_anchor = _resolve_forward_arg("tail_anchor", "mean_last_3")
+        state_prior = _resolve_forward_arg("state_prior", None)
+        is_IMS = bool(_resolve_forward_arg("is_IMS", True))
+        is_linear_decay = bool(_resolve_forward_arg("is_linear_decay", True))
 
         forecaster = DMSForecaster(self.model, **(self.forecaster_kwargs or {}))
         return forecaster.predict(
             x,
             horizon=int(horizon),
             device=runtime_device,
-            mode=payload.pop("mode", "eval"),
-            part_ids=payload.pop("part_ids", None),
-            past_exo_cont=payload.pop("past_exo_cont", None),
-            past_exo_cat=payload.pop("past_exo_cat", None),
-            future_exo_batch=payload.pop("future_exo_batch", None),
-            future_exo_cb=payload.pop("future_exo_cb", None),
-            extension_policy=payload.pop("extension_policy", None),
-            tail_model=payload.pop("tail_model", "exp"),
-            tail_fit_window=payload.pop("tail_fit_window", 18),
-            tail_anchor=payload.pop("tail_anchor", "mean_last_3"),
-            state_prior=payload.pop("state_prior", None),
-            is_IMS=bool(payload.pop("is_IMS", True)),
-            is_linear_decay=bool(payload.pop("is_linear_decay", True)),
+            mode=mode,
+            part_ids=part_ids,
+            past_exo_cont=past_exo_cont,
+            past_exo_cat=past_exo_cat,
+            future_exo_batch=future_exo_batch,
+            future_exo_cb=future_exo_cb,
+            extension_policy=extension_policy,
+            tail_model=tail_model,
+            tail_fit_window=tail_fit_window,
+            tail_anchor=tail_anchor,
+            state_prior=state_prior,
+            is_IMS=is_IMS,
+            is_linear_decay=is_linear_decay,
             **kwargs,
         )
 

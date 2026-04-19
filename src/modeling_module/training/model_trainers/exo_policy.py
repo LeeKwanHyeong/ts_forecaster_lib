@@ -194,13 +194,29 @@ def infer_past_exo_dim_from_loader_for_exotst(loader, *, lookback: Optional[int]
 def infer_exo_dim_from_cb(future_exo_cb, horizon: int, device: str = "cpu") -> int:
     if future_exo_cb is None:
         return 0
-    fe = future_exo_cb(0, horizon, device=device)  # (H,E)
-    if torch.is_tensor(fe):
-        return int(fe.shape[-1])
-    try:
-        return int(fe.shape[-1])
-    except Exception:
-        return 0
+    # Some callbacks interpret weekly inputs as YYYYWW values, so probing with 0 can fail.
+    # Try a small set of safe anchors that cover both ordinal and weekly-calendar styles.
+    probe_candidates = (
+        0,
+        1,
+        202001,
+        202101,
+        202201,
+    )
+    last_error = None
+    for t0 in probe_candidates:
+        try:
+            fe = future_exo_cb(t0, horizon, device=device)  # (H,E) or (B,H,E)
+            if torch.is_tensor(fe):
+                return int(fe.shape[-1])
+            return int(fe.shape[-1])
+        except Exception as exc:
+            last_error = exc
+            continue
+
+    if last_error is not None:
+        print(f"[exo_policy][WARN] infer_exo_dim_from_cb failed; treating callback exo dim as 0. last_error={last_error}")
+    return 0
 
 
 def resolve_exogenous(

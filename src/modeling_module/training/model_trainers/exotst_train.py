@@ -1,3 +1,4 @@
+import copy
 from contextlib import contextmanager
 from typing import Optional, Callable
 
@@ -232,6 +233,9 @@ def train_exotst(
 
     adapter = DefaultAdapter()
     best = None
+    global_best_loss = float("inf")
+    global_best_state = copy.deepcopy(model.state_dict())
+    global_best_cfg = train_cfg
 
     for i, stg in enumerate(stages, 1):
         cfg_i = apply_stage(train_cfg, stg)
@@ -258,6 +262,14 @@ def train_exotst(
 
         with sdp_math_only():
             model = trainer.fit(model, tl_i, val_loader, tta_steps=0)
-        best = {"model": model, "cfg": cfg_i}
+        stage_best_loss = float(getattr(trainer, "best_loss_", float("inf")))
+        if stage_best_loss < global_best_loss:
+            global_best_loss = stage_best_loss
+            global_best_state = copy.deepcopy(model.state_dict())
+            global_best_cfg = cfg_i
+        best = {"model": model, "cfg": cfg_i, "best_val_loss": stage_best_loss}
+
+    model.load_state_dict(global_best_state)
+    best = {"model": model, "cfg": global_best_cfg, "best_val_loss": global_best_loss}
 
     return best

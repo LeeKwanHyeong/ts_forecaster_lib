@@ -965,4 +965,6 @@ class CommonTrainer:
 
         # 학습 종료 후 최적 가중치 복원
         model.load_state_dict(best_state)
+        # 상위 stage runner가 stage 간 global-best를 비교할 수 있도록 노출한다.
+        self.best_loss_ = float(best_loss)
         return model

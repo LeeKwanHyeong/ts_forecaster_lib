@@ -10,6 +10,7 @@ MODE="${MODE:-exo}"
 ENDO_MODELS="${ENDO_MODELS:-patchtst patchmixer titan}"
 EXO_MODELS="${EXO_MODELS:-exotst timexer}"
 CLEAN_OUTPUT="${CLEAN_OUTPUT:-0}"
+SAMPLE_PART_COUNT="${SAMPLE_PART_COUNT:-}"
 LOG_TO_FILE="${LOG_TO_FILE:-1}"
 LOG_DIR="${LOG_DIR:-$REPO_ROOT/logs}"
 RUN_TAG="${RUN_TAG:-$(date +%Y%m%d_%H%M%S)}"
@@ -37,6 +38,10 @@ if [[ "$CLEAN_OUTPUT" == "1" ]]; then
   CMD+=(--clean-output)
 fi
 
+if [[ -n "$SAMPLE_PART_COUNT" ]]; then
+  CMD+=(--sample-part-count "$SAMPLE_PART_COUNT")
+fi
+
 if [[ "$#" -gt 0 ]]; then
   CMD+=("$@")
 fi
@@ -48,6 +53,7 @@ echo "[run] MODE=$MODE"
 echo "[run] ENDO_MODELS=$ENDO_MODELS"
 echo "[run] EXO_MODELS=$EXO_MODELS"
 echo "[run] CLEAN_OUTPUT=$CLEAN_OUTPUT"
+echo "[run] SAMPLE_PART_COUNT=$SAMPLE_PART_COUNT"
 echo "[run] PYTORCH_CUDA_ALLOC_CONF=$PYTORCH_CUDA_ALLOC_CONF"
 if [[ "$LOG_TO_FILE" == "1" ]]; then
   mkdir -p "$LOG_DIR"
@@ -64,3 +70,10 @@ if [[ "$LOG_TO_FILE" == "1" ]]; then
 else
   exec "${CMD[@]}"
 fi
+
+
+#python /Users/igwanhyeong/PycharmProjects/ts_forecaster_lib/src/model_test/total_train/dsio_total_running.py \
+#  --mode exo \
+#  --exo-models exotst timexer \
+#  --sample-part-count 500 \
+#  --seed 42

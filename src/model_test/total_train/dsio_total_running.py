@@ -30,6 +30,7 @@ from modeling_module import (
     PatchTSTArchitectureConfig,
     RuntimeConfig,
     SSLConfig,
+    TimexerArchitectureConfig,
     TitanArchitectureConfig,
     TrainRequest,
     TrainerConfig,
@@ -139,22 +140,31 @@ def sample_ids_by_observed_target(
     id_col: str,
     y_col: str,
     min_obs: int,
-    max_ids: int,
+    sample_size: int,
+    seed: int,
 ) -> list[str]:
-    counts = (
+    eligible = (
         df.group_by(id_col)
         .agg(pl.col(y_col).is_not_null().sum().alias("observed_target_rows"))
         .filter(pl.col("observed_target_rows") >= min_obs)
-        .sort("observed_target_rows", descending=True)
-        .head(max_ids)
+        .sort(id_col)
     )
-    ids = counts[id_col].cast(pl.String).to_list()
+    ids = eligible[id_col].cast(pl.String).to_list()
     if not ids:
         raise ValueError(
             "No ids have enough observed target history. "
             f"Need at least {min_obs} non-null `{y_col}` rows per id."
         )
-    return ids
+
+    take = min(int(sample_size), len(ids))
+    if take <= 0:
+        raise ValueError(f"`sample_size` must be positive. got={sample_size}")
+    if take >= len(ids):
+        return ids
+
+    rng = np.random.default_rng(seed)
+    sampled = rng.choice(np.asarray(ids, dtype=object), size=take, replace=False).tolist()
+    return sorted(str(x) for x in sampled)
 
 
 def prepare_target_df(
@@ -165,7 +175,9 @@ def prepare_target_df(
     y_col: str,
     use_id_sample: bool,
     max_ids: int,
+    sample_part_count: int | None,
     min_obs: int,
+    seed: int,
 ) -> pl.DataFrame:
     assert_columns(raw_df, [id_col, date_col, y_col], "target table")
     df = (
@@ -176,13 +188,20 @@ def prepare_target_df(
             ]
         )
     )
-    if use_id_sample:
+    effective_sample_size = None
+    if sample_part_count is not None:
+        effective_sample_size = int(sample_part_count)
+    elif use_id_sample:
+        effective_sample_size = int(max_ids)
+
+    if effective_sample_size is not None:
         keep_ids = sample_ids_by_observed_target(
             df,
             id_col=id_col,
             y_col=y_col,
             min_obs=min_obs,
-            max_ids=max_ids,
+            sample_size=effective_sample_size,
+            seed=seed,
         )
         df = df.filter(pl.col(id_col).is_in(keep_ids))
     return df
@@ -307,6 +326,17 @@ def build_model_architecture(args: argparse.Namespace) -> ArchitectureConfig:
             exo_nan_policy=args.exotst_exo_nan_policy,
             use_revin=args.exotst_use_revin,
             subtract_last=args.exotst_subtract_last,
+        ),
+        timexer=TimexerArchitectureConfig(
+            patch_len=args.timexer_patch_len,
+            d_model=args.timexer_d_model,
+            n_heads=args.timexer_heads,
+            d_ff=args.timexer_d_ff,
+            e_layers=args.timexer_e_layers,
+            dropout=args.timexer_dropout,
+            factor=args.timexer_factor,
+            activation=args.timexer_activation,
+            use_norm=args.timexer_use_norm,
         ),
     )
 
@@ -468,7 +498,9 @@ def run_endo(
         y_col=Y_COL,
         use_id_sample=args.use_id_sample,
         max_ids=args.max_ids,
+        sample_part_count=args.sample_part_count,
         min_obs=min_obs,
+        seed=args.seed,
     )
 
     print("[ENDO] target_raw shape:", target_raw.shape)
@@ -548,7 +580,9 @@ def run_exo(
         y_col=Y_COL,
         use_id_sample=args.use_id_sample,
         max_ids=args.max_ids,
+        sample_part_count=args.sample_part_count,
         min_obs=min_obs,
+        seed=args.seed,
     )
     exo_source = resolve_exo_source(TARGET_EXO_SOURCE, EXO_SOURCE_FALLBACK)
     exo_raw = load_polars_table(exo_source, exo_source.name)
@@ -649,6 +683,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--clean-output", action="store_true")
     parser.add_argument("--use-id-sample", action="store_true")
     parser.add_argument("--max-ids", type=int, default=256)
+    parser.add_argument("--sample-part-count", type=int, default=None)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--patch-len", type=int, default=13)
     parser.add_argument("--stride", type=int, default=6)
@@ -679,6 +714,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-exotst-use-revin", action="store_false", dest="exotst_use_revin")
     parser.add_argument("--exotst-subtract-last", action="store_true", default=True)
     parser.add_argument("--no-exotst-subtract-last", action="store_false", dest="exotst_subtract_last")
+    parser.add_argument("--timexer-patch-len", type=int, default=13)
+    parser.add_argument("--timexer-d-model", type=int, default=128)
+    parser.add_argument("--timexer-heads", type=int, default=8)
+    parser.add_argument("--timexer-d-ff", type=int, default=256)
+    parser.add_argument("--timexer-e-layers", type=int, default=3)
+    parser.add_argument("--timexer-dropout", type=float, default=0.1)
+    parser.add_argument("--timexer-factor", type=int, default=5)
+    parser.add_argument("--timexer-activation", choices=["relu", "gelu"], default="gelu")
+    parser.add_argument("--timexer-use-norm", action="store_true", default=True)
+    parser.add_argument("--no-timexer-use-norm", action="store_false", dest="timexer_use_norm")
     return parser
 
 
@@ -706,6 +751,7 @@ def main() -> None:
     print("MODE                :", args.mode)
     print("LOOKBACK            :", args.lookback)
     print("HORIZON             :", args.horizon)
+    print("SAMPLE_PART_COUNT   :", args.sample_part_count)
     print("ENDO_BATCH_SIZE     :", args.endo_batch_size)
     print("EXO_BATCH_SIZE      :", args.exo_batch_size)
     print("NUM_WORKERS         :", args.num_workers)
