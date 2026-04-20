@@ -21,10 +21,15 @@ def _ensure_patchtst_future_head(model, exo_dim: int, *, loss_mode: str = "point
     if cfg is None:
         return model
 
-    current = int(getattr(cfg, "d_future", 0))
-    cfg.d_future = int(exo_dim) if exo_dim > 0 else 0
+    current = int(getattr(cfg, "future_exo_dim", getattr(cfg, "d_future", 0)))
+    cfg.future_exo_dim = int(exo_dim) if exo_dim > 0 else 0
+    cfg.d_future = int(cfg.future_exo_dim)
+    head_future_dim = 0
 
     patch_num = compute_patch_num(cfg.lookback, cfg.patch_len, cfg.stride, cfg.padding_patch)
+
+    if hasattr(model, "_rebuild_future_exo_path"):
+        model._rebuild_future_exo_path(int(cfg.future_exo_dim))
 
     # ---- dist 우선 처리 ----
     if loss_mode == "dist":
@@ -33,11 +38,14 @@ def _ensure_patchtst_future_head(model, exo_dim: int, *, loss_mode: str = "point
         model.head = DistHeadWithExo(
             d_model=cfg.d_model,
             horizon=cfg.horizon,
-            d_future=int(cfg.d_future),
+            d_future=int(head_future_dim),
             act=getattr(cfg, "act", "gelu"),
             out_mult=out_mult
         )
-        print(f"[train_patchtst] dist head rebuilt: d_future {current} -> {cfg.d_future}")
+        print(
+            f"[train_patchtst] dist head rebuilt: future_exo_dim {current} -> {cfg.future_exo_dim} "
+            f"(head_d_future={head_future_dim})"
+        )
         return model
 
     # ---- 기존 quantile / point ----
@@ -45,21 +53,27 @@ def _ensure_patchtst_future_head(model, exo_dim: int, *, loss_mode: str = "point
         model.head = QuantileHeadWithExo(
             d_model=cfg.d_model,
             horizon=cfg.horizon,
-            d_future=int(cfg.d_future),
+            d_future=int(head_future_dim),
             quantiles=getattr(cfg, "quantiles", (0.1, 0.5, 0.9)),
             hidden=getattr(cfg, "q_hidden", 128),
             monotonic=True,
         )
-        print(f"[train_patchtst] quantile head rebuilt: d_future {current} -> {cfg.d_future}")
+        print(
+            f"[train_patchtst] quantile head rebuilt: future_exo_dim {current} -> {cfg.future_exo_dim} "
+            f"(head_d_future={head_future_dim})"
+        )
     else:
         model.head = PointHeadWithExo(
             d_model=cfg.d_model,
             horizon=cfg.horizon,
-            d_future=int(cfg.d_future),
+            d_future=int(head_future_dim),
             patch_num=patch_num,
             agg=getattr(model.head, "agg", "mean"),
         )
-        print(f"[train_patchtst] point head rebuilt: d_future {current} -> {cfg.d_future}")
+        print(
+            f"[train_patchtst] point head rebuilt: future_exo_dim {current} -> {cfg.future_exo_dim} "
+            f"(head_d_future={head_future_dim})"
+        )
 
     return model
 

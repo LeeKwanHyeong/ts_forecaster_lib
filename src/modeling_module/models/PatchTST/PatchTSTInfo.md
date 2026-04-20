@@ -1,153 +1,127 @@
-# PatchTST: A Time Series is Worth 64 Words
+# PatchTST Implementation Notes
 
-> **기반 논문:** *A Time Series is Worth 64 Words: Long-term Forecasting with Transformers* (Nie et al., ICLR 2023)  
-> **문서 개요:** PatchTST의 핵심 이론을 요약하고, **과거/미래 외생변수(Exogenous Variables)** 처리가 포함된 현재 라이브러리의 구현체 구조를 설명합니다.
+> 기반 논문: *A Time Series is Worth 64 Words: Long-term Forecasting with Transformers*  
+> 이 문서는 현재 레포의 PatchTST 구현이 원 논문에서 어떻게 확장되었는지, 특히 외생변수를 어떤 경로로 주입하는지 설명합니다.
 
----
+## 요약
 
-## 1. 연구 배경 및 핵심 아이디어
+현재 구현의 핵심은 아래 두 줄입니다.
 
-기존 Transformer 기반 시계열 모델들은 긴 시퀀스 예측(LTSF)에서 단순한 선형 모델(DLinear)보다 성능이 떨어지는 현상이 발생했습니다. PatchTST는 이를 해결하기 위해 두 가지 핵심 아이디어를 도입했습니다.
+- `past exogenous`는 패치 임베딩 단계에서 target patch와 함께 backbone 입력으로 들어갑니다.
+- `future exogenous`는 horizon token 시퀀스로 투영된 뒤, backbone output token이 cross-attention으로 받아들입니다.
 
-### 1.1 Patching (패치화)
-시점(Time-step) 단위로 Attention을 수행하는 대신, **짧은 구간(Patch)**으로 데이터를 묶어 하나의 토큰으로 처리합니다.
-- **장점 1:** 입력 시퀀스 길이($L$)가 패치 개수($N \approx L/P$)로 대폭 감소하여 연산량이 $O(L^2) \to O((L/P)^2)$로 줄어듭니다.
-- **장점 2:** 국소적인 의미 정보(Local Semantic Information)를 보존하여 모델이 더 풍부한 패턴을 학습합니다.
+즉, 미래 외생변수를 예측 head에서 한 번에 납작하게(flatten) 눌러 쓰지 않습니다.  
+PatchTST는 이제 `future exo -> token sequence -> cross attention` 경로를 기본 경로로 사용합니다.
 
-### 1.2 Channel Independence (채널 독립성)
-다변량 시계열의 각 변수(Channel)를 **독립적인 단변량 시계열**로 취급하여, 하나의 공유된 Transformer Backbone에 태웁니다.
-- **장점:** 변수 간의 노이즈 섞임을 방지하고, 데이터 부족 문제를 완화하며 일반화 성능을 높입니다.
+## 전체 흐름
 
----
-
-## 2. 모델 아키텍처 개요
-
-현재 구현체는 원본 PatchTST를 확장하여 **과거(Past) 및 미래(Future) 외생변수**를 통합적으로 처리할 수 있도록 리팩토링되었습니다.
-
-### (1) 전체 데이터 흐름
-| 단계 | 설명 | 텐서 형상 (Shape) |
+| 단계 | 역할 | 대표 shape |
 | :--- | :--- | :--- |
-| **Input** | Target 변수 및 외생변수 입력 | Target: `(B, L, M)` <br> Exo: `(B, L, D_exo)` |
-| **RevIN** | Target 변수 정규화 (분포 이동 완화) | `(B, L, M)` |
-| **Unfold & Embed** | 패치 분할 후 투영 (Target + Past Exo) | `(B * M, Num_Patches, D_model)` |
-| **Backbone** | Transformer Encoder (Self-Attention) | `(B * M, Num_Patches, D_model)` |
-| **Aggregation** | 패치 차원 집약 (Mean Pooling) | `(B * M, D_model)` |
-| **Exo Fusion** | 미래 외생변수(Future Exo) 결합 | `(B * M, D_model + D_future_proj)` |
-| **Head** | 최종 예측 (Linear Projection) | `(B, M, Horizon)` |
+| Input | target, past exo, future exo 입력 | `x: (B, L, C)` / `future_exo: (B, H, E)` |
+| RevIN | target 정규화 | `(B, L, C)` |
+| Patchify | target + past exo를 patch token으로 변환 | `(B, N, D)` |
+| Backbone | self-attention encoder | `(B, N, D)` |
+| Future Fusion | future exo token과 cross-attention 결합 | `(B, N, D)` |
+| Head | point / quantile / distribution output | `(B, H)` 또는 `(B, H, Q)` |
+| RevIN Denorm | target scale 복원 | output |
 
----
+## Past Exogenous
 
-## 3. 구현 모델 상세: BaseModel vs QuantileModel
+과거 외생변수는 backbone 앞단에서 함께 패치화됩니다.
 
-### 3.1 공통 모듈: `PatchBackboneBase` & `SupervisedBackbone`
-이 구현체의 가장 큰 특징은 **패치 임베딩 단계에서 외생 변수를 결합**한다는 점입니다.
+- `past_exo_cont`
+- `past_exo_cat`
 
-1.  **입력 패치화:** Target 변수뿐만 아니라, Past Continuous/Categorical 변수도 동일하게 패치화(Unfold)합니다.
-2.  **특징 결합 (Concatenation):**
-    $$\text{Input}_{\text{patch}} = [\text{Target}_{\text{patch}} \parallel \text{Exo}_{\text{cont}} \parallel \text{Emb}(\text{Exo}_{\text{cat}})]$$
-3.  **투영 (Projection):** 결합된 벡터를 `Linear` 레이어를 통해 `d_model` 차원으로 압축합니다.
+이 값들은 target patch와 concat된 뒤 `d_model` 차원으로 projection됩니다.  
+즉 PatchTST backbone은 이미 과거 외생 신호를 포함한 token sequence를 인코딩합니다.
 
----
+의미적으로는:
 
-### 3.2 PatchTST PointModel (BaseModel)
-단일 값(평균)을 예측하는 모델입니다.
-
-* **Head 구조:** `PointHeadWithExo`
-* **Aggregation:** 백본에서 나온 $N$개의 패치 출력을 평균(Mean)내어 시계열 문맥 벡터를 생성합니다.
-* **Future Exo:** 미래 외생변수를 투영하여 문맥 벡터와 결합(Concat) 후, 최종 Horizon 길이로 변환합니다.
-
-```mermaid
-flowchart LR
-    subgraph Inference ["PatchTST PointModel"]
-        direction LR
-        X["Input (Target)\n(B, L, M)"] --> RVN["RevIN (Norm)"]
-        P_EXO["Past Exo\n(Cont/Cat)"]
-        
-        RVN --> PATCH["Patchify & Embed\n(Concat Target + Past Exo)\nLinear -> D_model"]
-        P_EXO --> PATCH
-        
-        PATCH --> CI["Channel Independence\nReshape (B*M, N, D)"]
-        CI --> TR["Transformer Encoder\n(MHA + FFN)"]
-        TR --> POOL["Mean Pooling\n(over N patches)"]
-        
-        F_EXO["Future Exo\n(B, H, D_fut)"] --> F_PROJ["Linear -> D_model"]
-        
-        POOL --> CAT((Concat))
-        F_PROJ --> CAT
-        
-        CAT --> HEAD["Projection Head\nLinear -> Horizon"]
-        HEAD --> DENORM["RevIN (Denorm)"]
-        DENORM --> OUT["Output\n(B, M, H)"]
-    end
-    style X fill:#e1f5fe,stroke:#0277bd
-    style OUT fill:#e1f5fe,stroke:#0277bd
-    style TR fill:#fff9c4,stroke:#fbc02d
-```
-### 3.3 PatchTST QuantileModel
-불확실성 추정을 위해 분위수(Quantiles)를 예측합니다.
-
-* **Head 구조:** `QuantileHeadWithExo`
-* **출력:** `(Batch, Horizon, Quantiles)`
-* **특징:** PointModel과 유사한 흐름을 가지지만, 마지막 Head가 분위수 개수($Q$)만큼 출력을 생성하며, `monotonic_quantiles` 옵션으로 분위수 교차를 방지합니다.
-
-```mermaid
-flowchart LR
-    subgraph Quantile ["PatchTST QuantileModel"]
-        direction LR
-        ENC_OUT["Backbone Output\n(B*M, N, D)"] --> POOL["Mean Pooling"]
-        
-        F_EXO["Future Exo"] --> F_PROJ["Projection"]
-        POOL --> CAT((Concat))
-        F_PROJ --> CAT
-        
-        CAT --> MLP["MLP Head\n(D -> Hidden -> H*Q)"]
-        MLP --> RESHAPE["View (B, M, H, Q)"]
-        RESHAPE --> SORT["Sort (Monotonic)"]
-        
-        SORT --> DENORM["RevIN (Denorm)"]
-        DENORM --> OUT["Output\nq ∈ (B, M, H, Q)"]
-    end
-    style ENC_OUT fill:#e8f5e9,stroke:#2e7d32
-    style OUT fill:#f3e5f5,stroke:#7b1fa2
+```text
+patch_token = proj([target_patch, past_cont_patch, past_cat_emb_patch])
 ```
 
-## 4. 주요 서브 모듈 상세
+## Future Exogenous
 
-### 4.1 TSTEncoder (Transformer Backbone)
-표준 Transformer Encoder를 사용하되, **Channel Independence**를 위해 배치 차원을 조작합니다.
+미래 외생변수는 `FutureExoTokenFusion` 모듈에서 처리됩니다.
 
-* **입력:** `(B, M, N, D)` $\rightarrow$ `(B * M, N, D)`
-* **구조:** `Norm` $\rightarrow$ `MHA` $\rightarrow$ `Add` $\rightarrow$ `Norm` $\rightarrow$ `FFN` $\rightarrow$ `Add`
-* **특징:**
-    * `batch_first=True` 기준 구현.
-    * `Pre-Norm` / `Post-Norm` 선택 가능.
-    * `GELU` 활성화 함수 사용.
+흐름은 다음과 같습니다.
 
-### 4.2 Patching & Embedding 유틸리티
-`modeling_module/models/PatchTST/common/backbone_base.py`에 정의된 로직입니다.
+1. `future_exo: (B, H, E)`를 horizon token sequence로 투영
+2. learnable future positional embedding 추가
+3. backbone token을 query로, future token을 key/value로 사용
+4. residual + FFN으로 안정적으로 결합
 
-```python
-# 의사 코드 (Pseudo-code)
-def forward(x, p_cont, p_cat):
-    # 1. 모든 입력을 [B, L+Pad, C] 형태로 패딩
-    # 2. Unfold로 패치 생성 -> [B, N, C, P]
-    patches_x = unfold(x)
-    patches_c = unfold(p_cont)
-    patches_cat = unfold(embedding(p_cat))
-    
-    # 3. 특징 차원(C) 기준으로 결합
-    concat_vector = cat([patches_x, patches_c, patches_cat], dim=-1)
-    
-    # 4. d_model로 투영
-    z = Linear(concat_vector) + PositionalEncoding
-    return z
+개념적으로는:
+
+```text
+future_tokens = Linear(future_exo) + future_pos
+z = CrossAttention(query=backbone_tokens, key=future_tokens, value=future_tokens)
 ```
 
-### 5. 결론
-이 PatchTST 구현체는 원본 논문의 장기 예측 성능과 효율성을 유지하면서, 실제 비즈니스 데이터에서 필수적인 다양한 외생변수(가격, 날씨, 휴일 등)를 효과적으로 반영할 수 있도록 설계되었습니다.
+이 방식의 장점:
 
-확장성: 과거/미래 외생변수를 각각 인코더와 헤드 단계에 주입하여 정보 손실을 최소화.
+- horizon별 future exo 영향이 분리됩니다
+- part-specific backbone signal이 유지됩니다
+- future exo가 공통 패턴일 때도 head가 쉽게 collapse하지 않습니다
 
-유연성: Point 예측과 Quantile 예측을 모두 지원하여 결정적/확률적 수요예측에 모두 대응.
+## Head
 
-안정성: RevIN과 Channel Independence를 통해 데이터 분포 변화(Distribution Shift)에 강건함.
+future exo는 head에서 직접 다시 받지 않습니다.  
+head는 미래 외생 신호가 이미 fusion된 backbone token만 사용합니다.
+
+지원 head:
+
+- `PointHeadWithExo`
+- `QuantileHeadWithExo`
+- `DistHeadWithExo`
+
+현재는 head의 `d_future`를 `0`으로 두고, output head는 순수하게 fused token representation만 읽습니다.
+
+## Point / Quantile / Distribution
+
+### Point model
+
+- output: `(B, H)`
+- loss 예시: `MAE`, `MSE`, `Huber`
+
+### Quantile model
+
+- output: `(B, H, Q)`
+- `monotonic_quantiles=True`일 때 분위수 정렬
+
+### Distribution model
+
+- output: `(B, H, P)`
+- location / scale 계열 파라미터를 출력
+
+## 현재 구현의 실무적 의미
+
+이 구현은 아래 상황에서 유리합니다.
+
+- 미래 calendar / promo / weather feature가 horizon별로 다르게 작동할 때
+- part별 과거 패턴과 future-known feature를 함께 써야 할 때
+- 미래 외생변수를 단일 벡터로 압축했을 때 발생하는 불안정성을 피하고 싶을 때
+
+반대로, future exo가 거의 공통 패턴만 제공하고 개별 품목 차이를 충분히 못 만들면:
+
+- `PatchTST + no_future`
+- 또는 `ExoTST`
+
+가 더 적절할 수 있습니다.  
+즉 future exo를 “넣을 수 있느냐”보다 “미래 신호가 item-specific 정보로 충분한가”가 더 중요합니다.
+
+## 코드 위치
+
+- config: [configs.py](/Users/igwanhyeong/PycharmProjects/ts_forecaster_lib/src/modeling_module/models/PatchTST/common/configs.py)
+- supervised model: [PatchTST.py](/Users/igwanhyeong/PycharmProjects/ts_forecaster_lib/src/modeling_module/models/PatchTST/supervised/PatchTST.py)
+- backbone: [backbone.py](/Users/igwanhyeong/PycharmProjects/ts_forecaster_lib/src/modeling_module/models/PatchTST/supervised/backbone.py)
+- trainer glue: [patchtst_train.py](/Users/igwanhyeong/PycharmProjects/ts_forecaster_lib/src/modeling_module/training/model_trainers/patchtst_train.py)
+
+## 권장 해석
+
+현재 레포 기준으로는 PatchTST를 이렇게 이해하는 게 가장 정확합니다.
+
+- PatchTST는 `past-only`로도 강한 baseline이 된다
+- future exo가 유효하면 token cross-attention 경로로 추가 이득을 볼 수 있다
+- future exo 품질이 낮거나 공통 패턴 위주면 `no_future`가 더 안정적일 수 있다

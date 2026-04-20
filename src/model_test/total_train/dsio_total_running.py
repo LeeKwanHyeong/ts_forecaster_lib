@@ -288,6 +288,7 @@ def build_model_architecture(args: argparse.Namespace) -> ArchitectureConfig:
             pe="sincos",
             learn_pe=True,
             padding_patch="end",
+            future_exo_fusion_dropout=getattr(args, "patchtst_future_exo_fusion_dropout", None),
         ),
         patchmixer=PatchMixerArchitectureConfig(
             patch_len=args.patch_len,

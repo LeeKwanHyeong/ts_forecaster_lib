@@ -80,7 +80,8 @@ class PatchTSTConfig(TrainingConfig):
     d_cat_emb: int = 0  # 범주형 변수 임베딩 차원
 
     # ---------- 미래 외생 변수 (Future Exogenous) ----------
-    future_exo_dim: int = 0  # 미래 연속형 외생 변수 개수 (예측 헤드에 주입)
+    future_exo_dim: int = 0  # 미래 연속형 외생 변수 개수 (토큰 단위 cross-attention으로 결합)
+    future_exo_fusion_dropout: float = 0.1
 
     # ---------- 인코더(백본) 구조 설정 ----------
     n_layers: int = 3  # 인코더 블록(Layer) 개수

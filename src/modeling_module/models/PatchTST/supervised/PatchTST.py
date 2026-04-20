@@ -11,6 +11,96 @@ from modeling_module.models.PatchTST.supervised.backbone import SupervisedBackbo
 from modeling_module.models.common_layers.RevIN import RevIN
 
 
+class FutureExoTokenFusion(nn.Module):
+    """
+    Token-wise future exogenous fusion for PatchTST.
+
+    Instead of flattening the whole future horizon into a single vector,
+    project each horizon step into a token and let backbone patch tokens
+    attend to that future token sequence.
+    """
+
+    def __init__(
+        self,
+        *,
+        d_model: int,
+        d_future: int,
+        horizon: int,
+        n_heads: int,
+        dropout: float = 0.1,
+    ):
+        super().__init__()
+        self.d_future = int(d_future)
+        self.horizon = int(horizon)
+        self.future_proj = nn.Linear(self.d_future, int(d_model))
+        self.future_pos = nn.Parameter(torch.zeros(1, self.horizon, int(d_model)))
+        nn.init.normal_(self.future_pos, mean=0.0, std=0.02)
+
+        self.query_norm = nn.LayerNorm(int(d_model))
+        self.memory_norm = nn.LayerNorm(int(d_model))
+        self.cross_attn = nn.MultiheadAttention(
+            embed_dim=int(d_model),
+            num_heads=int(n_heads),
+            dropout=float(dropout),
+            batch_first=True,
+        )
+        self.dropout = nn.Dropout(float(dropout))
+        self.resid_norm = nn.LayerNorm(int(d_model))
+        self.ff_norm = nn.LayerNorm(int(d_model))
+        self.ff = nn.Sequential(
+            nn.Linear(int(d_model), int(d_model) * 4),
+            nn.GELU(),
+            nn.Dropout(float(dropout)),
+            nn.Linear(int(d_model) * 4, int(d_model)),
+        )
+
+        # Start conservatively so exo does not immediately overwhelm the backbone.
+        self.cross_gate = nn.Parameter(torch.tensor(-2.0))
+        self.ff_gate = nn.Parameter(torch.tensor(-2.0))
+
+    def forward(self, z: torch.Tensor, future_exo: torch.Tensor | None) -> torch.Tensor:
+        if self.d_future <= 0 or future_exo is None:
+            return z
+
+        if future_exo.dim() == 2:
+            future_exo = future_exo.unsqueeze(0).expand(z.size(0), -1, -1)
+
+        if future_exo.dim() != 3:
+            raise RuntimeError(
+                f"[PatchTST-FutureFusion] future_exo must be (B,H,E) or (H,E), got {tuple(future_exo.shape)}"
+            )
+
+        b2, H, D = future_exo.shape
+        if b2 != z.size(0):
+            raise RuntimeError(f"[PatchTST-FutureFusion] batch mismatch: {b2} != {z.size(0)}")
+        if H != self.horizon:
+            raise RuntimeError(f"[PatchTST-FutureFusion] horizon mismatch: {H} != {self.horizon}")
+        if D != self.d_future:
+            raise RuntimeError(f"[PatchTST-FutureFusion] future_exo dim mismatch: {D} != {self.d_future}")
+
+        exo_tokens = self.future_proj(future_exo) + self.future_pos[:, :H, :]
+        exo_tokens = self.memory_norm(self.dropout(exo_tokens))
+
+        attn_out, _ = self.cross_attn(
+            self.query_norm(z),
+            exo_tokens,
+            exo_tokens,
+            need_weights=False,
+        )
+        z = self.resid_norm(z + torch.sigmoid(self.cross_gate) * self.dropout(attn_out))
+
+        ff_out = self.ff(self.ff_norm(z))
+        z = self.resid_norm(z + torch.sigmoid(self.ff_gate) * self.dropout(ff_out))
+        return z
+
+
+def _resolve_future_exo_fusion_dropout(cfg) -> float:
+    raw = getattr(cfg, 'future_exo_fusion_dropout', None)
+    if raw is None:
+        raw = getattr(cfg, 'dropout', 0.1)
+    return float(raw)
+
+
 class PatchTSTModel(nn.Module):
 
     def _denorm_scale(self, scale: torch.Tensor) -> torch.Tensor:
@@ -35,13 +125,14 @@ class PatchTSTModel(nn.Module):
     def __init__(self, cfg: PatchTSTConfig):
         super().__init__()
         self.model_name = 'PatchTSTModel'
+        self.cfg = cfg
 
 
         self.attn_type = getattr(cfg.attn.attn_core, "type", "full").lower()
         self.lookback = int(getattr(cfg, 'lookback', 52))
         self.horizon = int(getattr(cfg, 'horizon', 27))
         self.d_model = int(getattr(cfg, 'd_model', 128))
-        self.d_future = int(getattr(cfg, 'future_exo_dim', 0))
+        self.d_future = int(getattr(cfg, 'future_exo_dim', getattr(cfg, 'd_future', 0)))
         self.act = getattr(cfg, 'act', 'gelu')
         self.patch_len = int(getattr(cfg, 'patch_len', 8))
         self.stride = int(getattr(cfg, 'stride', self.patch_len // 2))
@@ -53,6 +144,9 @@ class PatchTSTModel(nn.Module):
         self.use_revin = bool(getattr(cfg, 'use_revin', True))
         self.revin_layer = RevIN(num_features=cfg.c_in, affine = False, subtract_last = True, use_std = True)
 
+        self.future_fuser: FutureExoTokenFusion | None = None
+        self._rebuild_future_exo_path(self.d_future)
+
         self.loss = cfg.loss
         self.loss_type = 'point' if not hasattr(self.loss, 'distribution') else 'distribution'
 
@@ -62,7 +156,7 @@ class PatchTSTModel(nn.Module):
             self.head = PointHeadWithExo(
                 d_model=self.d_model,
                 horizon=self.horizon,
-                d_future=self.d_future,
+                d_future=self._head_future_dim(),
                 patch_num=compute_patch_num(
                     lookback=self.lookback,
                     patch_len=self.patch_len,
@@ -76,7 +170,7 @@ class PatchTSTModel(nn.Module):
             self.head = DistHeadWithExo(
                 d_model=self.d_model,
                 horizon=self.horizon,
-                d_future=self.d_future,
+                d_future=self._head_future_dim(),
                 act=self.act,
                 out_mult=self.out_mult,
             )
@@ -88,6 +182,22 @@ class PatchTSTModel(nn.Module):
     @classmethod
     def from_config(cls, config: "PatchTSTConfig"):
         return cls(cfg=config)
+
+    def _head_future_dim(self) -> int:
+        return 0
+
+    def _rebuild_future_exo_path(self, d_future: int) -> None:
+        self.d_future = int(d_future)
+        if self.d_future > 0:
+            self.future_fuser = FutureExoTokenFusion(
+                d_model=self.d_model,
+                d_future=self.d_future,
+                horizon=self.horizon,
+                n_heads=int(getattr(self.cfg.attn, 'n_heads', 8)),
+                dropout=_resolve_future_exo_fusion_dropout(self.cfg),
+            )
+        else:
+            self.future_fuser = None
 
     def forward(
             self,
@@ -105,8 +215,13 @@ class PatchTSTModel(nn.Module):
         # 2) Backbone Encoding (Inject Past Exogenous)
         z = self.backbone(x_n, past_exo_cont=past_exo_cont, past_exo_cat=past_exo_cat)  # [B, N, d_model]
 
+        # 2.5) Token-wise future exo fusion before the head
+        if self.future_fuser is not None:
+            z = self.future_fuser(z, future_exo)
+
         # 3) Head Forecasting (Inject Future Exogenous)
-        head_out = self.head(z, future_exo=future_exo)  # [B, H]
+        head_future_exo = future_exo if self._head_future_dim() > 0 else None
+        head_out = self.head(z, future_exo=head_future_exo)  # [B, H]
 
         if self.loss_type == 'point':
             if self.use_revin:
@@ -176,12 +291,13 @@ class PatchTSTQuantileModel(nn.Module):
         # 백본 초기화
         self.attn_type = getattr(cfg.attn.attn_core, "type", "full").lower()
         self.backbone = SupervisedBackbone(cfg, self.attn_type)
+        self.d_future = int(getattr(cfg, 'future_exo_dim', getattr(cfg, 'd_future', 0)))
 
         # 분위수 헤드 초기화
         self.head = QuantileHeadWithExo(
             d_model=cfg.d_model,
             horizon=cfg.horizon,
-            d_future=getattr(cfg, "future_exo_dim", 0),
+            d_future=self._head_future_dim(),
             quantiles=getattr(cfg, "quantiles", (0.1, 0.5, 0.9)),
             hidden=getattr(cfg, "q_hidden", 128),
             monotonic=getattr(cfg, "monotonic_quantiles", True),
@@ -192,10 +308,28 @@ class PatchTSTQuantileModel(nn.Module):
         self.model_name = "PatchTST QuantileModel"
 
         self.revin_layer = RevIN(num_features=cfg.c_in, affine = False, subtract_last = True, use_std = True)
+        self.future_fuser: FutureExoTokenFusion | None = None
+        self._rebuild_future_exo_path(self.d_future)
 
     @classmethod
     def from_config(cls, config: "PatchTSTConfig"):
         return cls(cfg=config)
+
+    def _head_future_dim(self) -> int:
+        return 0
+
+    def _rebuild_future_exo_path(self, d_future: int) -> None:
+        self.d_future = int(d_future)
+        if self.d_future > 0:
+            self.future_fuser = FutureExoTokenFusion(
+                d_model=int(self.cfg.d_model),
+                d_future=self.d_future,
+                horizon=int(self.cfg.horizon),
+                n_heads=int(getattr(self.cfg.attn, 'n_heads', 8)),
+                dropout=_resolve_future_exo_fusion_dropout(self.cfg),
+            )
+        else:
+            self.future_fuser = None
 
     def forward(
             self,
@@ -220,8 +354,12 @@ class PatchTSTQuantileModel(nn.Module):
         # 2) 백본 인코딩
         z = self.backbone(x_n, past_exo_cont=past_exo_cont, past_exo_cat=past_exo_cat)  # [B, N, d_model]
 
+        if self.future_fuser is not None:
+            z = self.future_fuser(z, future_exo)
+
         # 3) 헤드 예측 -> [B, H, Q]
-        q_n = self.head(z, future_exo=future_exo)
+        head_future_exo = future_exo if self._head_future_dim() > 0 else None
+        q_n = self.head(z, future_exo=head_future_exo)
 
         # 4) 역정규화 (Denormalization)
         if use_revin:
@@ -242,4 +380,3 @@ class PatchTSTQuantileModel(nn.Module):
                 raise RuntimeError(f"[PatchTSTQuantile] unexpected q_n.dim={q_n.dim()} shape={tuple(q_n.shape)}")
 
         return {"q": q_n}
-

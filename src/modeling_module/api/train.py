@@ -143,6 +143,7 @@ class PatchTSTArchitectureConfig:
     pe: Optional[str] = None
     learn_pe: Optional[bool] = None
     padding_patch: Optional[str] = None
+    future_exo_fusion_dropout: Optional[float] = None
 
 
 @dataclass
@@ -414,6 +415,7 @@ _ARCHITECTURE_ALLOWED_KEYS: dict[str, set[str]] = {
         "pe",
         "learn_pe",
         "padding_patch",
+        "future_exo_fusion_dropout",
     },
     "titan": {
         "d_model",

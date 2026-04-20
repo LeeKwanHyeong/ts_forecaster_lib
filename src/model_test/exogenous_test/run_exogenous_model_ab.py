@@ -80,7 +80,14 @@ class ModelSpec:
 
 
 MODEL_SPECS: dict[str, ModelSpec] = {
-    "patchtst_exo": ModelSpec(label="patchtst_exo", request_key="patchtst_base", use_future_exogenous=True),
+    "patchtst_no_future": ModelSpec(label="patchtst_no_future", request_key="patchtst_base", use_future_exogenous=False),
+    "patchtst_token_cross_attn": ModelSpec(
+        label="patchtst_token_cross_attn",
+        request_key="patchtst_base",
+        use_future_exogenous=True,
+    ),
+    # backward-compatible alias
+    "patchtst_exo": ModelSpec(label="patchtst_token_cross_attn", request_key="patchtst_base", use_future_exogenous=True),
     "timexer": ModelSpec(label="timexer", request_key="timexer_base", use_future_exogenous=False),
     "exotst": ModelSpec(label="exotst", request_key="exotst_base", use_future_exogenous=True),
 }
@@ -109,6 +116,7 @@ def build_architecture_config(args: argparse.Namespace) -> ArchitectureConfig:
             pe="sincos",
             learn_pe=True,
             padding_patch="end",
+            future_exo_fusion_dropout=getattr(args, "patchtst_future_exo_fusion_dropout", None),
         ),
         timexer=TimexerArchitectureConfig(
             patch_len=args.timexer_patch_len,
@@ -227,10 +235,14 @@ def maybe_clean_dir(path: Path, clean_output: bool) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Train and compare PatchTST-Exo, TimeXer, and ExoTST on the DSIO exogenous dataset."
+        description="Train and compare PatchTST(no-future / token-cross-attn), TimeXer, and ExoTST on the DSIO exogenous dataset."
     )
     parser.add_argument("--artifact-root", type=Path, default=REPO_ROOT / "artifacts" / "exogenous_test")
-    parser.add_argument("--models", nargs="+", default=["patchtst_exo", "timexer", "exotst"])
+    parser.add_argument(
+        "--models",
+        nargs="+",
+        default=["patchtst_no_future", "patchtst_token_cross_attn", "timexer", "exotst"],
+    )
     parser.add_argument("--lookback", type=int, default=104)
     parser.add_argument("--horizon", type=int, default=27)
     # 이 스크립트는 단일 plan week backtest를 전제로 한다.

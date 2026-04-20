@@ -49,7 +49,7 @@ from modeling_module.training.model_trainers.titan_train import train_titan
 from .exotst_train import train_exotst
 from ...models.ExoTST.configs import ExoTSTConfig
 
-SSLMode = Literal["ssl_only", "full", "sl_only"]
+SSLMode = Literal["ssl_only", "full", "sl_only", "off"]
 
 # =============================================================================
 # Policy imports (freq + exo)
@@ -309,8 +309,12 @@ def coerce_quantile_loss(loss_quantile: Optional[nn.Module], *, quantiles=(0.1, 
 
 def _validate_ssl_mode(use_ssl_mode: str) -> SSLMode:
     m = str(use_ssl_mode).strip().lower()
+    if m == "off":
+        m = "sl_only"
     if m not in ("ssl_only", "full", "sl_only"):
-        raise ValueError(f"use_ssl_mode must be one of ['ssl_only','full','sl_only'], got={use_ssl_mode!r}")
+        raise ValueError(
+            f"use_ssl_mode must be one of ['ssl_only','full','sl_only','off'], got={use_ssl_mode!r}"
+        )
     return m  # type: ignore[return-value]
 
 
