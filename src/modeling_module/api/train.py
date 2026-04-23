@@ -415,6 +415,7 @@ _ARCHITECTURE_ALLOWED_KEYS: dict[str, set[str]] = {
         "pe",
         "learn_pe",
         "padding_patch",
+        "future_exo_fusion_mode",
         "future_exo_fusion_dropout",
     },
     "titan": {

@@ -101,6 +101,30 @@ def _resolve_future_exo_fusion_dropout(cfg) -> float:
     return float(raw)
 
 
+def _resolve_future_exo_fusion_mode(cfg) -> str:
+    raw = getattr(cfg, 'future_exo_fusion_mode', 'token_cross_attn')
+    mode = str(raw or 'token_cross_attn').strip().lower()
+    aliases = {
+        'token': 'token_cross_attn',
+        'token_attn': 'token_cross_attn',
+        'cross_attn': 'token_cross_attn',
+        'cross_attention': 'token_cross_attn',
+        'tokencrossattn': 'token_cross_attn',
+        'head': 'head_flatten',
+        'flatten': 'head_flatten',
+        'head_flat': 'head_flatten',
+        'headflatten': 'head_flatten',
+    }
+    mode = aliases.get(mode, mode)
+    if mode not in {'token_cross_attn', 'head_flatten'}:
+        raise ValueError(
+            "future_exo_fusion_mode must be one of "
+            "['token_cross_attn', 'head_flatten'], got "
+            f"{raw!r}"
+        )
+    return mode
+
+
 class PatchTSTModel(nn.Module):
 
     def _denorm_scale(self, scale: torch.Tensor) -> torch.Tensor:
@@ -184,11 +208,12 @@ class PatchTSTModel(nn.Module):
         return cls(cfg=config)
 
     def _head_future_dim(self) -> int:
-        return 0
+        return self.d_future if _resolve_future_exo_fusion_mode(self.cfg) == 'head_flatten' else 0
 
     def _rebuild_future_exo_path(self, d_future: int) -> None:
         self.d_future = int(d_future)
-        if self.d_future > 0:
+        mode = _resolve_future_exo_fusion_mode(self.cfg)
+        if self.d_future > 0 and mode == 'token_cross_attn':
             self.future_fuser = FutureExoTokenFusion(
                 d_model=self.d_model,
                 d_future=self.d_future,
@@ -316,11 +341,12 @@ class PatchTSTQuantileModel(nn.Module):
         return cls(cfg=config)
 
     def _head_future_dim(self) -> int:
-        return 0
+        return self.d_future if _resolve_future_exo_fusion_mode(self.cfg) == 'head_flatten' else 0
 
     def _rebuild_future_exo_path(self, d_future: int) -> None:
         self.d_future = int(d_future)
-        if self.d_future > 0:
+        mode = _resolve_future_exo_fusion_mode(self.cfg)
+        if self.d_future > 0 and mode == 'token_cross_attn':
             self.future_fuser = FutureExoTokenFusion(
                 d_model=int(self.cfg.d_model),
                 d_future=self.d_future,

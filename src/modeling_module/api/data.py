@@ -410,7 +410,7 @@ def build_datamodule(cfg: DataRequest | Mapping[str, Any]) -> Any:
         date_indexer=payload.get("date_indexer"),
         build_cat_indexer_from=payload.get("build_cat_indexer_from"),
         cat_indexer_target_col=payload.get("cat_indexer_target_col"),
-        split_mode=str(payload.get("split_mode", "window")),
+        split_mode=str(payload.get("split_mode", "multi")),
     )
 
 

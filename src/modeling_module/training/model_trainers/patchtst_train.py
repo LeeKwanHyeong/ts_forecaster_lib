@@ -24,7 +24,12 @@ def _ensure_patchtst_future_head(model, exo_dim: int, *, loss_mode: str = "point
     current = int(getattr(cfg, "future_exo_dim", getattr(cfg, "d_future", 0)))
     cfg.future_exo_dim = int(exo_dim) if exo_dim > 0 else 0
     cfg.d_future = int(cfg.future_exo_dim)
-    head_future_dim = 0
+    fusion_mode = str(getattr(cfg, "future_exo_fusion_mode", "token_cross_attn") or "token_cross_attn").lower()
+    head_future_dim = (
+        int(cfg.future_exo_dim)
+        if fusion_mode in {"head_flatten", "head", "flatten", "head_flat", "headflatten"}
+        else 0
+    )
 
     patch_num = compute_patch_num(cfg.lookback, cfg.patch_len, cfg.stride, cfg.padding_patch)
 
