@@ -116,6 +116,7 @@ def build_architecture_config(args: argparse.Namespace) -> ArchitectureConfig:
             pe="sincos",
             learn_pe=True,
             padding_patch="end",
+            future_exo_fusion_mode=getattr(args, "patchtst_future_exo_fusion_mode", None),
             future_exo_fusion_dropout=getattr(args, "patchtst_future_exo_fusion_dropout", None),
         ),
         timexer=TimexerArchitectureConfig(

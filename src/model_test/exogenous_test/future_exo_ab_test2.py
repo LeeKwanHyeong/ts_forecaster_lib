@@ -1028,6 +1028,345 @@ def plot_inflection_summary(inflection_df: pl.DataFrame, save_path: Path) -> Non
     plt.close(fig)
 
 
+def split_fusion_case_name(case_name: str) -> Tuple[str, Optional[str]]:
+    """Return the base AB case and PatchTST future-exo fusion mode, if present."""
+    for mode in PATCHTST_FUTURE_EXO_FUSION_MODES:
+        suffix = f"_{mode}"
+        if case_name.endswith(suffix):
+            return case_name[: -len(suffix)], mode
+    return case_name, None
+
+
+def add_fusion_case_columns(df: pl.DataFrame) -> pl.DataFrame:
+    if df.height == 0 or "case_name" not in df.columns:
+        return df
+    return df.with_columns(
+        [
+            pl.col("case_name")
+            .map_elements(lambda v: split_fusion_case_name(str(v))[0], return_dtype=pl.Utf8)
+            .alias("base_case"),
+            pl.col("case_name")
+            .map_elements(lambda v: split_fusion_case_name(str(v))[1], return_dtype=pl.Utf8)
+            .alias("fusion_mode"),
+        ]
+    )
+
+
+def _parse_run_metadata(base_dir: Path, path: Path) -> Optional[Dict[str, object]]:
+    try:
+        rel = path.relative_to(base_dir)
+    except ValueError:
+        return None
+
+    parts = rel.parts
+    if len(parts) < 5:
+        return None
+
+    plant, case_name, batch_name, seed_name = parts[:4]
+    if not batch_name.startswith("batch_") or not seed_name.startswith("seed_"):
+        return None
+
+    try:
+        batch_size = int(batch_name.removeprefix("batch_"))
+        seed = int(seed_name.removeprefix("seed_"))
+    except ValueError:
+        return None
+
+    base_case, fusion_mode = split_fusion_case_name(case_name)
+    return {
+        "plant": plant,
+        "case_name": case_name,
+        "base_case": base_case,
+        "fusion_mode": fusion_mode,
+        "batch_size": batch_size,
+        "seed": seed,
+    }
+
+
+def load_run_metric_tables(base_dir: Path, file_name: str) -> pl.DataFrame:
+    rows: List[pl.DataFrame] = []
+    for path in base_dir.rglob(file_name):
+        meta = _parse_run_metadata(base_dir, path)
+        if meta is None:
+            continue
+        df = pl.read_parquet(path)
+        if df.height == 0:
+            continue
+        rows.append(
+            df.with_columns(
+                [
+                    pl.lit(str(meta["plant"])).alias("plant"),
+                    pl.lit(str(meta["case_name"])).alias("case_name"),
+                    pl.lit(str(meta["base_case"])).alias("base_case"),
+                    pl.lit(meta["fusion_mode"]).cast(pl.Utf8).alias("fusion_mode"),
+                    pl.lit(int(meta["batch_size"])).cast(pl.Int64).alias("batch_size"),
+                    pl.lit(int(meta["seed"])).cast(pl.Int64).alias("seed"),
+                ]
+            )
+        )
+    return pl.concat(rows, how="vertical_relaxed") if rows else pl.DataFrame()
+
+
+def build_fusion_pair_delta(summary_df: pl.DataFrame) -> pl.DataFrame:
+    required = {"plant", "base_case", "batch_size", "seed", "fusion_mode", "far_mean"}
+    if summary_df.height == 0 or not required.issubset(set(summary_df.columns)):
+        return pl.DataFrame()
+
+    head = (
+        summary_df.filter(pl.col("fusion_mode") == "head_flatten")
+        .select(["plant", "base_case", "batch_size", "seed", "far_mean"])
+        .rename({"far_mean": "far_mean_head_flatten"})
+    )
+    token = (
+        summary_df.filter(pl.col("fusion_mode") == "token_cross_attn")
+        .select(["plant", "base_case", "batch_size", "seed", "far_mean"])
+        .rename({"far_mean": "far_mean_token_cross_attn"})
+    )
+    if head.height == 0 or token.height == 0:
+        return pl.DataFrame()
+
+    return (
+        head.join(token, on=["plant", "base_case", "batch_size", "seed"], how="inner")
+        .with_columns(
+            [
+                (
+                    pl.col("far_mean_head_flatten")
+                    - pl.col("far_mean_token_cross_attn")
+                ).alias("far_mean_improvement_token_vs_head"),
+                pl.when(pl.col("far_mean_head_flatten").abs() > 1e-12)
+                .then(
+                    (
+                        pl.col("far_mean_head_flatten")
+                        - pl.col("far_mean_token_cross_attn")
+                    )
+                    / pl.col("far_mean_head_flatten")
+                )
+                .otherwise(None)
+                .alias("far_mean_improvement_ratio"),
+            ]
+        )
+        .sort(["plant", "base_case", "batch_size", "seed"])
+    )
+
+
+def plot_fusion_far_by_batch(summary_df: pl.DataFrame, save_dir: Path) -> None:
+    if summary_df.height == 0 or "fusion_mode" not in summary_df.columns:
+        return
+    df = summary_df.filter(pl.col("fusion_mode").is_in(list(PATCHTST_FUTURE_EXO_FUSION_MODES)))
+    if df.height == 0:
+        return
+
+    grouped = (
+        df.group_by(["plant", "base_case", "batch_size", "fusion_mode"])
+        .agg(
+            [
+                pl.col("far_mean").mean().alias("far_mean_avg"),
+                pl.col("far_mean").std().alias("far_mean_std"),
+                pl.len().alias("run_count"),
+            ]
+        )
+        .sort(["plant", "base_case", "fusion_mode", "batch_size"])
+    )
+    grouped.write_parquet(save_dir.parent / "global_summary" / "fusion_far_by_batch.parquet")
+
+    for plant in grouped["plant"].unique().to_list():
+        for base_case in grouped.filter(pl.col("plant") == plant)["base_case"].unique().to_list():
+            pdf = (
+                grouped.filter((pl.col("plant") == plant) & (pl.col("base_case") == base_case))
+                .sort(["fusion_mode", "batch_size"])
+                .to_pandas()
+            )
+            if pdf.empty:
+                continue
+            fig = plt.figure(figsize=(12, 6))
+            for fusion_mode, sub in pdf.groupby("fusion_mode"):
+                plt.plot(
+                    sub["batch_size"],
+                    sub["far_mean_avg"],
+                    marker="o",
+                    label=fusion_mode,
+                )
+            plt.title(f"{plant} | {base_case} | FAR Mean by Batch")
+            plt.xlabel("batch_size")
+            plt.ylabel("far_mean_avg")
+            plt.grid(True, alpha=0.3)
+            plt.legend()
+            plt.tight_layout()
+            fig.savefig(
+                save_dir / f"{plant}_{base_case}_fusion_far_by_batch.png",
+                dpi=150,
+                bbox_inches="tight",
+            )
+            plt.close(fig)
+
+
+def plot_fusion_far_by_target_week(far_df: pl.DataFrame, save_dir: Path) -> None:
+    required = {"plant", "base_case", "fusion_mode", "target_week", "weighted_far"}
+    if far_df.height == 0 or not required.issubset(set(far_df.columns)):
+        return
+    df = far_df.filter(pl.col("fusion_mode").is_in(list(PATCHTST_FUTURE_EXO_FUSION_MODES)))
+    if df.height == 0:
+        return
+
+    grouped = (
+        df.group_by(["plant", "base_case", "target_week", "fusion_mode"])
+        .agg(
+            [
+                pl.col("weighted_far").mean().alias("weighted_far_avg"),
+                pl.col("weighted_far").std().alias("weighted_far_std"),
+                pl.len().alias("run_count"),
+            ]
+        )
+        .sort(["plant", "base_case", "fusion_mode", "target_week"])
+    )
+    grouped.write_parquet(save_dir.parent / "global_summary" / "fusion_far_by_target_week.parquet")
+
+    for plant in grouped["plant"].unique().to_list():
+        for base_case in grouped.filter(pl.col("plant") == plant)["base_case"].unique().to_list():
+            pdf = (
+                grouped.filter((pl.col("plant") == plant) & (pl.col("base_case") == base_case))
+                .sort(["fusion_mode", "target_week"])
+                .to_pandas()
+            )
+            if pdf.empty:
+                continue
+            fig = plt.figure(figsize=(14, 6))
+            for fusion_mode, sub in pdf.groupby("fusion_mode"):
+                plt.plot(
+                    sub["target_week"],
+                    sub["weighted_far_avg"],
+                    marker="o",
+                    label=fusion_mode,
+                )
+            plt.title(f"{plant} | {base_case} | FAR Trend by Target Week")
+            plt.xlabel("target_week")
+            plt.ylabel("weighted_far_avg")
+            plt.grid(True, alpha=0.3)
+            plt.legend()
+            plt.tight_layout()
+            fig.savefig(
+                save_dir / f"{plant}_{base_case}_fusion_far_by_target_week.png",
+                dpi=150,
+                bbox_inches="tight",
+            )
+            plt.close(fig)
+
+
+def plot_fusion_aggregate_by_target_week(inflection_df: pl.DataFrame, save_dir: Path) -> None:
+    required = {
+        "plant",
+        "base_case",
+        "fusion_mode",
+        "target_week",
+        "actual_sum",
+        "base_forecast_sum",
+    }
+    if inflection_df.height == 0 or not required.issubset(set(inflection_df.columns)):
+        return
+    df = inflection_df.filter(pl.col("fusion_mode").is_in(list(PATCHTST_FUTURE_EXO_FUSION_MODES)))
+    if df.height == 0:
+        return
+
+    pred_grouped = (
+        df.group_by(["plant", "base_case", "target_week", "fusion_mode"])
+        .agg(pl.col("base_forecast_sum").mean().alias("base_forecast_sum_avg"))
+        .sort(["plant", "base_case", "fusion_mode", "target_week"])
+    )
+    actual_grouped = (
+        df.group_by(["plant", "base_case", "target_week"])
+        .agg(pl.col("actual_sum").mean().alias("actual_sum_avg"))
+        .sort(["plant", "base_case", "target_week"])
+    )
+    pred_grouped.write_parquet(
+        save_dir.parent / "global_summary" / "fusion_forecast_sum_by_target_week.parquet"
+    )
+
+    for plant in pred_grouped["plant"].unique().to_list():
+        for base_case in pred_grouped.filter(pl.col("plant") == plant)["base_case"].unique().to_list():
+            pred_pdf = (
+                pred_grouped.filter((pl.col("plant") == plant) & (pl.col("base_case") == base_case))
+                .sort(["fusion_mode", "target_week"])
+                .to_pandas()
+            )
+            actual_pdf = (
+                actual_grouped.filter((pl.col("plant") == plant) & (pl.col("base_case") == base_case))
+                .sort("target_week")
+                .to_pandas()
+            )
+            if pred_pdf.empty or actual_pdf.empty:
+                continue
+            fig = plt.figure(figsize=(14, 6))
+            plt.plot(
+                actual_pdf["target_week"],
+                actual_pdf["actual_sum_avg"],
+                marker="o",
+                linewidth=2.5,
+                label="actual_sum",
+            )
+            for fusion_mode, sub in pred_pdf.groupby("fusion_mode"):
+                plt.plot(
+                    sub["target_week"],
+                    sub["base_forecast_sum_avg"],
+                    marker="o",
+                    label=f"{fusion_mode}_forecast_sum",
+                )
+            plt.title(f"{plant} | {base_case} | Aggregate Forecast vs Actual")
+            plt.xlabel("target_week")
+            plt.ylabel("sum")
+            plt.grid(True, alpha=0.3)
+            plt.legend()
+            plt.tight_layout()
+            fig.savefig(
+                save_dir / f"{plant}_{base_case}_fusion_aggregate_by_target_week.png",
+                dpi=150,
+                bbox_inches="tight",
+            )
+            plt.close(fig)
+
+
+def plot_fusion_pair_improvement(pair_delta_df: pl.DataFrame, save_dir: Path) -> None:
+    if pair_delta_df.height == 0:
+        return
+    grouped = (
+        pair_delta_df.group_by(["plant", "base_case", "batch_size"])
+        .agg(
+            [
+                pl.col("far_mean_improvement_token_vs_head").mean().alias("improvement_avg"),
+                pl.col("far_mean_improvement_ratio").mean().alias("improvement_ratio_avg"),
+                pl.len().alias("paired_run_count"),
+            ]
+        )
+        .sort(["plant", "base_case", "batch_size"])
+    )
+    grouped.write_parquet(save_dir.parent / "global_summary" / "fusion_pair_improvement.parquet")
+
+    for plant in grouped["plant"].unique().to_list():
+        pdf = grouped.filter(pl.col("plant") == plant).to_pandas()
+        if pdf.empty:
+            continue
+        fig = plt.figure(figsize=(12, 6))
+        for base_case, sub in pdf.groupby("base_case"):
+            plt.plot(
+                sub["batch_size"],
+                sub["improvement_avg"],
+                marker="o",
+                label=base_case,
+            )
+        plt.axhline(0.0, color="black", linewidth=1.0, linestyle="--", alpha=0.6)
+        plt.title(f"{plant} | Token Cross-Attn FAR Improvement vs Head Flatten")
+        plt.xlabel("batch_size")
+        plt.ylabel("head_flatten_far_mean - token_cross_attn_far_mean")
+        plt.grid(True, alpha=0.3)
+        plt.legend()
+        plt.tight_layout()
+        fig.savefig(
+            save_dir / f"{plant}_fusion_pair_improvement_by_batch.png",
+            dpi=150,
+            bbox_inches="tight",
+        )
+        plt.close(fig)
+
+
 def save_run_manifest(cfg: RunConfig, paths: RunPaths) -> None:
     save_json(asdict(cfg), paths.manifest_dir / "run_config.json")
 
@@ -1037,10 +1376,14 @@ def summarize_all_runs(base_dir: Path) -> None:
     if not summary_files:
         return
     summaries = [pl.read_parquet(path) for path in summary_files]
-    summary_df = pl.concat(summaries)
+    summary_df = add_fusion_case_columns(pl.concat(summaries, how="vertical_relaxed"))
     global_summary_dir = ensure_dir(base_dir / "global_summary")
     global_plots_dir = ensure_dir(base_dir / "global_plots")
     summary_df.write_parquet(global_summary_dir / "all_run_far_summary.parquet")
+
+    pair_delta_df = build_fusion_pair_delta(summary_df)
+    if pair_delta_df.height > 0:
+        pair_delta_df.write_parquet(global_summary_dir / "fusion_pair_delta.parquet")
 
     grouped = (
         summary_df.group_by(["plant", "case_name", "batch_size"])
@@ -1069,6 +1412,19 @@ def summarize_all_runs(base_dir: Path) -> None:
         plt.tight_layout()
         fig.savefig(global_plots_dir / f"{plant}_far_by_batch_case.png", dpi=150, bbox_inches="tight")
         plt.close(fig)
+
+    plot_fusion_far_by_batch(summary_df, global_plots_dir)
+    plot_fusion_pair_improvement(pair_delta_df, global_plots_dir)
+
+    far_df = load_run_metric_tables(base_dir, "far_by_target_week.parquet")
+    if far_df.height > 0:
+        far_df.write_parquet(global_summary_dir / "all_run_far_by_target_week.parquet")
+        plot_fusion_far_by_target_week(far_df, global_plots_dir)
+
+    inflection_df = load_run_metric_tables(base_dir, "inflection_summary.parquet")
+    if inflection_df.height > 0:
+        inflection_df.write_parquet(global_summary_dir / "all_run_inflection_summary.parquet")
+        plot_fusion_aggregate_by_target_week(inflection_df, global_plots_dir)
 
 
 def run_single_experiment(plant: str, case_name: str, batch_size: int, seed: int) -> None:

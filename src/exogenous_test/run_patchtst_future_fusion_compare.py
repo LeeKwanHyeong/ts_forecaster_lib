@@ -52,12 +52,14 @@ class CompareSpec:
     label: str
     request_key: str
     use_future_exogenous: bool
+    patchtst_future_exo_fusion_mode: str | None = None
 
 
 def _default_specs(include_baselines: bool) -> list[CompareSpec]:
     specs = [
         CompareSpec("patchtst_no_future", "patchtst_base", False),
-        CompareSpec("patchtst_token_cross_attn", "patchtst_base", True),
+        # CompareSpec("patchtst_head_flatten", "patchtst_base", True, "head_flatten"),
+        CompareSpec("patchtst_token_cross_attn", "patchtst_base", True, "token_cross_attn"),
     ]
     if include_baselines:
         specs.extend(
@@ -173,6 +175,7 @@ def _build_architecture(args: argparse.Namespace, spec: CompareSpec) -> Architec
         patchtst_d_model=args.patchtst_d_model,
         patchtst_layers=args.patchtst_layers,
         patchtst_d_ff=args.patchtst_d_ff,
+        patchtst_future_exo_fusion_mode=spec.patchtst_future_exo_fusion_mode or "token_cross_attn",
         patchtst_future_exo_fusion_dropout=args.patchtst_future_exo_fusion_dropout,
         timexer_patch_len=args.timexer_patch_len,
         timexer_d_model=args.timexer_d_model,
@@ -249,8 +252,8 @@ def _run_single_model(
                 val_use_weights=args.val_use_weights,
             ),
             ssl=SSLConfig(
-                mode="off",
-                pretrain_epochs=0,
+                mode="full",
+                pretrain_epochs=3,
                 mask_ratio=args.ssl_mask_ratio,
                 loss_type=args.ssl_loss_type,
             ),
@@ -482,6 +485,7 @@ def main() -> None:
                     "label": s.label,
                     "request_key": s.request_key,
                     "use_future_exogenous": bool(s.use_future_exogenous),
+                    "patchtst_future_exo_fusion_mode": s.patchtst_future_exo_fusion_mode,
                 }
                 for s in specs
             ],
