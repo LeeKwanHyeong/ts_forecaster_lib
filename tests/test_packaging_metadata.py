@@ -1,20 +1,31 @@
 from __future__ import annotations
 
-import tomllib
+import re
 from pathlib import Path
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - exercised on Python 3.10
+    import tomli as tomllib
 
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def _dependency_name(requirement: str) -> str:
+    match = re.match(r"^[A-Za-z0-9][A-Za-z0-9._-]*", requirement)
+    assert match is not None, f"invalid dependency requirement: {requirement!r}"
+    return match.group(0).casefold()
+
+
 def test_pyproject_declares_expected_runtime_dependencies():
     pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
-    dependencies = set(pyproject["project"]["dependencies"])
+    dependency_names = {
+        _dependency_name(requirement)
+        for requirement in pyproject["project"]["dependencies"]
+    }
 
-    assert "torch" in dependencies
-    assert "polars" in dependencies
-    assert "pyarrow" in dependencies
-    assert "PyYAML" in dependencies
+    assert {"torch", "polars", "pyarrow", "pyyaml"} <= dependency_names
 
 
 def test_pyproject_uses_package_readme():
@@ -30,7 +41,16 @@ def test_pyproject_declares_dev_and_notebook_extras():
 
     assert "dev" in optional
     assert "notebook" in optional
-    assert "build>=1" in optional["dev"]
-    assert "pytest>=8" in optional["dev"]
+    dev_dependency_names = {
+        _dependency_name(requirement)
+        for requirement in optional["dev"]
+    }
+    requirements_dev_names = {
+        _dependency_name(line)
+        for line in (ROOT / "requirements.dev.txt").read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.startswith("-r ")
+    }
+    assert {"build", "packaging", "pytest", "wheel"} <= dev_dependency_names
+    assert requirements_dev_names == dev_dependency_names
     assert "jupyterlab" in optional["notebook"]
     assert "ipykernel" in optional["notebook"]
