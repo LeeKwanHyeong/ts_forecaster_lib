@@ -891,6 +891,67 @@ def _summarize_request_for_manifest(request_payload: Mapping[str, Any]) -> dict[
     return manifest_request
 
 
+_CHECKPOINT_SAFE_DISTRIBUTIONS = frozenset({"Normal", "StudentT"})
+_SSL_ARTIFACT_MODES = frozenset({"full", "ssl_only"})
+
+
+def _validate_checkpoint_safe_distribution_loss(payload: Mapping[str, Any]) -> None:
+    """Reject distribution losses that the public checkpoint contract cannot restore."""
+    loss_obj = payload.get("loss_point")
+    loss_field = "loss_point"
+    if loss_obj is None:
+        loss_obj = payload.get("loss")
+        loss_field = "loss"
+
+    if loss_obj is None:
+        return
+
+    is_distribution_loss = bool(getattr(loss_obj, "is_distribution_output", False)) or (
+        loss_obj.__class__.__name__ == "DistributionLoss"
+    )
+    if not is_distribution_loss:
+        return
+
+    distribution = getattr(loss_obj, "distribution", None)
+    if distribution is None or str(distribution) in _CHECKPOINT_SAFE_DISTRIBUTIONS:
+        return
+
+    supported = ", ".join(sorted(_CHECKPOINT_SAFE_DISTRIBUTIONS))
+    raise ValueError(
+        "Unsupported distribution for public training checkpoints: "
+        f"{distribution!r} from `{loss_field}`. "
+        f"Supported distributions: {supported}."
+    )
+
+
+def _validate_ssl_artifact_precondition(payload: Mapping[str, Any]) -> None:
+    ssl_mode = str(payload.get("use_ssl_mode") or "sl_only").strip().lower()
+    if ssl_mode == "off":
+        ssl_mode = "sl_only"
+    if ssl_mode not in {"sl_only", *_SSL_ARTIFACT_MODES}:
+        raise ValueError(
+            "`ssl.mode` must be one of: 'sl_only', 'ssl_only', 'full', or 'off'. "
+            f"Got {payload.get('use_ssl_mode')!r}."
+        )
+    if ssl_mode not in _SSL_ARTIFACT_MODES:
+        return
+
+    requested_models = payload.get("models_to_run") or expand_training_targets(None)
+    if not any(_family_from_training_target(model) == "patchtst" for model in requested_models):
+        requested = ", ".join(str(model) for model in requested_models)
+        raise ValueError(
+            f"PatchTST SSL mode {ssl_mode!r} requires at least one PatchTST artifact. "
+            f"Requested models: {requested}."
+        )
+
+    save_dir = payload.get("save_dir")
+    if save_dir is None or not str(save_dir).strip():
+        raise ValueError(
+            f"PatchTST SSL mode {ssl_mode!r} requires an artifact `save_dir`. "
+            "Provide `artifacts.save_dir` or enable `artifacts.auto_save_dir`."
+        )
+
+
 def _validate_training_request(
     *,
     payload: Mapping[str, Any],
@@ -955,6 +1016,22 @@ def _validate_training_request(
         lookback=lookback_i,
         horizon=horizon_i,
     )
+
+    categorical_models = [
+        model for model in requested_models if _family_from_training_target(model) != "timexer"
+    ]
+    if (
+        bool(payload.get("use_exogenous_mode", False))
+        and bool(payload.get("use_past_exogenous", True))
+        and int(past_cat_dim) > 0
+        and categorical_models
+    ):
+        requested = ", ".join(categorical_models)
+        raise ValueError(
+            "Invalid training request: categorical past exogenous inputs are not supported "
+            f"by the public training contract for {requested}. Remove `past_exo_cat_cols` "
+            "or encode them as continuous features."
+        )
 
     if "timexer_base" in requested_models:
         if not bool(payload.get("use_exogenous_mode", False)):
@@ -1038,6 +1115,8 @@ def train(req: TrainRequest | Mapping[str, Any]) -> TrainResult:
     ```
     """
     payload = _normalize_payload(_request_to_dict(req))
+    _validate_checkpoint_safe_distribution_loss(payload)
+    _validate_ssl_artifact_precondition(payload)
     train_loader, val_loader, datamodule = _resolve_loaders(payload)
 
     freq = payload.get("freq")

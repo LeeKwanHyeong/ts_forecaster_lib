@@ -1,0 +1,190 @@
+{
+  "schema_version": 1,
+  "description": "Frozen tiny distribution checkpoints produced by the repository's historical unversioned and v2 writers.",
+  "sources": {
+    "v1": {
+      "commit": "97b1eb8",
+      "format_version": null,
+      "writer": "src/modeling_module/utils/checkpoint.py"
+    },
+    "v2": {
+      "commit": "e038bbf",
+      "format_version": "modeling_module.ckpt.v2",
+      "writer": "src/modeling_module/utils/checkpoint.py"
+    }
+  },
+  "artifacts": {
+    "v1_exotst_normal.pt": {
+      "sha256": "2ea033cf7997faed7e5256f1789fa7dfc03e30a2fc69dfc9d7dcf0aed7c7e297",
+      "format": "v1",
+      "model_key": "exotst_base",
+      "distribution": "Normal",
+      "saved_out_mult": 1,
+      "restore": "reject",
+      "rejection_reason": "invalid_distribution_head"
+    },
+    "v1_exotst_studentt.pt": {
+      "sha256": "aa4fc26aaa578334fa57c212d6e588ad138f835450d33ee517c2dff917afd2f6",
+      "format": "v1",
+      "model_key": "exotst_base",
+      "distribution": "StudentT",
+      "saved_out_mult": 1,
+      "restore": "reject",
+      "rejection_reason": "invalid_distribution_head"
+    },
+    "v1_patchmixer_normal.pt": {
+      "sha256": "9eb8fb2ea331c0e48a9ab6f2e4aabac51b2f437ee888832f7360f5956d9e3ffd",
+      "format": "v1",
+      "model_key": "patchmixer_base",
+      "distribution": "Normal",
+      "saved_out_mult": 2,
+      "restore": "reject",
+      "rejection_reason": "config_schema_incompatible"
+    },
+    "v1_patchmixer_studentt.pt": {
+      "sha256": "099e3cde598db384746d618e13089578f9c306da68dd32222857f9c20202bb0f",
+      "format": "v1",
+      "model_key": "patchmixer_base",
+      "distribution": "StudentT",
+      "saved_out_mult": 3,
+      "restore": "reject",
+      "rejection_reason": "config_schema_incompatible"
+    },
+    "v1_patchtst_normal.pt": {
+      "sha256": "3942ce6fb08c2a2f6af95204b4d9cca1fa42e6568e4309725ce39703d1c5d582",
+      "format": "v1",
+      "model_key": "patchtst_base",
+      "distribution": "Normal",
+      "saved_out_mult": 2,
+      "restore": "reject",
+      "rejection_reason": "config_schema_incompatible"
+    },
+    "v1_patchtst_studentt.pt": {
+      "sha256": "2612f929c260f969c5e0bea3d225ce91d08b8a98340d40c91ba7bc62df52818b",
+      "format": "v1",
+      "model_key": "patchtst_base",
+      "distribution": "StudentT",
+      "saved_out_mult": 3,
+      "restore": "reject",
+      "rejection_reason": "config_schema_incompatible"
+    },
+    "v1_titan_normal.pt": {
+      "sha256": "137d045fa3bef36dd8b5dd52ddeb8ff7113a2e696c7df7b1e46fd2a146621dfc",
+      "format": "v1",
+      "model_key": "titan_base",
+      "distribution": "Normal",
+      "saved_out_mult": 2,
+      "restore": "reject",
+      "rejection_reason": "ambiguous_distribution_metadata"
+    },
+    "v1_titan_studentt.pt": {
+      "sha256": "9368086e9da83e38d6ad485881ae043812158ed5aeab9fe0b1ac3b52cc8c0a36",
+      "format": "v1",
+      "model_key": "titan_base",
+      "distribution": "StudentT",
+      "saved_out_mult": 3,
+      "restore": "reject",
+      "rejection_reason": "ambiguous_distribution_metadata"
+    },
+    "v2_exotst_normal.pt": {
+      "sha256": "5051391b6548df4e99252a9c409c137580665b77b47ed323647562b81bbac379",
+      "format": "v2",
+      "model_key": "exotst_base",
+      "distribution": "Normal",
+      "saved_out_mult": 1,
+      "restore": "reject",
+      "rejection_reason": "invalid_distribution_head"
+    },
+    "v2_exotst_studentt.pt": {
+      "sha256": "dbd2b2de732727a179a954738455580029b39865470b06d087fb621c8fa05fa0",
+      "format": "v2",
+      "model_key": "exotst_base",
+      "distribution": "StudentT",
+      "saved_out_mult": 1,
+      "restore": "reject",
+      "rejection_reason": "invalid_distribution_head"
+    },
+    "v2_patchmixer_normal.pt": {
+      "sha256": "f03a6d6fcf09bce8585552f16c4f75ce3f98092b0d62ebb17fce4a86362d3e8f",
+      "format": "v2",
+      "model_key": "patchmixer_base",
+      "distribution": "Normal",
+      "saved_out_mult": 2,
+      "restore": "success"
+    },
+    "v2_patchmixer_studentt.pt": {
+      "sha256": "495d56e7c2bb6235c44151ee824d795239f1c2c1c4d0dc775eadbd454176df7e",
+      "format": "v2",
+      "model_key": "patchmixer_base",
+      "distribution": "StudentT",
+      "saved_out_mult": 3,
+      "restore": "success"
+    },
+    "v2_patchtst_normal.pt": {
+      "sha256": "1233ba2c3d985634adf2c88d82c252d77f3ffcda4dd4bd4914818b6ddcb0665c",
+      "format": "v2",
+      "model_key": "patchtst_base",
+      "distribution": "Normal",
+      "saved_out_mult": 2,
+      "restore": "success"
+    },
+    "v2_patchtst_studentt.pt": {
+      "sha256": "9cbdd7b18d0cbc83da26d56b660fd24c20ea2cb4c76301564485c13b70370fc9",
+      "format": "v2",
+      "model_key": "patchtst_base",
+      "distribution": "StudentT",
+      "saved_out_mult": 3,
+      "restore": "success"
+    },
+    "v2_titan_normal.pt": {
+      "sha256": "e1b8ce31b558c9564708b88b3a50074dafd487dfac1821f1479dcaa766666e6b",
+      "format": "v2",
+      "model_key": "titan_base",
+      "distribution": "Normal",
+      "saved_out_mult": 2,
+      "restore": "reject",
+      "rejection_reason": "ambiguous_distribution_metadata"
+    },
+    "v2_titan_studentt.pt": {
+      "sha256": "bcb2629b602be1cbbeb1f3643463723b5ba436d19e975f849094d144041313ac",
+      "format": "v2",
+      "model_key": "titan_base",
+      "distribution": "StudentT",
+      "saved_out_mult": 3,
+      "restore": "reject",
+      "rejection_reason": "ambiguous_distribution_metadata"
+    },
+    "v2_exotst_point.pt": {
+      "sha256": "82f3b7936b93f0e926c543008bcc810a7c6d4a03b6af63eabf3bccf58606b20c",
+      "format": "v2",
+      "model_key": "exotst_base",
+      "distribution": null,
+      "saved_out_mult": 1,
+      "restore": "point_control"
+    },
+    "v2_patchmixer_point.pt": {
+      "sha256": "11dd13d356a6e63bc473a830243943a2b0cbbbfa864cfc6d1fe56309338f6e39",
+      "format": "v2",
+      "model_key": "patchmixer_base",
+      "distribution": null,
+      "saved_out_mult": 1,
+      "restore": "point_control"
+    },
+    "v2_patchtst_point.pt": {
+      "sha256": "5ed88a0352057a8e7a6665acb0a957489d0836d368eba0ed4840f76a924d4f1a",
+      "format": "v2",
+      "model_key": "patchtst_base",
+      "distribution": null,
+      "saved_out_mult": 1,
+      "restore": "point_control"
+    },
+    "v2_titan_point.pt": {
+      "sha256": "2701c79238fa011cf44c20c147ddb416e8fffb523b2fa52e082698b203b74c24",
+      "format": "v2",
+      "model_key": "titan_base",
+      "distribution": null,
+      "saved_out_mult": 1,
+      "restore": "point_control"
+    }
+  }
+}

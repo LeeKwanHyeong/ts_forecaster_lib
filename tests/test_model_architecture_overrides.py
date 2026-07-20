@@ -85,7 +85,7 @@ def test_store_result_does_not_keep_gpu_model_reference():
     assert results["PatchTST"]["family_key"] == "patchtst"
 
 
-def test_run_total_train_relaxes_future_exo_requirement_for_timexer_only(monkeypatch):
+def test_run_total_train_routes_timexer_only_with_past_exogenous_inputs(monkeypatch):
     total_train = importlib.import_module("modeling_module.training.model_trainers.total_train")
     captured: dict[str, object] = {}
 
@@ -93,10 +93,10 @@ def test_run_total_train_relaxes_future_exo_requirement_for_timexer_only(monkeyp
         captured["runner_kwargs"] = dict(kwargs)
 
     def fake_resolve_exogenous(*args, **kwargs):
-        captured["allow_past_only"] = kwargs.get("allow_past_only")
+        captured["resolver_kwargs"] = dict(kwargs)
         return SimpleNamespace(
             use_exogenous_mode=True,
-            source="none",
+            source="past_only",
             exo_dim=0,
             future_exo_cb=None,
             past_cont_dim=4,
@@ -122,8 +122,15 @@ def test_run_total_train_relaxes_future_exo_requirement_for_timexer_only(monkeyp
         model_architecture=None,
     )
 
-    assert captured["allow_past_only"] is True
+    resolver_kwargs = captured["resolver_kwargs"]
+    assert resolver_kwargs["use_exogenous_mode"] is True
+    assert resolver_kwargs["use_past_exogenous"] is True
+    assert resolver_kwargs["use_future_exogenous"] is False
+
     runner_kwargs = captured["runner_kwargs"]
     assert runner_kwargs["requested_artifact_keys"] == ["timexer_base"]
+    assert runner_kwargs["use_exogenous_mode"] is True
     assert runner_kwargs["exo_dim"] == 0
     assert runner_kwargs["future_exo_cb"] is None
+    assert runner_kwargs["past_cont_dim"] == 4
+    assert runner_kwargs["past_cat_dim"] == 0

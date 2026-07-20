@@ -68,7 +68,7 @@ class ExoTSTConfig(TrainingConfig):
     # -------------------------
     # Head
     # -------------------------
-    head_type: Literal["point"] = "point"  # 확장: quantile, dist 등
+    head_type: Literal["point", "dist", "quantile"] = "point"
 
     # -------------------------
     # Safety / Debug

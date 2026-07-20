@@ -11,6 +11,53 @@ from modeling_module.models.Titan.common.decoder import TitanCrossAttnDecoder
 from modeling_module.models.common_layers.RevIN import RevIN
 
 
+def _validate_future_exo_contract(
+    future_exo: Optional[torch.Tensor],
+    *,
+    batch_size: int,
+    horizon: int,
+    expected_dim: int,
+) -> None:
+    expected_dim = int(expected_dim)
+    if future_exo is None:
+        if expected_dim > 0:
+            raise RuntimeError(
+                f"[Titan] future_exo is required when configured future width={expected_dim}; "
+                f"expected shape ({batch_size}, {horizon}, {expected_dim})."
+            )
+        return
+
+    if not torch.is_tensor(future_exo):
+        raise RuntimeError(
+            f"[Titan] future_exo must be a tensor with rank-3 [B,H,E], got {type(future_exo).__name__}."
+        )
+    if expected_dim <= 0:
+        if future_exo.numel() > 0:
+            raise RuntimeError(
+                "[Titan] future_exo is not accepted when configured future width=0; "
+                f"got non-empty shape {tuple(future_exo.shape)}."
+            )
+        return
+    if future_exo.dim() != 3:
+        raise RuntimeError(
+            f"[Titan] future_exo must be rank-3 [B,H,E], got shape {tuple(future_exo.shape)}."
+        )
+
+    actual_batch, actual_horizon, actual_dim = future_exo.shape
+    if actual_batch != batch_size:
+        raise RuntimeError(
+            f"[Titan] future_exo batch mismatch: got {actual_batch}, expected {batch_size}."
+        )
+    if actual_horizon != horizon:
+        raise RuntimeError(
+            f"[Titan] future_exo horizon mismatch: got {actual_horizon}, expected {horizon}."
+        )
+    if actual_dim != expected_dim:
+        raise RuntimeError(
+            f"[Titan] future_exo last dimension mismatch: got {actual_dim}, expected {expected_dim}."
+        )
+
+
 class _PastExoEmbed(nn.Module):
     """
     Past exogenous embedding:
@@ -92,17 +139,22 @@ class _TitanBase(nn.Module):
         *,
         has_memory: bool,
         has_decoder: bool,
-        out_mult: int = 1,
+        out_mult: Optional[int] = None,
         param_names: Optional[List[str]] = None,
     ):
         super().__init__()
         self.cfg = cfg
         self.lookback = int(cfg.lookback)
         self.horizon = int(cfg.horizon)
+        self.future_exo_dim = int(getattr(cfg, "future_exo_dim", getattr(cfg, "exo_dim", 0)))
 
         self.d_model = int(cfg.d_model)
+        if out_mult is None:
+            out_mult = int(getattr(cfg, "out_mul", 1))
+        if param_names is None:
+            param_names = getattr(cfg, "param_names", None)
         self.out_mult = int(out_mult)
-        self.param_names = param_names
+        self.param_names = list(param_names) if param_names is not None else None
 
         # RevIN (x: [B, L, 1] 이므로 num_features=1로 고정해도 무방)
         self.use_revin = bool(getattr(cfg, "use_revin", True))
@@ -146,12 +198,10 @@ class _TitanBase(nn.Module):
         # Optional decoder
         self.has_decoder = bool(has_decoder)
         if self.has_decoder:
-            # TitanConfig에는 future_exo_dim이 있으므로, 이를 우선 사용
-            exo_dim = int(getattr(cfg, "future_exo_dim", getattr(cfg, "exo_dim", 0)))
             self.decoder = TitanCrossAttnDecoder(
                 d_model=self.d_model,
                 horizon=self.horizon,
-                exo_dim=exo_dim,
+                exo_dim=self.future_exo_dim,
                 n_heads=int(getattr(cfg, "dec_n_heads", getattr(cfg, "n_heads", 8))),
                 dropout=float(cfg.dropout),
                 use_step_emb=True,
@@ -219,6 +269,13 @@ class _TitanBase(nn.Module):
         mode: Optional[str] = None,
         **_,
     ) -> torch.Tensor:
+        _validate_future_exo_contract(
+            future_exo,
+            batch_size=x.size(0),
+            horizon=self.horizon,
+            expected_dim=self.future_exo_dim,
+        )
+
         # 1) norm
         x_n = self._maybe_revin_norm(x)
 
@@ -282,7 +339,7 @@ class _TitanBase(nn.Module):
 
 
 class TitanBaseModel(_TitanBase):
-    def __init__(self, cfg: TitanConfig, out_mult: int = 1, param_names: Optional[List[str]] = None):
+    def __init__(self, cfg: TitanConfig, out_mult: Optional[int] = None, param_names: Optional[List[str]] = None):
         super().__init__(cfg, has_memory=False, has_decoder=True, out_mult=out_mult, param_names=param_names)
 
     @classmethod
@@ -291,7 +348,7 @@ class TitanBaseModel(_TitanBase):
 
 
 class TitanLMMModel(_TitanBase):
-    def __init__(self, cfg: TitanConfig, out_mult: int = 1, param_names: Optional[List[str]] = None):
+    def __init__(self, cfg: TitanConfig, out_mult: Optional[int] = None, param_names: Optional[List[str]] = None):
         super().__init__(cfg, has_memory=True, has_decoder=True, out_mult=out_mult, param_names=param_names)
 
     @classmethod
@@ -300,7 +357,7 @@ class TitanLMMModel(_TitanBase):
 
 
 class TitanSeq2SeqModel(_TitanBase):
-    def __init__(self, cfg: TitanConfig, out_mult: int = 1, param_names: Optional[List[str]] = None):
+    def __init__(self, cfg: TitanConfig, out_mult: Optional[int] = None, param_names: Optional[List[str]] = None):
         super().__init__(cfg, has_memory=True, has_decoder=True, out_mult=out_mult, param_names=param_names)
 
     @classmethod

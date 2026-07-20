@@ -7,6 +7,52 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+def _validate_future_exo_contract(
+    future_exo: torch.Tensor | None,
+    *,
+    batch_size: int,
+    horizon: int,
+    expected_dim: int,
+) -> None:
+    expected_dim = int(expected_dim)
+    if future_exo is None:
+        if expected_dim > 0:
+            raise RuntimeError(
+                f"[Titan] future_exo is required when configured future width={expected_dim}; "
+                f"expected shape ({batch_size}, {horizon}, {expected_dim})."
+            )
+        return
+    if not torch.is_tensor(future_exo):
+        raise RuntimeError(
+            f"[Titan] future_exo must be a tensor with rank-3 [B,H,E], got {type(future_exo).__name__}."
+        )
+    if expected_dim <= 0:
+        if future_exo.numel() > 0:
+            raise RuntimeError(
+                "[Titan] future_exo is not accepted when configured future width=0; "
+                f"got non-empty shape {tuple(future_exo.shape)}."
+            )
+        return
+    if future_exo.dim() != 3:
+        raise RuntimeError(
+            f"[Titan] future_exo must be rank-3 [B,H,E], got shape {tuple(future_exo.shape)}."
+        )
+
+    actual_batch, actual_horizon, actual_dim = future_exo.shape
+    if actual_batch != batch_size:
+        raise RuntimeError(
+            f"[Titan] future_exo batch mismatch: got {actual_batch}, expected {batch_size}."
+        )
+    if actual_horizon != horizon:
+        raise RuntimeError(
+            f"[Titan] future_exo horizon mismatch: got {actual_horizon}, expected {horizon}."
+        )
+    if actual_dim != expected_dim:
+        raise RuntimeError(
+            f"[Titan] future_exo last dimension mismatch: got {actual_dim}, expected {expected_dim}."
+        )
+
+
 class TitanCrossAttnDecoder(nn.Module):
     """
     Cross-Attention horizon decoder.
@@ -72,6 +118,12 @@ class TitanCrossAttnDecoder(nn.Module):
         B, L, D = h_enc.shape
         H = self.horizon
         assert D == self.d_model, f"h_enc last dim mismatch: {D} vs {self.d_model}"
+        _validate_future_exo_contract(
+            future_exo,
+            batch_size=B,
+            horizon=H,
+            expected_dim=self.exo_dim,
+        )
 
         # --- Build per-step query tokens ---
         if self.step_emb is not None:
@@ -81,12 +133,7 @@ class TitanCrossAttnDecoder(nn.Module):
             q = torch.zeros(B, H, D, device=h_enc.device, dtype=h_enc.dtype)
 
         if self.exo_proj is not None:
-            if future_exo is None:
-                exo = torch.zeros(B, H, self.exo_dim, device=h_enc.device, dtype=h_enc.dtype)
-            else:
-                assert future_exo.dim() == 3 and future_exo.size(1) == H, \
-                    f"future_exo must be [B,H,E], got {tuple(future_exo.shape)}"
-                exo = future_exo.to(device=h_enc.device, dtype=h_enc.dtype)
+            exo = future_exo.to(device=h_enc.device, dtype=h_enc.dtype)
             q = q + self.exo_proj(exo) * self.exo_gain  # [B,H,D]
 
         # --- Cross attention ---
@@ -157,6 +204,12 @@ class TitanDecoder(nn.Module):
         """
         B, L, D = h_enc.shape
         H = self.horizon
+        _validate_future_exo_contract(
+            future_exo,
+            batch_size=B,
+            horizon=H,
+            expected_dim=self.exo_dim,
+        )
 
         # 1) context pooling
         if self.ctx_pool == "mean":
@@ -176,14 +229,7 @@ class TitanDecoder(nn.Module):
 
         # 3) per-step future exo injection
         if self.exo_proj is not None:
-            if future_exo is None:
-                # future_exo가 없으면 0으로 처리 (그래도 step_emb 때문에 H는 달라짐)
-                exo = torch.zeros(B, H, self.exo_dim, device=h_enc.device, dtype=h_enc.dtype)
-            else:
-                # shape 체크
-                assert future_exo.dim() == 3 and future_exo.size(1) == H, \
-                    f"future_exo must be [B,H,E], got {tuple(future_exo.shape)}"
-                exo = future_exo.to(device=h_enc.device, dtype=h_enc.dtype)
+            exo = future_exo.to(device=h_enc.device, dtype=h_enc.dtype)
 
             y = y + self.exo_proj(exo)  # [B,H,D]
 

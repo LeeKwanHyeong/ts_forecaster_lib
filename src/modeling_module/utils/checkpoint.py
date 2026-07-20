@@ -1,6 +1,7 @@
 import os
 import json
 import glob
+import warnings
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Callable, Optional, Any, Mapping
@@ -70,8 +71,14 @@ _REBUILDERS_BY_CLS = {
 # helpers: primitive sanitize
 # -----------------------------
 _PRIMITIVE_TYPES = (str, int, float, bool, type(None))
-CHECKPOINT_FORMAT_VERSION = "modeling_module.ckpt.v2"
+CHECKPOINT_FORMAT_VERSION = "modeling_module.ckpt.v3"
 TRAINING_MANIFEST_VERSION = "modeling_module.training.v1"
+_DISTRIBUTION_LOSS_SPEC_TYPE = "modeling_module.DistributionLoss"
+_DISTRIBUTION_LOSS_SPEC_VERSION = 1
+_DISTRIBUTION_CONTRACTS = {
+    "Normal": (2, ["-loc", "-scale"]),
+    "StudentT": (3, ["-df", "-loc", "-scale"]),
+}
 
 def _is_primitive(x: Any) -> bool:
     return isinstance(x, _PRIMITIVE_TYPES)
@@ -126,6 +133,144 @@ def _sanitize(obj: Any, *, max_depth: int = 8, _depth: int = 0) -> Any:
     return str(obj)
 
 
+def _canonical_distribution_name(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    normalized = "".join(ch for ch in str(value).casefold() if ch.isalnum())
+    aliases = {
+        "normal": "Normal",
+        "studentt": "StudentT",
+    }
+    return aliases.get(normalized)
+
+
+def _distribution_loss_to_spec(value: Any) -> Optional[dict[str, Any]]:
+    """Serialize the supported distribution criteria without pickling an nn.Module."""
+    try:
+        from modeling_module.training.model_losses.loss_module import DistributionLoss
+    except Exception:
+        return None
+
+    if not isinstance(value, DistributionLoss):
+        return None
+
+    distribution = _canonical_distribution_name(getattr(value, "distribution", None))
+    if distribution not in _DISTRIBUTION_CONTRACTS:
+        return None
+
+    distribution_kwargs = dict(getattr(value, "distribution_kwargs", {}) or {})
+    if set(distribution_kwargs) - {"validate_args"}:
+        return None
+
+    out_mult, param_names = _DISTRIBUTION_CONTRACTS[distribution]
+    quantiles = getattr(value, "quantiles", None)
+    horizon_weight = getattr(value, "horizon_weight", None)
+    return {
+        "__type__": _DISTRIBUTION_LOSS_SPEC_TYPE,
+        "version": _DISTRIBUTION_LOSS_SPEC_VERSION,
+        "distribution": distribution,
+        "quantiles": _sanitize(quantiles),
+        "output_names": _sanitize(list(getattr(value, "output_names", []))),
+        "num_samples": int(getattr(value, "num_samples", 1000)),
+        "return_params": bool(getattr(value, "return_params", False)),
+        "horizon_weight": _sanitize(horizon_weight),
+        "distribution_kwargs": _sanitize(distribution_kwargs),
+        "contract": {
+            "out_mult": out_mult,
+            "param_names": list(param_names),
+        },
+    }
+
+
+def _distribution_loss_from_spec(spec: Mapping[str, Any]):
+    if spec.get("__type__") != _DISTRIBUTION_LOSS_SPEC_TYPE:
+        return None
+    if int(spec.get("version", -1)) != _DISTRIBUTION_LOSS_SPEC_VERSION:
+        raise ValueError(f"Unsupported DistributionLoss spec version: {spec.get('version')!r}")
+
+    distribution = _canonical_distribution_name(spec.get("distribution"))
+    if distribution not in _DISTRIBUTION_CONTRACTS:
+        raise ValueError(f"Unsupported checkpoint distribution: {spec.get('distribution')!r}")
+
+    expected_out_mult, expected_param_names = _DISTRIBUTION_CONTRACTS[distribution]
+    contract = dict(spec.get("contract", {}) or {})
+    if contract:
+        stored_out_mult = int(contract.get("out_mult", expected_out_mult))
+        stored_param_names = list(contract.get("param_names", expected_param_names))
+        if stored_out_mult != expected_out_mult or stored_param_names != expected_param_names:
+            raise ValueError(
+                "DistributionLoss checkpoint contract does not match its distribution: "
+                f"distribution={distribution!r}, out_mult={stored_out_mult}, "
+                f"param_names={stored_param_names!r}"
+            )
+
+    quantiles = spec.get("quantiles")
+    if not isinstance(quantiles, (list, tuple)) or not quantiles:
+        raise ValueError("DistributionLoss checkpoint spec must contain non-empty quantiles.")
+    try:
+        quantile_tensor = torch.as_tensor(quantiles, dtype=torch.float32)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("DistributionLoss checkpoint quantiles must be numeric.") from exc
+    if quantile_tensor.ndim != 1 or not torch.isfinite(quantile_tensor).all():
+        raise ValueError("DistributionLoss checkpoint quantiles must be a finite 1D sequence.")
+    if not ((quantile_tensor >= 0.0) & (quantile_tensor <= 1.0)).all():
+        raise ValueError("DistributionLoss checkpoint quantiles must be in [0, 1].")
+
+    num_samples = int(spec.get("num_samples", 1000))
+    if num_samples <= 0:
+        raise ValueError("DistributionLoss checkpoint num_samples must be positive.")
+
+    return_params = bool(spec.get("return_params", False))
+    if "output_names" in spec:
+        output_names = spec["output_names"]
+        expected_name_count = 1 + len(quantiles) + (len(expected_param_names) if return_params else 0)
+        if not isinstance(output_names, (list, tuple)) or len(output_names) != expected_name_count:
+            raise ValueError(
+                "DistributionLoss checkpoint output_names length does not match its quantile contract."
+            )
+
+    distribution_kwargs = dict(spec.get("distribution_kwargs", {}) or {})
+    unknown_kwargs = set(distribution_kwargs) - {"validate_args"}
+    if unknown_kwargs:
+        raise ValueError(f"Unsupported DistributionLoss kwargs in checkpoint: {sorted(unknown_kwargs)!r}")
+    validate_args = distribution_kwargs.get("validate_args")
+    if validate_args is not None and not isinstance(validate_args, bool):
+        raise ValueError("DistributionLoss validate_args must be bool or null.")
+
+    horizon_weight = spec.get("horizon_weight")
+    if horizon_weight is not None:
+        try:
+            horizon_weight = torch.as_tensor(horizon_weight, dtype=torch.float32)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("DistributionLoss horizon_weight must be numeric.") from exc
+        if horizon_weight.ndim != 1 or horizon_weight.numel() == 0 or not torch.isfinite(horizon_weight).all():
+            raise ValueError("DistributionLoss horizon_weight must be a non-empty finite 1D sequence.")
+
+    from modeling_module.training.model_losses.loss_module import DistributionLoss
+
+    loss = DistributionLoss(
+        distribution=distribution,
+        quantiles=list(quantiles),
+        num_samples=num_samples,
+        return_params=return_params,
+        horizon_weight=horizon_weight,
+        **distribution_kwargs,
+    )
+
+    # Explicit quantile construction sorts values. Restore the original order and names
+    # because level-based DistributionLoss instances may use a different order.
+    loss.quantiles = torch.nn.Parameter(
+        quantile_tensor.to(dtype=loss.quantiles.dtype),
+        requires_grad=False,
+    )
+    if "output_names" in spec:
+        loss.output_names = list(spec["output_names"])
+
+    if loss.outputsize_multiplier != expected_out_mult or list(loss.param_names) != expected_param_names:
+        raise ValueError(f"Rebuilt DistributionLoss contract mismatch for {distribution!r}.")
+    return loss
+
+
 def _drop_or_stringify_loss(cfg_state: Dict[str, Any]) -> Dict[str, Any]:
     """
     cfg_state에 loss/criterion 같은 필드가 있으면 pickle 이슈 방지를 위해 문자열화.
@@ -134,9 +279,17 @@ def _drop_or_stringify_loss(cfg_state: Dict[str, Any]) -> Dict[str, Any]:
     for k in ("loss", "loss_fn", "criterion", "loss_point", "loss_quantile"):
         if k in cfg_state and cfg_state[k] is not None:
             v = cfg_state[k]
+            loss_spec = _distribution_loss_to_spec(v)
+            if loss_spec is not None:
+                cfg_state[k] = loss_spec
+            elif isinstance(v, str):
+                cfg_state[k] = v
             # dict 형태로 들어온 경우도 있으니 방어
-            if isinstance(v, dict):
-                cfg_state[k] = v.get("__type__", "loss")
+            elif isinstance(v, dict):
+                if v.get("__type__") == _DISTRIBUTION_LOSS_SPEC_TYPE:
+                    cfg_state[k] = v
+                else:
+                    cfg_state[k] = v.get("__type__", "loss")
             else:
                 cfg_state[k] = getattr(v, "__class__", type(v)).__name__
     return cfg_state
@@ -161,6 +314,69 @@ def _cfg_to_primitive_state(cfg: Any) -> tuple[dict[str, Any], Optional[str]]:
     return _sanitize(raw), cfg_cls
 
 
+def _read_config_value(cfg: Any, key: str, default: Any = None) -> Any:
+    if isinstance(cfg, Mapping):
+        return cfg.get(key, default)
+    return getattr(cfg, key, default)
+
+
+def _write_config_value(cfg: Any, key: str, value: Any) -> None:
+    if isinstance(cfg, Mapping):
+        cfg[key] = value
+    else:
+        setattr(cfg, key, value)
+
+
+def _config_has_key(cfg: Any, key: str) -> bool:
+    if isinstance(cfg, Mapping):
+        return key in cfg
+    return hasattr(cfg, key)
+
+
+def _build_output_spec(model: torch.nn.Module, cfg: Any) -> dict[str, Any]:
+    loss = getattr(model, "loss", None)
+    if loss is None:
+        loss = _read_config_value(cfg, "loss")
+
+    out_mult = getattr(model, "out_mult", None)
+    if out_mult is None:
+        out_mult = getattr(model, "out_mul", None)
+    if out_mult is None:
+        out_mult = _read_config_value(cfg, "out_mul", 1)
+    out_mult = int(out_mult or 1)
+
+    param_names = getattr(model, "param_names", None)
+    if param_names is None:
+        param_names = _read_config_value(cfg, "param_names")
+    param_names = list(param_names) if param_names is not None else None
+
+    is_quantile = bool(getattr(model, "is_quantile", False))
+    distribution = _canonical_distribution_name(getattr(loss, "distribution", None))
+    if distribution is None and param_names is not None:
+        for candidate, (candidate_out_mult, candidate_params) in _DISTRIBUTION_CONTRACTS.items():
+            if out_mult == candidate_out_mult and param_names == candidate_params:
+                distribution = candidate
+                break
+
+    if is_quantile:
+        mode = "quantile"
+    elif distribution is not None:
+        mode = "distribution"
+    else:
+        mode = "point"
+
+    spec = {
+        "mode": mode,
+        "distribution": distribution,
+        "out_mult": out_mult,
+        "param_names": param_names,
+    }
+    loss_spec = _distribution_loss_to_spec(loss)
+    if loss_spec is not None:
+        spec["loss"] = loss_spec
+    return _sanitize(spec)
+
+
 def build_checkpoint_payload(
     model,
     cfg,
@@ -183,6 +399,7 @@ def build_checkpoint_payload(
         "cfg_state": cfg_state,
         "cfg_cls": cfg_cls,
         "model_class": model.__class__.__name__,
+        "output_spec": _build_output_spec(model, cfg),
         "state_dict": model.state_dict(),
         "meta": meta,
     }
@@ -406,6 +623,222 @@ def _find_ckpt_path(save_dir: str, name_key: str) -> Optional[str]:
     return cand[0]
 
 
+def _checkpoint_identity(ckpt: Mapping[str, Any]) -> str:
+    meta = ckpt.get("meta", {})
+    if isinstance(meta, Mapping) and meta.get("model_key"):
+        return str(meta["model_key"]).casefold()
+    return str(ckpt.get("model_class", "")).casefold()
+
+
+def _checkpoint_state_dict_or_empty(ckpt: Mapping[str, Any]) -> Mapping[str, Any]:
+    state = ckpt.get("model_state")
+    if not isinstance(state, Mapping):
+        state = ckpt.get("state_dict")
+    return state if isinstance(state, Mapping) else {}
+
+
+def _infer_legacy_out_mult(
+    ckpt: Mapping[str, Any],
+    cfg_state: Mapping[str, Any],
+) -> Optional[int]:
+    identity = _checkpoint_identity(ckpt)
+    if "quantile" in identity:
+        return None
+
+    state = _checkpoint_state_dict_or_empty(ckpt)
+    horizon = int(cfg_state.get("horizon", 0) or 0)
+
+    if "patchtst" in identity and "head.net.2.weight" in state and horizon > 0:
+        return int(state["head.net.2.weight"].shape[0]) // horizon
+    if "patchmixer" in identity and "head.2.weight" in state:
+        return int(state["head.2.weight"].shape[0])
+    if "titan" in identity and "head.weight" in state:
+        return int(state["head.weight"].shape[0])
+    if "exotst" in identity and "head.fc.weight" in state and horizon > 0:
+        return int(state["head.fc.weight"].shape[0]) // horizon
+
+    configured = cfg_state.get("out_mul")
+    return int(configured) if configured is not None else None
+
+
+def _normalize_output_spec(raw_spec: Mapping[str, Any]) -> dict[str, Any]:
+    mode = str(raw_spec.get("mode", "point")).casefold()
+    if mode == "dist":
+        mode = "distribution"
+    if mode not in {"point", "quantile", "distribution"}:
+        raise ValueError(f"Unknown checkpoint output mode: {raw_spec.get('mode')!r}")
+
+    out_mult = int(raw_spec.get("out_mult", 1) or 1)
+    if out_mult <= 0:
+        raise ValueError(f"Checkpoint out_mult must be positive, got {out_mult}.")
+    param_names = raw_spec.get("param_names")
+    param_names = list(param_names) if param_names is not None else None
+    distribution = _canonical_distribution_name(raw_spec.get("distribution"))
+
+    if mode == "distribution":
+        if distribution is None:
+            for candidate, (candidate_out_mult, candidate_params) in _DISTRIBUTION_CONTRACTS.items():
+                if out_mult == candidate_out_mult and (
+                    param_names is None or param_names == candidate_params
+                ):
+                    distribution = candidate
+                    break
+        if distribution not in _DISTRIBUTION_CONTRACTS:
+            raise ValueError(f"Unknown distribution output contract: {dict(raw_spec)!r}")
+
+        expected_out_mult, expected_param_names = _DISTRIBUTION_CONTRACTS[distribution]
+        if param_names is None:
+            param_names = list(expected_param_names)
+        if out_mult != expected_out_mult or param_names != expected_param_names:
+            raise ValueError(
+                "Checkpoint output contract is inconsistent: "
+                f"distribution={distribution!r}, out_mult={out_mult}, param_names={param_names!r}"
+            )
+
+    normalized = {
+        "mode": mode,
+        "distribution": distribution,
+        "out_mult": out_mult,
+        "param_names": param_names,
+    }
+    if isinstance(raw_spec.get("loss"), Mapping):
+        normalized["loss"] = dict(raw_spec["loss"])
+    return normalized
+
+
+def _legacy_output_spec(
+    ckpt: Mapping[str, Any],
+    cfg_state: Mapping[str, Any],
+) -> Optional[dict[str, Any]]:
+    identity = _checkpoint_identity(ckpt)
+    if "quantile" in identity or not any(
+        family in identity for family in ("patchtst", "patchmixer", "titan", "exotst")
+    ):
+        return None
+
+    configured_loss = cfg_state.get("loss")
+    configured_dist_name = _canonical_distribution_name(cfg_state.get("dist_name"))
+    configured_params = cfg_state.get("param_names")
+    configured_params = list(configured_params) if configured_params is not None else None
+    configured_loss_name = str(configured_loss).casefold()
+    out_mult = _infer_legacy_out_mult(ckpt, cfg_state)
+
+    if isinstance(configured_loss, Mapping):
+        inferred_loss = _distribution_loss_from_spec(configured_loss)
+        configured_distribution = _canonical_distribution_name(getattr(inferred_loss, "distribution", None))
+    else:
+        configured_distribution = configured_dist_name if configured_loss_name == "distributionloss" else None
+
+    if configured_distribution is None and configured_params is not None:
+        for candidate, (candidate_out_mult, candidate_param_names) in _DISTRIBUTION_CONTRACTS.items():
+            if configured_params == candidate_param_names:
+                configured_distribution = candidate
+                break
+
+    if configured_distribution is None and configured_loss_name != "distributionloss":
+        if out_mult in (2, 3):
+            raise ValueError(
+                "Legacy checkpoint has a distribution-shaped head but no persisted "
+                "distribution metadata; refusing an ambiguous restore."
+            )
+        return None
+
+    if out_mult not in (2, 3):
+        raise ValueError(
+            "Legacy checkpoint declares DistributionLoss but its saved head does not "
+            f"encode a supported distribution contract: inferred_out_mult={out_mult!r}."
+        )
+
+    distribution = configured_distribution or ("Normal" if out_mult == 2 else "StudentT")
+    expected_out_mult, expected_param_names = _DISTRIBUTION_CONTRACTS[distribution]
+    if out_mult != expected_out_mult:
+        raise ValueError(
+            "Legacy checkpoint distribution metadata conflicts with its saved head shape: "
+            f"distribution={distribution!r}, inferred_out_mult={out_mult}"
+        )
+    if configured_params is not None and configured_params != expected_param_names:
+        raise ValueError(
+            "Legacy checkpoint has conflicting distribution metadata: "
+            f"out_mult={out_mult}, param_names={configured_params!r}"
+        )
+
+    state = _checkpoint_state_dict_or_empty(ckpt)
+    saved_quantiles = state.get("loss.quantiles")
+    if torch.is_tensor(saved_quantiles):
+        quantiles = saved_quantiles.detach().cpu().tolist()
+    else:
+        configured_quantiles = cfg_state.get("quantiles", (0.1, 0.5, 0.9))
+        quantiles = list(configured_quantiles)
+
+    warnings.warn(
+        "Restoring a legacy distribution checkpoint by its saved head shape. "
+        "Re-save the artifact to persist the exact v3 output contract.",
+        RuntimeWarning,
+        stacklevel=3,
+    )
+    return {
+        "mode": "distribution",
+        "distribution": distribution,
+        "out_mult": expected_out_mult,
+        "param_names": list(expected_param_names),
+        "loss": {
+            "__type__": _DISTRIBUTION_LOSS_SPEC_TYPE,
+            "version": _DISTRIBUTION_LOSS_SPEC_VERSION,
+            "distribution": distribution,
+            "quantiles": quantiles,
+            "num_samples": 1000,
+            "return_params": False,
+            "horizon_weight": None,
+            "distribution_kwargs": {},
+            "contract": {
+                "out_mult": expected_out_mult,
+                "param_names": list(expected_param_names),
+            },
+        },
+    }
+
+
+def _prepare_config_for_restore(ckpt: Mapping[str, Any], cfg: Any) -> Any:
+    cfg_state = dict(cfg) if isinstance(cfg, Mapping) else cfg
+    cfg_view = cfg_state if isinstance(cfg_state, Mapping) else dict(vars(cfg_state))
+    raw_output_spec = ckpt.get("output_spec")
+    if isinstance(raw_output_spec, Mapping):
+        output_spec = _normalize_output_spec(raw_output_spec)
+    else:
+        output_spec = _legacy_output_spec(ckpt, cfg_view)
+
+    restored_loss = None
+    configured_loss = _read_config_value(cfg_state, "loss")
+    if isinstance(configured_loss, Mapping):
+        restored_loss = _distribution_loss_from_spec(configured_loss)
+
+    if output_spec is None:
+        if restored_loss is not None:
+            _write_config_value(cfg_state, "loss", restored_loss)
+        return cfg_state
+
+    output_loss_spec = output_spec.get("loss")
+    if isinstance(output_loss_spec, Mapping):
+        restored_loss = _distribution_loss_from_spec(output_loss_spec)
+
+    if output_spec["mode"] == "distribution":
+        if restored_loss is None:
+            raise ValueError("Distribution checkpoint is missing a restorable loss specification.")
+
+        distribution = output_spec["distribution"]
+        _write_config_value(cfg_state, "loss", restored_loss)
+        _write_config_value(cfg_state, "loss_mode", "dist")
+        _write_config_value(cfg_state, "out_mul", output_spec["out_mult"])
+        _write_config_value(cfg_state, "param_names", list(output_spec["param_names"]))
+        _write_config_value(cfg_state, "dist_name", "studentt" if distribution == "StudentT" else "normal")
+        if "exotst" in _checkpoint_identity(ckpt) or _config_has_key(cfg_state, "head_type"):
+            _write_config_value(cfg_state, "head_type", "dist")
+    elif restored_loss is not None:
+        _write_config_value(cfg_state, "loss", restored_loss)
+
+    return cfg_state
+
+
 def _extract_cfg_obj(ckpt: dict) -> Any:
     """
     ckpt에서 config 객체/딕트를 추출한다.
@@ -415,23 +848,24 @@ def _extract_cfg_obj(ckpt: dict) -> Any:
       3) 구버전: "config"
       4) cfg_state/cfg_cls로 rebuild
     """
-    # 회사식 신규 포맷 / v2 포맷
+    # 회사식 신규 포맷 / v2+ 포맷
     if "config" in ckpt:
-        return ckpt["config"]
+        return _prepare_config_for_restore(ckpt, ckpt["config"])
 
     # save_model 포맷
     if "cfg" in ckpt:
-        return ckpt["cfg"]
+        return _prepare_config_for_restore(ckpt, ckpt["cfg"])
 
     # 마지막: cfg_state + cfg_cls로 rebuild
     cfg_state = ckpt.get("cfg_state", None)
     cfg_cls = ckpt.get("cfg_cls", None)
     if cfg_state is not None and cfg_cls is not None:
+        prepared_cfg_state = _prepare_config_for_restore(ckpt, cfg_state)
         rb = _REBUILDERS_BY_CLS.get(cfg_cls, None)
         if rb is not None:
-            return rb(cfg_state)
+            return rb(prepared_cfg_state)
         # re-builder가 없으면 dict로라도 반환
-        return cfg_state
+        return prepared_cfg_state
 
     return None
 

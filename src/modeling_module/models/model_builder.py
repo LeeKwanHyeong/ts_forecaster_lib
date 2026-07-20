@@ -76,17 +76,17 @@ def _ensure_titan_config(cfg: Union[TitanConfig, dict, Any]) -> TitanConfig:
     return TitanConfig(**d)
 
 
-def build_titan_base(cfg: TitanConfig, *, out_mult: int = 1, param_names=None):
+def build_titan_base(cfg: TitanConfig, *, out_mult: Optional[int] = None, param_names=None):
     cfg = _ensure_titan_config(cfg)
     return TitanBaseModel(cfg, out_mult=out_mult, param_names=param_names)
 
 
-def build_titan_lmm(cfg: TitanConfig, *, out_mult: int = 1, param_names=None):
+def build_titan_lmm(cfg: TitanConfig, *, out_mult: Optional[int] = None, param_names=None):
     cfg = _ensure_titan_config(cfg)
     return TitanLMMModel(cfg, out_mult=out_mult, param_names=param_names)
 
 
-def build_titan_seq2seq(cfg: TitanConfig, *, out_mult: int = 1, param_names=None):
+def build_titan_seq2seq(cfg: TitanConfig, *, out_mult: Optional[int] = None, param_names=None):
     cfg = _ensure_titan_config(cfg)
     return TitanSeq2SeqModel(cfg, out_mult=out_mult, param_names=param_names)
 

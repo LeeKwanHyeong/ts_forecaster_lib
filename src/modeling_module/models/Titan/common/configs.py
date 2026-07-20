@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, List, Optional
 
 
 @dataclass
@@ -58,5 +58,10 @@ class TitanConfig:
     # -------------------------
     # Output / head
     # -------------------------
+    loss: Any = None
+    loss_mode: str = "point"
+    out_mul: int = 1
+    param_names: Optional[List[str]] = None
+    dist_name: Optional[str] = None
     clamp_min: Optional[float] = 0.0
     clamp_max: Optional[float] = None

@@ -558,7 +558,7 @@ def _run_exotst(
               f"If ExoTSTConfig does not support cats, please encode cats into cont.")
 
     loss_obj = getattr(point_train_cfg, "loss", None)
-    mode = infer_supervised_mode(loss_obj)
+    mode, out_mul, param_names, dist_name = _infer_mode_and_dist(loss_obj)
     if mode == "quantile":
         raise NotImplementedError("[total_train] ExoTST quantile trainer is not implemented yet.")
     head_type = "dist" if mode == "dist" else "point"
@@ -576,6 +576,10 @@ def _run_exotst(
             exo_dim_future=max(int(exo_dim), 0),
             exo_nan_policy="zero+indicator",
             head_type=head_type,
+            loss_mode=mode,
+            out_mul=int(out_mul),
+            param_names=param_names,
+            dist_name=dist_name,
             strict_shape=True,
             subtract_last=True,
         )
@@ -738,6 +742,11 @@ def _run_patchtst(
     - SSL pretrain은 y-only로 강제(d_future=0, d_past_cont=0, d_past_cat=0)하여 shape mismatch 방지.
     """
     use_ssl_mode = _validate_ssl_mode(use_ssl_mode)
+    if use_ssl_mode in ("ssl_only", "full") and save_root is None:
+        raise ValueError(
+            f"PatchTST SSL mode {use_ssl_mode!r} requires an artifact `save_dir`. "
+            "Provide `save_dir` before starting PatchTST SSL training."
+        )
     requested = _requested_target_set(requested_artifact_keys)
     run_base = _wants_artifact(requested, "patchtst_base")
     run_quantile = _wants_artifact(requested, "patchtst_quantile")
@@ -984,7 +993,7 @@ def _run_titan(
     """
 
     loss_point_obj = loss_point if loss_point is not None else point_train_cfg.loss
-    mode, out_mul, param_names, _dist_name = _infer_mode_and_dist(loss_point_obj)
+    mode, out_mul, param_names, dist_name = _infer_mode_and_dist(loss_point_obj)
     name_suffix = " Dist" if mode == "dist" else ""
     requested = _requested_target_set(requested_artifact_keys)
     run_base = _wants_artifact(requested, "titan_base")
@@ -1036,6 +1045,11 @@ def _run_titan(
 
         use_revin=True,
         final_clamp_nonneg=False,
+        loss=loss_point_obj,
+        loss_mode=mode,
+        out_mul=int(out_mul),
+        param_names=param_names,
+        dist_name=dist_name,
     )
     if architecture_override:
         ti_kwargs.update({key: value for key, value in dict(architecture_override).items() if value is not None})
@@ -1469,7 +1483,23 @@ def run_total_train(
       4) run selected model runners with common kwargs
     """
     freq_spec = get_freq_spec(freq)
-    save_root = Path(save_dir) if save_dir is not None else None
+    save_root = Path(save_dir) if save_dir is not None and str(save_dir).strip() else None
+
+    selected_artifact_keys = _resolve_requested_artifact_keys(models_to_run)
+    selected_families = ordered_training_families_for_targets(selected_artifact_keys)
+    use_ssl_mode = _validate_ssl_mode(use_ssl_mode)
+    if use_ssl_mode in ("ssl_only", "full"):
+        if "patchtst" not in selected_families:
+            requested = ", ".join(selected_artifact_keys)
+            raise ValueError(
+                f"PatchTST SSL mode {use_ssl_mode!r} requires at least one PatchTST artifact. "
+                f"Requested models: {requested}."
+            )
+        if save_root is None:
+            raise ValueError(
+                f"PatchTST SSL mode {use_ssl_mode!r} requires an artifact `save_dir`. "
+                "Provide `save_dir` before starting PatchTST SSL training."
+            )
 
     # backward-compat: loss -> point loss
     if loss_point is None and loss is not None:
@@ -1492,8 +1522,6 @@ def run_total_train(
     )
 
     # Decide family routing early so pure TimeXer runs can force past-only semantics.
-    selected_artifact_keys = _resolve_requested_artifact_keys(models_to_run)
-    selected_families = ordered_training_families_for_targets(selected_artifact_keys)
     timexer_only = bool(selected_families) and set(selected_families) == {"timexer"}
     effective_use_future_exogenous = bool(use_future_exogenous)
     if timexer_only and effective_use_future_exogenous:

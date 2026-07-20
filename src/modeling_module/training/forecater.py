@@ -1,8 +1,10 @@
 # forecaster.py
 from __future__ import annotations
 
-import os
 import inspect
+import os
+from collections.abc import Mapping
+from dataclasses import fields, is_dataclass
 from typing import Any, Dict, List, Sequence, Optional, Callable, Tuple, Union
 
 import numpy as np
@@ -36,36 +38,54 @@ def _to_device_any(obj: Any, device: torch.device) -> Any:
 
 def _infer_d_future_expected(model: torch.nn.Module) -> Optional[int]:
     """
-    모델이 기대하는 미래 외생 변수(Future Exo)의 차원(Dimension) 추론 (best-effort).
-    """
-    for attr in ("d_future", "exo_dim"):
-        if hasattr(model, attr):
-            try:
-                v = int(getattr(model, attr))
-                if v >= 0:
-                    return v
-            except Exception:
-                pass
+    모델이 기대하는 미래 외생 변수(Future Exo)의 차원을 추론한다.
 
-    cfg = getattr(model, "cfg", None)
-    if cfg is not None:
-        for attr in ("d_future", "exo_dim"):
-            if hasattr(cfg, attr):
-                try:
-                    v = int(getattr(cfg, attr))
-                    if v >= 0:
-                        return v
-                except Exception:
-                    pass
+    ``TrainingConfig.future_exo_dim`` is an unannotated legacy class attribute.
+    Reading it through ``hasattr`` would therefore make unrelated subclasses such
+    as TimeXer look future-exogenous aware.  Config values are accepted only when
+    they are explicitly stored or declared as dataclass fields.
+    """
+
+    def _nonnegative_int(value: Any) -> Optional[int]:
+        try:
+            resolved = int(value)
+        except (TypeError, ValueError):
+            return None
+        return resolved if resolved >= 0 else None
+
+    def _explicit_value(source: Any, attr: str) -> Any:
+        if source is None:
+            return None
+        if isinstance(source, Mapping):
+            return source.get(attr) if attr in source else None
+        source_vars = getattr(source, "__dict__", {})
+        if attr in source_vars:
+            return source_vars[attr]
+        if is_dataclass(source) and attr in {field.name for field in fields(source)}:
+            return getattr(source, attr)
+        return None
+
+    for attr in ("d_future", "future_exo_dim", "exo_dim_future", "exo_dim"):
+        value = _nonnegative_int(_explicit_value(model, attr))
+        if value is not None:
+            return value
+
+    for config_attr in ("cfg", "configs", "config"):
+        config = getattr(model, config_attr, None)
+        for attr in ("d_future", "future_exo_dim", "exo_dim_future", "exo_dim"):
+            value = _nonnegative_int(_explicit_value(config, attr))
+            if value is not None:
+                return value
+
+    decoder = getattr(model, "decoder", None)
+    value = _nonnegative_int(_explicit_value(decoder, "exo_dim"))
+    if value is not None:
+        return value
 
     head = getattr(model, "head", None)
-    if head is not None and hasattr(head, "d_future"):
-        try:
-            v = int(getattr(head, "d_future"))
-            if v >= 0:
-                return v
-        except Exception:
-            pass
+    value = _nonnegative_int(_explicit_value(head, "d_future"))
+    if value is not None:
+        return value
 
     return None
 
@@ -79,14 +99,54 @@ def _safe_forward(model: torch.nn.Module, x: torch.Tensor, **kwargs):
     """
     try:
         sig = inspect.signature(model.forward)
-        allowed = set(sig.parameters.keys())
-        fkwargs = {k: v for k, v in kwargs.items() if k in allowed}
-        return model(x, **fkwargs)
-    except Exception:
-        try:
-            return model(x, **kwargs)
-        except TypeError:
-            return model(x)
+    except (TypeError, ValueError):
+        return model(x, **kwargs)
+
+    accepts_kwargs = any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in sig.parameters.values()
+    )
+    allowed = set(sig.parameters)
+    fkwargs = kwargs if accepts_kwargs else {key: value for key, value in kwargs.items() if key in allowed}
+    return model(x, **fkwargs)
+
+
+def _validate_future_exo_tensor(
+    value: Any,
+    *,
+    source: str,
+    batch_size: int,
+    required_horizon: int,
+    expected_features: Optional[int],
+) -> torch.Tensor:
+    if not torch.is_tensor(value):
+        raise RuntimeError(f"{source} must be a torch.Tensor with shape (H, E) or (B, H, E).")
+    if value.dim() not in (2, 3):
+        raise RuntimeError(
+            f"{source} must have rank 2 (H, E) or rank 3 (B, H, E); "
+            f"got shape={tuple(value.shape)}."
+        )
+
+    if value.dim() == 3 and int(value.size(0)) not in (1, int(batch_size)):
+        raise RuntimeError(
+            f"{source} batch dimension mismatch: got {int(value.size(0))}, "
+            f"expected 1 or {int(batch_size)}."
+        )
+
+    horizon_dim = int(value.size(0) if value.dim() == 2 else value.size(1))
+    if horizon_dim < int(required_horizon):
+        raise RuntimeError(
+            f"{source} horizon dimension is too short: got {horizon_dim}, "
+            f"expected at least {int(required_horizon)}."
+        )
+
+    feature_dim = int(value.size(-1))
+    if expected_features is not None and feature_dim != int(expected_features):
+        raise RuntimeError(
+            f"{source} last dimension mismatch: got {feature_dim}, "
+            f"expected {int(expected_features)}."
+        )
+    return value
 
 
 def _first_usable(out: Any) -> Any:
@@ -101,7 +161,13 @@ def _first_usable(out: Any) -> Any:
     return out
 
 
-def _normalize_point_to_BH(y_any: Any, B: int, H_hint: Optional[int] = None) -> torch.Tensor:
+def _normalize_point_to_BH(
+    y_any: Any,
+    B: int,
+    H_hint: Optional[int] = None,
+    *,
+    point_index: Optional[int] = None,
+) -> torch.Tensor:
     """
     다양한 모델 출력 형태를 표준 점 예측 텐서 [B, H]로 정규화.
     """
@@ -132,6 +198,19 @@ def _normalize_point_to_BH(y_any: Any, B: int, H_hint: Optional[int] = None) -> 
         if y.dim() == 3:
             d1, d2 = y.size(1), y.size(2)
 
+            if point_index is not None:
+                if H_hint is not None and d1 == H_hint and point_index < d2:
+                    return y[:, :, point_index]
+                if H_hint is not None and d2 == H_hint and point_index < d1:
+                    return y[:, point_index, :]
+                if point_index < d2:
+                    return y[:, :, point_index]
+                if point_index < d1:
+                    return y[:, point_index, :]
+                raise RuntimeError(
+                    f"point_index={point_index} is invalid for output shape {tuple(y.shape)}"
+                )
+
             if H_hint is not None:
                 if d1 == H_hint and d2 != H_hint:
                     return y[:, :, 0]
@@ -147,6 +226,16 @@ def _normalize_point_to_BH(y_any: Any, B: int, H_hint: Optional[int] = None) -> 
         return y.reshape(B, -1)
 
     raise RuntimeError(f"Unsupported point output type={type(y_any)}")
+
+
+def _distribution_point_index(model: torch.nn.Module) -> Optional[int]:
+    out_mult = getattr(model, "out_mult", getattr(model, "out_mul", 1))
+    param_names = getattr(model, "param_names", None)
+    if int(out_mult or 1) <= 1 or not param_names:
+        return None
+
+    normalized = [str(name).lstrip("-").casefold() for name in param_names]
+    return normalized.index("loc") if "loc" in normalized else None
 
 
 def _extract_quantile_block(out_any: Any) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -668,6 +757,7 @@ class DMSForecaster:
         )
         self.quantile_feed = quantile_feed
         self.global_t0 = 0
+        self.distribution_point_index = _distribution_point_index(model)
 
         # set on predict()
         self.future_exo_cb: Optional[Callable[[int, int], torch.Tensor]] = None
@@ -744,16 +834,46 @@ class DMSForecaster:
             x_raw = x_raw.unsqueeze(-1)
         B = x_raw.size(0)
 
+        if past_exo_cat is not None:
+            is_empty_categorical = (
+                torch.is_tensor(past_exo_cat)
+                and past_exo_cat.dim() == 3
+                and int(past_exo_cat.size(-1)) == 0
+            )
+            if not is_empty_categorical:
+                raise RuntimeError(
+                    f"{type(self.model).__name__} does not accept categorical past exogenous inputs "
+                    "through the public predictor. Encode them as continuous features."
+                )
+            past_exo_cat = None
+
         # --------------------------------------------------------------
         # 1) Future exo wiring
         # --------------------------------------------------------------
         d_future_expected = _infer_d_future_expected(self.model)
         cb_final = future_exo_cb
 
-        if torch.is_tensor(future_exo_batch):
-            exb = future_exo_batch
+        H_hint = int(getattr(self.model, "horizon", getattr(self.model, "output_horizon", 0)) or 0)
+        probe_H = int(horizon if H_hint == 0 else max(1, H_hint))
 
-            if exb.dim() == 2:
+        if future_exo_batch is not None and not torch.is_tensor(future_exo_batch):
+            raise RuntimeError(
+                "future_exo_batch must be a torch.Tensor with shape (H, E) or (B, H, E)."
+            )
+
+        if torch.is_tensor(future_exo_batch):
+            exb = _validate_future_exo_tensor(
+                future_exo_batch,
+                source="future_exo_batch",
+                batch_size=B,
+                required_horizon=int(horizon),
+                expected_features=d_future_expected,
+            )
+
+            if d_future_expected == 0 and int(exb.size(-1)) == 0:
+                exb = None
+
+            if exb is not None and exb.dim() == 2:
                 def _cb_from_batch(t0: int, h_req: int, dev: torch.device):
                     s, e = int(t0), int(t0) + int(h_req)
                     Htot = exb.size(0)
@@ -767,12 +887,7 @@ class DMSForecaster:
 
                 cb_final = _cb_from_batch
 
-            elif exb.dim() == 3:
-                if exb.size(0) not in (1, B):
-                    raise RuntimeError(
-                        f"future_exo_batch has incompatible batch dim: got {exb.size(0)}, expected 1 or {B}."
-                    )
-
+            elif exb is not None and exb.dim() == 3:
                 def _cb_from_batch_b(t0: int, h_req: int, dev: torch.device):
                     s, e = int(t0), int(t0) + int(h_req)
                     Htot = exb.size(1)
@@ -793,16 +908,33 @@ class DMSForecaster:
 
         self.future_exo_cb = None
         if cb_final is not None:
-            self.future_exo_cb = lambda t, h: cb_final(t, h, device)
+            def _checked_future_exo_cb(t: int, h: int) -> torch.Tensor:
+                value = cb_final(t, h, device)
+                return _validate_future_exo_tensor(
+                    value,
+                    source="future_exo_cb result",
+                    batch_size=B,
+                    required_horizon=int(h),
+                    expected_features=d_future_expected,
+                )
+
+            self.future_exo_cb = _checked_future_exo_cb
 
         if d_future_expected is not None:
             if d_future_expected <= 0:
-                self.future_exo_cb = None
+                if self.future_exo_cb is not None:
+                    future_probe = self.future_exo_cb(0, probe_H)
+                    if int(future_probe.size(-1)) > 0:
+                        raise RuntimeError(
+                            f"{type(self.model).__name__} does not accept future exogenous inputs."
+                        )
+                    self.future_exo_cb = None
             else:
                 if self.future_exo_cb is None:
                     raise RuntimeError(
-                        f"Model expects future_exo dim d_future={d_future_expected}, "
-                        f"but neither future_exo_batch nor future_exo_cb was provided."
+                        f"{type(self.model).__name__} expects future exogenous inputs with last dimension "
+                        f"{d_future_expected}, but they were not provided via `future_exo_batch` "
+                        "or `future_exo_cb`."
                     )
 
         # 2) forward kwargs
@@ -821,22 +953,9 @@ class DMSForecaster:
             fwd_kwargs["mode"] = mode
 
         # 3) probe forward to decide output type / Hm
-        H_hint = int(getattr(self.model, "horizon", getattr(self.model, "output_horizon", 0)) or 0)
-        probe_H = int(horizon if H_hint == 0 else max(1, H_hint))
-
         exo_probe = None
         if self.future_exo_cb is not None:
             ex = self.future_exo_cb(0, probe_H)
-
-            if d_future_expected is not None and d_future_expected > 0:
-                if ex is None:
-                    raise RuntimeError(f"future_exo_cb returned None, but d_future={d_future_expected} is required")
-                if ex.ndim not in (2, 3):
-                    raise RuntimeError(f"future_exo_cb must return (H,E) or (B,H,E); got shape={tuple(ex.shape)}")
-                if int(ex.shape[-1]) != int(d_future_expected):
-                    raise RuntimeError(
-                        f"future_exo dim mismatch: got E={int(ex.shape[-1])}, expected d_future={int(d_future_expected)}"
-                    )
 
             if ex.ndim == 2:
                 exo_probe = ex.to(device).unsqueeze(0).expand(B, -1, -1)
@@ -854,11 +973,12 @@ class DMSForecaster:
 
         # 4) branch: quantile vs point
         is_quantile = False
-        try:
-            _extract_quantile_block(out0)
-            is_quantile = True
-        except Exception:
-            is_quantile = False
+        if self.distribution_point_index is None:
+            try:
+                _extract_quantile_block(out0)
+                is_quantile = True
+            except Exception:
+                is_quantile = False
 
         if is_quantile:
             return self._predict_quantile_strategy(
@@ -892,7 +1012,12 @@ class DMSForecaster:
         tail_cfg: Dict[str, Any],
     ):
         B = x_raw.size(0)
-        y0 = _normalize_point_to_BH(out0, B, H_hint=probe_H)
+        y0 = _normalize_point_to_BH(
+            out0,
+            B,
+            H_hint=probe_H,
+            point_index=self.distribution_point_index,
+        )
         Hm = int(y0.size(1))
 
         if int(horizon) <= Hm:
@@ -1016,7 +1141,12 @@ class DMSForecaster:
                     raise RuntimeError(f"future_exo must be (H,E) or (B,H,E), got shape={tuple(ex.shape)}")
 
             out = _safe_forward(self.model, xr, future_exo=exo, fe_cont=exo, **fwd_kwargs)
-            return _normalize_point_to_BH(out, B, H_hint=need_h)
+            return _normalize_point_to_BH(
+                out,
+                B,
+                H_hint=need_h,
+                point_index=self.distribution_point_index,
+            )
 
         y_block_raw = _call_point(x_raw, Hm, 0)
 
@@ -1155,7 +1285,12 @@ class DMSForecaster:
                     raise RuntimeError(f"future_exo must be (H,E) or (B,H,E), got shape={tuple(ex.shape)}")
 
             out = _safe_forward(self.model, xr, future_exo=exo, fe_cont=exo, **fwd_kwargs)
-            return _normalize_point_to_BH(out, B, H_hint=need_h)
+            return _normalize_point_to_BH(
+                out,
+                B,
+                H_hint=need_h,
+                point_index=self.distribution_point_index,
+            )
 
         # 1) DMS block
         y_block_raw = _call_point(x_raw, Hm, 0)
@@ -1312,7 +1447,12 @@ class DMSForecaster:
                     raise RuntimeError(f"future_exo must be (H,E) or (B,H,E), got shape={tuple(ex.shape)}")
 
             out = _safe_forward(self.model, xr, future_exo=exo, fe_cont=exo, **fwd_kwargs)
-            return _normalize_point_to_BH(out, B, H_hint=need_h)
+            return _normalize_point_to_BH(
+                out,
+                B,
+                H_hint=need_h,
+                point_index=self.distribution_point_index,
+            )
 
         y_block_raw = _call_point(x_raw, Hm, 0)
 

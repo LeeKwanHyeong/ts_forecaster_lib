@@ -11,6 +11,54 @@ from modeling_module.models.PatchTST.supervised.backbone import SupervisedBackbo
 from modeling_module.models.common_layers.RevIN import RevIN
 
 
+def _validate_future_exo_contract(
+    future_exo: torch.Tensor | None,
+    *,
+    batch_size: int,
+    horizon: int,
+    expected_dim: int,
+) -> None:
+    """Validate PatchTST's raw future-continuous input before any model work."""
+    expected_dim = int(expected_dim)
+    if future_exo is None:
+        if expected_dim > 0:
+            raise RuntimeError(
+                f"[PatchTST] future_exo is required when configured future width={expected_dim}; "
+                f"expected shape ({batch_size}, {horizon}, {expected_dim})."
+            )
+        return
+
+    if not torch.is_tensor(future_exo):
+        raise RuntimeError(
+            f"[PatchTST] future_exo must be a tensor with rank-3 [B,H,E], got {type(future_exo).__name__}."
+        )
+    if expected_dim <= 0:
+        if future_exo.numel() > 0:
+            raise RuntimeError(
+                "[PatchTST] future_exo is not accepted when configured future width=0; "
+                f"got non-empty shape {tuple(future_exo.shape)}."
+            )
+        return
+    if future_exo.dim() != 3:
+        raise RuntimeError(
+            f"[PatchTST] future_exo must be rank-3 [B,H,E], got shape {tuple(future_exo.shape)}."
+        )
+
+    actual_batch, actual_horizon, actual_dim = future_exo.shape
+    if actual_batch != batch_size:
+        raise RuntimeError(
+            f"[PatchTST] future_exo batch mismatch: got {actual_batch}, expected {batch_size}."
+        )
+    if actual_horizon != horizon:
+        raise RuntimeError(
+            f"[PatchTST] future_exo horizon mismatch: got {actual_horizon}, expected {horizon}."
+        )
+    if actual_dim != expected_dim:
+        raise RuntimeError(
+            f"[PatchTST] future_exo last dimension mismatch: got {actual_dim}, expected {expected_dim}."
+        )
+
+
 class FutureExoTokenFusion(nn.Module):
     """
     Token-wise future exogenous fusion for PatchTST.
@@ -209,6 +257,13 @@ class PatchTSTModel(nn.Module):
             # mode: str | None = None,
             **kwargs
     ):
+        _validate_future_exo_contract(
+            future_exo,
+            batch_size=x.size(0),
+            horizon=self.horizon,
+            expected_dim=self.d_future,
+        )
+
         # 1) 입력 정규화
         x_n = self.revin_layer(x, 'norm') if self.use_revin else x
 
@@ -346,6 +401,13 @@ class PatchTSTQuantileModel(nn.Module):
         Returns:
             {"q": [B, H, Quantiles]} 딕셔너리 반환.
         """
+        _validate_future_exo_contract(
+            future_exo,
+            batch_size=x.size(0),
+            horizon=self.horizon,
+            expected_dim=self.d_future,
+        )
+
         use_revin = getattr(self.cfg, "use_revin", True)
 
         # 1) 입력 정규화

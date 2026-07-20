@@ -11,6 +11,53 @@ from modeling_module.models.ExoTST.configs import ExoTSTConfig
 from modeling_module.models.common_layers.RevIN import RevIN
 
 
+def _validate_future_exo_contract(
+    future_exo: Optional[torch.Tensor],
+    *,
+    batch_size: int,
+    horizon: int,
+    expected_dim: int,
+) -> None:
+    expected_dim = int(expected_dim)
+    if future_exo is None:
+        if expected_dim > 0:
+            raise RuntimeError(
+                f"[ExoTST] future_exo is required when configured future width={expected_dim}; "
+                f"expected shape ({batch_size}, {horizon}, {expected_dim})."
+            )
+        return
+
+    if not torch.is_tensor(future_exo):
+        raise RuntimeError(
+            f"[ExoTST] future_exo must be a tensor with rank-3 [B,H,E], got {type(future_exo).__name__}."
+        )
+    if expected_dim <= 0:
+        if future_exo.numel() > 0:
+            raise RuntimeError(
+                "[ExoTST] future_exo is not accepted when configured future width=0; "
+                f"got non-empty shape {tuple(future_exo.shape)}."
+            )
+        return
+    if future_exo.dim() != 3:
+        raise RuntimeError(
+            f"[ExoTST] future_exo must be rank-3 [B,H,E], got shape {tuple(future_exo.shape)}."
+        )
+
+    actual_batch, actual_horizon, actual_dim = future_exo.shape
+    if actual_batch != batch_size:
+        raise RuntimeError(
+            f"[ExoTST] future_exo batch mismatch: got {actual_batch}, expected {batch_size}."
+        )
+    if actual_horizon != horizon:
+        raise RuntimeError(
+            f"[ExoTST] future_exo horizon mismatch: got {actual_horizon}, expected {horizon}."
+        )
+    if actual_dim != expected_dim:
+        raise RuntimeError(
+            f"[ExoTST] future_exo last dimension mismatch: got {actual_dim}, expected {expected_dim}."
+        )
+
+
 def _nan_policy_apply(x: torch.Tensor, policy: str) -> torch.Tensor:
     """
     x: (B, T, E)
@@ -205,16 +252,6 @@ class ExoTST(nn.Module):
             dropout=cfg.dropout,
         )
 
-        # -------------------------
-        # (6) Head
-        # -------------------------
-        self.head = HorizonMLPHead(
-            ny=self.ny,
-            d_model=cfg.d_model,
-            horizon=self.horizon,
-            y_dim=self.y_dim,
-            dropout=cfg.dropout,
-        )
     def _build_exo_memory(self, hp: torch.Tensor, hf: torch.Tensor) -> torch.Tensor:
         """
         hp: (B, C_p, Np, D)  (Np includes agg token if enabled)
@@ -270,11 +307,18 @@ class ExoTST(nn.Module):
 
         _assert_finite("x", x)
         _assert_finite("past_exo_cont", past_exo_cont)
-        _assert_finite("future_exo", future_exo)
         if x.dim() != 3:
             raise ValueError("ExoTST expects x shape (B, L, Cy)")
 
         b, L, cy = x.shape
+        expected_future_dim = int(self.cfg.exo_dim_future) if bool(self.cfg.use_future_exo) else 0
+        _validate_future_exo_contract(
+            future_exo,
+            batch_size=b,
+            horizon=self.horizon,
+            expected_dim=expected_future_dim,
+        )
+        _assert_finite("future_exo", future_exo)
         if self.cfg.strict_shape:
             if L != self.lookback:
                 raise ValueError(f"lookback mismatch: got L={L}, expected {self.lookback}")

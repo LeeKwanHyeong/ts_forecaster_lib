@@ -142,6 +142,53 @@ class _ExoMixin(nn.Module):
                 self._z_exo_proj = nn.Linear(in_dim, z_dim, bias=True)  # 외생 정보를 z차원으로 투영
                 self._z_gate = nn.Linear(z_dim, z_dim, bias=True)  # z벡터로부터 게이트 가중치 산출
 
+    def _validate_future_exo_contract(
+        self,
+        future_exo: Optional[torch.Tensor],
+        *,
+        batch_size: int,
+    ) -> None:
+        """Reject missing or shape-coerced future inputs at the model boundary."""
+        expected_dim = int(self.future_exo_dim)
+        horizon = int(getattr(self, "horizon"))
+        if future_exo is None:
+            if expected_dim > 0:
+                raise RuntimeError(
+                    f"[PatchMixer] future_exo is required when configured future width={expected_dim}; "
+                    f"expected shape ({batch_size}, {horizon}, {expected_dim})."
+                )
+            return
+
+        if not torch.is_tensor(future_exo):
+            raise RuntimeError(
+                f"[PatchMixer] future_exo must be a tensor with rank-3 [B,H,E], got {type(future_exo).__name__}."
+            )
+        if expected_dim <= 0:
+            if future_exo.numel() > 0:
+                raise RuntimeError(
+                    "[PatchMixer] future_exo is not accepted when configured future width=0; "
+                    f"got non-empty shape {tuple(future_exo.shape)}."
+                )
+            return
+        if future_exo.dim() != 3:
+            raise RuntimeError(
+                f"[PatchMixer] future_exo must be rank-3 [B,H,E], got shape {tuple(future_exo.shape)}."
+            )
+
+        actual_batch, actual_horizon, actual_dim = future_exo.shape
+        if actual_batch != batch_size:
+            raise RuntimeError(
+                f"[PatchMixer] future_exo batch mismatch: got {actual_batch}, expected {batch_size}."
+            )
+        if actual_horizon != horizon:
+            raise RuntimeError(
+                f"[PatchMixer] future_exo horizon mismatch: got {actual_horizon}, expected {horizon}."
+            )
+        if actual_dim != expected_dim:
+            raise RuntimeError(
+                f"[PatchMixer] future_exo last dimension mismatch: got {actual_dim}, expected {expected_dim}."
+            )
+
     def _pool_past_exo(self, past_exo_cont: Optional[torch.Tensor], past_exo_cat: Optional[torch.Tensor]) -> Optional[
         torch.Tensor]:
         """
@@ -473,6 +520,8 @@ class PatchMixerQuantileModel(_ExoMixin):
         # 본 구현은 future exo shift를 "denorm 이후(out-space)"에 더하는 방식으로 통일합니다.
         # 따라서 exo_is_normalized는 사실상 사용하지 않습니다(호환용으로만 받음).
 
+        self._validate_future_exo_contract(future_exo, batch_size=x.size(0))
+
         # 1) norm + backbone
         x_in = self.revin_layer(x, "norm") if self.use_revin else x
         z = self.backbone(x_in)
@@ -728,6 +777,8 @@ class PatchMixerModel(_ExoMixin):
         exo_is_normalized: Optional[bool] = None,  # 호환용
         **kwargs,
     ):
+        self._validate_future_exo_contract(future_exo, batch_size=x.size(0))
+
         # 1) norm + backbone
         x_in = self.revin_layer(x, "norm") if (self.use_revin and self.revin_layer is not None) else x
         z = self.backbone(x_in)
