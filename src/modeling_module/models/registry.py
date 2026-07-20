@@ -22,10 +22,19 @@ class ModelSpec:
     checkpoint_aliases: tuple[str, ...] = ()
     trainable: bool = True
     included_in_family: bool = True
+    deprecated: bool = False
+    deprecation_message: Optional[str] = None
 
     def load_builder(self) -> Callable[..., Any]:
         module = import_module(self.builder_module)
         return getattr(module, self.builder_attr)
+
+
+_TITAN_DEPRECATION_MESSAGE = (
+    "Titan public training is deprecated and excluded from DSIO defaults and promotion runs. "
+    "Explicit Titan training remains available for compatibility, and existing supported titan_* "
+    "checkpoints remain loadable. Migrate new training runs to another supported family."
+)
 
 
 MODEL_SPECS: dict[str, ModelSpec] = {
@@ -78,6 +87,8 @@ MODEL_SPECS: dict[str, ModelSpec] = {
         aliases=("titanbase",),
         class_names=("TitanBaseModel",),
         checkpoint_aliases=("TitanBase", "TitanBaseDist"),
+        deprecated=True,
+        deprecation_message=_TITAN_DEPRECATION_MESSAGE,
     ),
     "titan_lmm": ModelSpec(
         key="titan_lmm",
@@ -88,6 +99,8 @@ MODEL_SPECS: dict[str, ModelSpec] = {
         aliases=("titanlmm",),
         class_names=("TitanLMMModel",),
         checkpoint_aliases=("TitanLMM", "TitanLMMDist"),
+        deprecated=True,
+        deprecation_message=_TITAN_DEPRECATION_MESSAGE,
     ),
     "titan_seq2seq": ModelSpec(
         key="titan_seq2seq",
@@ -98,6 +111,8 @@ MODEL_SPECS: dict[str, ModelSpec] = {
         aliases=("titanseq2seq", "titanseq"),
         class_names=("TitanSeq2SeqModel",),
         checkpoint_aliases=("TitanSeq2Seq", "TitanSeq2SeqDist"),
+        deprecated=True,
+        deprecation_message=_TITAN_DEPRECATION_MESSAGE,
     ),
     "exotst_base": ModelSpec(
         key="exotst_base",
@@ -170,6 +185,18 @@ def get_model_spec(key: str) -> ModelSpec:
 
 def get_model_builder(key: str) -> Callable[..., Any]:
     return get_model_spec(key).load_builder()
+
+
+def get_training_deprecation_messages(targets: Iterable[str]) -> list[str]:
+    """Return unique deprecation messages for canonical public training targets."""
+    messages: list[str] = []
+    seen: set[str] = set()
+    for key in targets:
+        message = get_model_spec(key).deprecation_message
+        if message and message not in seen:
+            seen.add(message)
+            messages.append(message)
+    return messages
 
 
 def get_model_builders(keys: Optional[Iterable[str]] = None) -> dict[str, Callable[..., Any]]:

@@ -485,7 +485,7 @@ sys.path.insert(0, str(target))
 import modeling_module
 import modeling_module.models.registry as registry
 import polars as pl
-from modeling_module import TrainRequest, build_dataset, train
+from modeling_module import DistributionLoss, TrainRequest, build_dataset, train
 
 package_path = Path(modeling_module.__file__).resolve()
 registry_path = Path(registry.__file__).resolve()
@@ -494,6 +494,7 @@ assert target in registry_path.parents, (target, registry_path)
 assert registry_path.suffix == ".pyc", registry_path
 assert callable(train)
 assert TrainRequest(models=["patchtst_base"]).models == ["patchtst_base"]
+assert DistributionLoss(distribution="Normal").param_names == ["-loc", "-scale"]
 
 dataset = build_dataset({
     "df": pl.DataFrame({

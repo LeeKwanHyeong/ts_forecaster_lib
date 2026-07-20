@@ -25,7 +25,7 @@ artifact directory와 `training_manifest.json`으로 분리합니다.
 | 항목 | Python runner | Linux wrapper |
 |---|---:|---:|
 | mode | `both` | `exo` |
-| endogenous models | `patchtst patchmixer titan` | 동일 |
+| endogenous models | `patchtst patchmixer` | 동일 |
 | exogenous models | `exotst timexer` | 동일 |
 | lookback / horizon | `104 / 27` | 동일 |
 | endogenous / exogenous batch | `1024 / 512` | 동일 |
@@ -38,13 +38,16 @@ artifact directory와 `training_manifest.json`으로 분리합니다.
 Family request는 public registry artifact로 확장됩니다.
 
 - `endo_only`: `patchtst_base` → `patchtst_quantile` → `patchmixer_base` →
-  `patchmixer_quantile` → `titan_base` → `titan_lmm` → `titan_seq2seq`
+  `patchmixer_quantile`
 - `exo_future`: `exotst_base`; past와 future continuous exogenous가 모두 필요
 - `exo_past_only`: `timexer_base`; past continuous exogenous만 사용하고 future exogenous를 거부
 
 CLI `--mode` 값은 `endo`, `exo`, `both`뿐입니다. 위 scenario 이름은 output directory이며
 `--mode` 값이 아닙니다. `both`는 endogenous를 먼저 실행하고, 이어서 `exo_future`,
 `exo_past_only` 순서로 실행합니다.
+
+Titan은 deprecated이므로 기본 group과 5090 promotion 대상에서 제외합니다. 기존 registry key와
+지원 checkpoint load는 유지되며, Titan을 명시적으로 학습 요청하면 `FutureWarning`이 발생합니다.
 
 ## Smoke-first commands
 
@@ -177,9 +180,6 @@ resume 기능이 없습니다. `CLEAN_OUTPUT=0`은 기존 directory를 보존할
 | `patchtst_quantile` | `endo_only/weekly_PatchTSTQuantile_L104_H27.pt` |
 | `patchmixer_base` | `endo_only/weekly_PatchMixer_L104_H27.pt` |
 | `patchmixer_quantile` | `endo_only/weekly_PatchMixerQuantile_L104_H27.pt` |
-| `titan_base` | `endo_only/weekly_TitanBase_L104_H27.pt` |
-| `titan_lmm` | `endo_only/weekly_TitanLMM_L104_H27.pt` |
-| `titan_seq2seq` | `endo_only/weekly_TitanSeq2Seq_L104_H27.pt` |
 | `exotst_base` | `exo_future/weekly_ExoTSTBase_L104_H27.pt` |
 | `timexer_base` | `exo_past_only/weekly_TimeXerBase_L104_H27.pt` |
 
@@ -192,7 +192,7 @@ PatchTST `full` 재실행은 SSL pretraining도 다시 수행합니다.
 
 ```bash
 MODE=endo \
-ENDO_MODELS="titan_lmm" \
+ENDO_MODELS="patchmixer_base" \
 SSL_MODE=sl_only \
 CLEAN_OUTPUT=0 \
 src/model_test/total_train/run_dsio_total_running_linux.sh --device cuda
@@ -206,7 +206,7 @@ src/model_test/total_train/run_dsio_total_running_linux.sh --device cuda
 1. local `pytest`와 CPU artifact smoke
 2. 5090 전용 checkout에서 `SAMPLE_PART_COUNT=8` preflight
 3. PatchTST full SSL
-4. point family 순서: PatchTST → PatchMixer → Titan → ExoTST → TimeXer
+4. point family 순서: PatchTST → PatchMixer → ExoTST → TimeXer
 5. distribution/legacy restore와 fresh-process prediction
 6. 모든 sampled gate가 통과한 뒤에만 전체 part/model run
 

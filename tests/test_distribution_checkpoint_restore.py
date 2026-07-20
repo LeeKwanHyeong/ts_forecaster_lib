@@ -12,6 +12,7 @@ from modeling_module import (
     ArchitectureConfig,
     DataRequest,
     DataWindowConfig,
+    DistributionLoss,
     ExogenousConfig,
     ExoTSTArchitectureConfig,
     LoaderConfig,
@@ -25,7 +26,6 @@ from modeling_module import (
     load_predictor,
     train,
 )
-from modeling_module.training.model_losses.loss_module import DistributionLoss
 
 
 EXPECTED_PARAMS = {

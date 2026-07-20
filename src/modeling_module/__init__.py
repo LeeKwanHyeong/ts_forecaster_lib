@@ -14,6 +14,7 @@ from .api.train import (
     train,
 )
 from .api.infer import predict, load_predictor
+from .api.losses import DistributionLoss
 from .api.data import (
     DataColumnConfig,
     DataRequest,
@@ -28,6 +29,7 @@ __all__ = [
     'train',
     'predict',
     'load_predictor',
+    'DistributionLoss',
     'build_dataloader',
     'build_dataset',
     'TrainRequest',

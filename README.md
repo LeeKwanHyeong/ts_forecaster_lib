@@ -15,7 +15,7 @@
 즉, 설치 후 실제 코드에서는 아래처럼 import 합니다.
 
 ```python
-from modeling_module import train, load_predictor, build_dataloader
+from modeling_module import DistributionLoss, train, load_predictor, build_dataloader
 ```
 
 ## What This Library Provides
@@ -37,6 +37,7 @@ from modeling_module import train, load_predictor, build_dataloader
 - `TrainRequest`
 - `DataRequest`
 - `TrainerConfig`
+- `DistributionLoss`
 - `SSLConfig`
 - `RuntimeConfig`
 - `ArtifactConfig`
@@ -56,6 +57,7 @@ from modeling_module import train, load_predictor, build_dataloader
   `DataWindowConfig`, `DataColumnConfig`, `ExogenousConfig`, `LoaderConfig`,
   `ArchitectureConfig`, `PatchTSTArchitectureConfig`, `PatchMixerArchitectureConfig`,
   `TitanArchitectureConfig`, `ExoTSTArchitectureConfig`, `TimexerArchitectureConfig`
+- loss selector: `DistributionLoss` (`Normal`, `StudentT`)
 
 권장 사용 방식은 dataclass 기반입니다.
 
@@ -96,6 +98,9 @@ public API 시그니처는 그대로 유지할 수 있습니다.
 - `exotst_base`
 - `timexer_base`
 
+`titan_base`, `titan_lmm`, `titan_seq2seq`는 deprecation 기간의 학습/checkpoint 호환을 위해
+registry에 남아 있습니다. 신규 운영 학습 대상으로는 권장하지 않습니다.
+
 family 이름으로도 요청할 수 있습니다.
 
 - `patchtst`
@@ -113,17 +118,17 @@ family 이름으로도 요청할 수 있습니다.
 
 아래 표는 public registry에 연결된 구현 범위입니다.
 
-| Family | Canonical Key | 구현된 학습/checkpoint mode | Continuous exogenous | SSL |
-|---|---|---|---|---|
-| PatchTST | `patchtst_base` | point, Normal, StudentT | past/future optional | `full`, `ssl_only` |
-| PatchTST | `patchtst_quantile` | q10/q50/q90 | past/future optional | `full`, `ssl_only` |
-| PatchMixer | `patchmixer_base` | point, Normal, StudentT | past/future optional | 미지원 |
-| PatchMixer | `patchmixer_quantile` | q10/q50/q90 | past/future optional | 미지원 |
-| Titan | `titan_base` | point, Normal, StudentT | past/future optional | 미지원 |
-| Titan | `titan_lmm` | point, Normal, StudentT | past/future optional | 미지원 |
-| Titan | `titan_seq2seq` | point, Normal, StudentT | past/future optional | 미지원 |
-| ExoTST | `exotst_base` | point, Normal, StudentT | past/future 모두 필수 | 미지원 |
-| TimeXer | `timexer_base` | point only | past 필수, future 금지 | 미지원 |
+| Family | Canonical Key | Status | 구현된 학습/checkpoint mode | Continuous exogenous | SSL |
+|---|---|---|---|---|---|
+| PatchTST | `patchtst_base` | 지원 | point, Normal, StudentT | past/future optional | `full`, `ssl_only` |
+| PatchTST | `patchtst_quantile` | 지원 | q10/q50/q90 | past/future optional | `full`, `ssl_only` |
+| PatchMixer | `patchmixer_base` | 지원 | point, Normal, StudentT | past/future optional | 미지원 |
+| PatchMixer | `patchmixer_quantile` | 지원 | q10/q50/q90 | past/future optional | 미지원 |
+| Titan | `titan_base` | Deprecated | point, Normal, StudentT | past/future optional | 미지원 |
+| Titan | `titan_lmm` | Deprecated | point, Normal, StudentT | past/future optional | 미지원 |
+| Titan | `titan_seq2seq` | Deprecated | point, Normal, StudentT | past/future optional | 미지원 |
+| ExoTST | `exotst_base` | 지원 | point, Normal, StudentT | past/future 모두 필수 | 미지원 |
+| TimeXer | `timexer_base` | 지원 | point only | past 필수, future 금지 | 미지원 |
 
 추가 메모:
 
@@ -136,14 +141,14 @@ family 이름으로도 요청할 수 있습니다.
 - categorical past exogenous는 현재 모든 public family에서 fail-fast합니다.
 - checkpoint-safe distribution은 `Normal`, `StudentT`입니다. `Poisson`, `Bernoulli`,
   `NegativeBinomial`, `Tweedie`는 data materialization 전에 거부합니다.
-- strict distribution E2E 복원은 현재 PatchTST/PatchMixer/Titan/ExoTST base 4종에 고정되어
-  있습니다. Titan LMM/Seq2Seq distribution 경로는 구현되어 있고 point E2E smoke가 고정됩니다.
+- Titan은 신규 검증 matrix와 DSIO default에서 제외합니다. 기존 regression은 deprecation 기간의
+  지원 checkpoint 호환을 깨지 않기 위한 안전망으로만 유지합니다.
 - point/distribution predictor는 현재 location을 `point`로 반환하며, quantile predictor는
   `q10`, `q50`, `q90`과 `point=q50`을 반환합니다.
-- Distribution loss constructor는 아직 top-level stable public API가 아니며, 표의 distribution
-  항목은 구현/checkpoint compatibility 범위입니다.
+- `DistributionLoss(distribution="Normal")` 또는 `DistributionLoss(distribution="StudentT")`를
+  top-level public selector로 사용합니다. 다른 분포는 data materialization 전에 거부합니다.
 - `models` 생략 또는 빈 목록은 `patchtst_base`, `patchtst_quantile`로 확장됩니다.
-- `models=["titan"]` 는 현재 `titan_base`, `titan_lmm`, `titan_seq2seq` 를 함께 학습합니다.
+- `models=["titan"]`은 호환상 세 Titan artifact로 계속 확장되지만 `FutureWarning`을 냅니다.
 - artifact key를 직접 주면 family 전체가 아니라 그 모델만 학습됩니다.
   예: `models=["titan_lmm"]`, `models=["titan_seq2seq"]`, `models=["titan_base"]`, `models=["patchmixer_quantile"]`, `models=["patchtst_quantile"]`
 - repo 안에는 `NHITS`, `Transformer` 디렉토리도 있지만, 현재 README의 이 섹션은 "public training/inference registry에 연결된 모델" 기준입니다.
@@ -521,7 +526,7 @@ artifact directory에는 보통 아래가 생성됩니다.
 현재 executable default는 `lookback=104`, `horizon=27`, endogenous/exogenous batch
 `1024/512`, `ssl_mode="sl_only"`입니다. 기본 model group은 다음 scenario로 나뉩니다.
 
-- `endo_only`: PatchTST, PatchMixer, Titan
+- `endo_only`: PatchTST, PatchMixer
 - `exo_future`: ExoTST
 - `exo_past_only`: TimeXer
 

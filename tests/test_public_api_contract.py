@@ -10,6 +10,7 @@ from modeling_module import (
     ArtifactConfig,
     DataRequest,
     DataWindowConfig,
+    DistributionLoss,
     RuntimeConfig,
     TrainRequest,
     TrainerConfig,
@@ -57,6 +58,7 @@ def test_public_api_exports_official_surface():
         "TrainRequest",
         "TrainResult",
         "DataRequest",
+        "DistributionLoss",
         "TrainerConfig",
         "SSLConfig",
         "RuntimeConfig",
@@ -75,6 +77,21 @@ def test_public_api_exports_official_surface():
 
     for name in expected:
         assert hasattr(mm, name), f"missing public API export: {name}"
+
+
+def test_public_distribution_loss_selector_preserves_runtime_identity():
+    from modeling_module.api import DistributionLoss as ApiDistributionLoss
+    from modeling_module.training.model_losses.loss_module import DistributionLoss as InternalDistributionLoss
+
+    assert DistributionLoss is ApiDistributionLoss is InternalDistributionLoss
+
+    normal = DistributionLoss(distribution="Normal")
+    assert normal.outputsize_multiplier == 2
+    assert normal.param_names == ["-loc", "-scale"]
+
+    student_t = DistributionLoss(distribution="StudentT")
+    assert student_t.outputsize_multiplier == 3
+    assert student_t.param_names == ["-df", "-loc", "-scale"]
 
 
 def test_train_result_populates_primary_fields_for_single_model(monkeypatch, tmp_path):
@@ -110,21 +127,21 @@ def test_train_result_leaves_primary_fields_empty_for_multi_model(monkeypatch, t
                 "model_key": "patchtst_base",
                 "family_key": "patchtst",
             },
-            "Titan": {
-                "ckpt_path": str(tmp_path / "titan.pt"),
-                "model_key": "titan_base",
-                "family_key": "titan",
+            "PatchMixer": {
+                "ckpt_path": str(tmp_path / "patchmixer.pt"),
+                "model_key": "patchmixer_base",
+                "family_key": "patchmixer",
             },
         }
 
     monkeypatch.setattr(train_module, "run_total_train", fake_run_total_train)
 
-    result = train(_make_request(models=["patchtst_base", "titan_base"], tmp_path=tmp_path))
+    result = train(_make_request(models=["patchtst_base", "patchmixer_base"], tmp_path=tmp_path))
 
-    assert result.requested_models == ("patchtst_base", "titan_base")
+    assert result.requested_models == ("patchtst_base", "patchmixer_base")
     assert result.ckpt_paths == {
         "patchtst_base": str(tmp_path / "patchtst.pt"),
-        "titan_base": str(tmp_path / "titan.pt"),
+        "patchmixer_base": str(tmp_path / "patchmixer.pt"),
     }
     assert result.primary_result_name is None
     assert result.primary_ckpt_path is None

@@ -5,11 +5,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-API_FILES = [
-    ROOT / "src" / "modeling_module" / "api" / "train.py",
-    ROOT / "src" / "modeling_module" / "api" / "data.py",
-    ROOT / "src" / "modeling_module" / "api" / "infer.py",
-]
+API_FILES = sorted((ROOT / "src" / "modeling_module" / "api").glob("*.py"))
 FORBIDDEN_PREFIXES = (
     "modeling_module.training",
     "modeling_module.models",

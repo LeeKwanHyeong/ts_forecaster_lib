@@ -89,7 +89,6 @@ PAST_EXO_CAT_COLS: list[str] = []
 DEFAULT_ENDO_FAMILY_MODELS = [
     "patchtst",
     "patchmixer",
-    "titan"
 ]
 DEFAULT_EXO_FAMILY_MODELS = [
     # "patchtst",

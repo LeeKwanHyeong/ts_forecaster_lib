@@ -1,5 +1,10 @@
 from modeling_module.api.train import _make_result
-from modeling_module.models.registry import expand_training_targets, infer_artifact_model_key_from_checkpoint
+from modeling_module.models.registry import (
+    expand_training_targets,
+    get_model_spec,
+    get_training_deprecation_messages,
+    infer_artifact_model_key_from_checkpoint,
+)
 
 
 def test_expand_training_targets_supports_family_and_artifact_keys():
@@ -26,6 +31,17 @@ def test_expand_training_targets_preserves_single_artifact_requests():
     assert expand_training_targets(["patchmixer_quantile"]) == ["patchmixer_quantile"]
     assert expand_training_targets(["patchtst_quantile"]) == ["patchtst_quantile"]
     assert expand_training_targets(["timexer_base"]) == ["timexer_base"]
+
+
+def test_titan_registry_entries_are_deprecated_but_remain_trainable_for_compatibility():
+    titan_keys = expand_training_targets(["titan"])
+
+    assert titan_keys == ["titan_base", "titan_lmm", "titan_seq2seq"]
+    assert all(get_model_spec(key).trainable for key in titan_keys)
+    assert all(get_model_spec(key).deprecated for key in titan_keys)
+    messages = get_training_deprecation_messages(titan_keys)
+    assert len(messages) == 1
+    assert "checkpoints remain loadable" in messages[0]
 
 
 def test_infer_artifact_model_key_from_checkpoint_prefers_meta():

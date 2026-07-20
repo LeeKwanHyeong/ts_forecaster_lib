@@ -1,5 +1,9 @@
 # Titan implementation notes
 
+> **Deprecated:** Titan은 신규 운영 학습과 DSIO default에서 제외됩니다. Public `train(...)`에서
+> Titan family 또는 artifact를 요청하면 `FutureWarning`이 발생합니다. Registry key와 기존 지원
+> checkpoint load는 deprecation 기간 동안 유지하지만 신규 검증 범위는 추가하지 않습니다.
+
 이 문서는 현재 repository의 Titan 구현과 public API 계약을 설명합니다. 최종 지원 범위는
 repository root의 `README.md`와 `README.package.md` 표를 기준으로 합니다.
 
@@ -52,5 +56,5 @@ decoder나 별도 trend 보정도 현재 계약이 아닙니다.
 - [cross-attention decoder](common/decoder.py)
 - [trainer integration](../../training/model_trainers/titan_train.py)
 
-지원 경계는 registry, architecture override, CPU point smoke, distribution restore,
-future-exogenous sensitivity 회귀 테스트로 고정합니다.
+기존 regression은 지원 checkpoint 호환을 보존하기 위한 안전망으로만 유지합니다. 신규 성능 검증,
+distribution matrix 확장, 5090 promotion 대상에는 Titan을 포함하지 않습니다.

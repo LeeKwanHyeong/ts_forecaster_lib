@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import warnings
 from dataclasses import MISSING, dataclass, field, fields, is_dataclass
 from datetime import datetime
 from pathlib import Path
@@ -14,8 +15,10 @@ from modeling_module._internal.checkpoint_runtime import (
     summarize_training_results,
 )
 from modeling_module._internal.device_runtime import default_device, resolve_device
+from modeling_module._internal.loss_runtime import CHECKPOINT_SAFE_DISTRIBUTIONS
 from modeling_module._internal.model_registry import (
     expand_training_targets,
+    get_training_deprecation_messages,
     resolve_training_request_key,
 )
 from modeling_module._internal.training_runtime import (
@@ -54,7 +57,8 @@ class TrainerConfig:
     - `spike_epochs`: Optional second stage used by the internal staged trainer.
     - `base_lr`: Base learning rate used to build the internal stage configs.
     - `loss`: Backward-compatible alias for `loss_point`.
-    - `loss_point`: Loss for point/distribution style models.
+    - `loss_point`: Loss for point/distribution style models. Use the public
+      `modeling_module.DistributionLoss` selector for Normal or StudentT training.
     - `loss_quantile`: Loss for quantile models.
     - `use_intermittent`: Enable intermittent-demand weighting logic.
     - `val_use_weights`: Apply intermittent weights during validation as well.
@@ -891,8 +895,14 @@ def _summarize_request_for_manifest(request_payload: Mapping[str, Any]) -> dict[
     return manifest_request
 
 
-_CHECKPOINT_SAFE_DISTRIBUTIONS = frozenset({"Normal", "StudentT"})
+_CHECKPOINT_SAFE_DISTRIBUTIONS = frozenset(CHECKPOINT_SAFE_DISTRIBUTIONS)
 _SSL_ARTIFACT_MODES = frozenset({"full", "ssl_only"})
+
+
+def _warn_deprecated_training_targets(payload: Mapping[str, Any]) -> None:
+    requested_models = payload.get("models_to_run") or expand_training_targets(None)
+    for message in get_training_deprecation_messages(requested_models):
+        warnings.warn(message, FutureWarning, stacklevel=3)
 
 
 def _validate_checkpoint_safe_distribution_loss(payload: Mapping[str, Any]) -> None:
@@ -1115,6 +1125,7 @@ def train(req: TrainRequest | Mapping[str, Any]) -> TrainResult:
     ```
     """
     payload = _normalize_payload(_request_to_dict(req))
+    _warn_deprecated_training_targets(payload)
     _validate_checkpoint_safe_distribution_loss(payload)
     _validate_ssl_artifact_precondition(payload)
     train_loader, val_loader, datamodule = _resolve_loaders(payload)

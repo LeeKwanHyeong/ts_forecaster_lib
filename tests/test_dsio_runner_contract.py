@@ -31,7 +31,16 @@ def test_dsio_runner_defaults_match_executable_model_contracts():
     assert args.ssl_mode == "sl_only"
     assert args.endo_batch_size == 1024
     assert args.exo_batch_size == 512
-    assert endo_models == ["patchtst", "patchmixer", "titan"]
+    assert endo_models == ["patchtst", "patchmixer"]
     assert exo_models == ["exotst", "timexer"]
     assert future_models == ["exotst_base"]
     assert past_only_models == ["timexer_base"]
+
+
+def test_linux_wrapper_uses_the_same_non_deprecated_endo_defaults():
+    wrapper = (
+        ROOT / "src" / "model_test" / "total_train" / "run_dsio_total_running_linux.sh"
+    ).read_text(encoding="utf-8")
+
+    assert 'ENDO_MODELS="${ENDO_MODELS:-patchtst patchmixer}"' in wrapper
+    assert 'ENDO_MODELS="${ENDO_MODELS:-patchtst patchmixer titan}"' not in wrapper

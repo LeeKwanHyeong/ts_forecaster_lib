@@ -4,8 +4,7 @@ import importlib
 
 import pytest
 
-from modeling_module import TrainRequest, TrainerConfig, train
-from modeling_module.training.model_losses.loss_module import DistributionLoss
+from modeling_module import DistributionLoss, TrainRequest, TrainerConfig, train
 
 
 @pytest.mark.parametrize(

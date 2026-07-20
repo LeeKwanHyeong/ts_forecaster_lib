@@ -8,6 +8,7 @@ from .data import (
     build_dataset,
 )
 from .infer import LoadedPredictor, load_predictor, predict
+from .losses import DistributionLoss
 from .train import (
     ArtifactConfig,
     ArchitectureConfig,
@@ -30,6 +31,7 @@ __all__ = [
     "DataColumnConfig",
     "DataRequest",
     "DataWindowConfig",
+    "DistributionLoss",
     "ExoTSTArchitectureConfig",
     "ExogenousConfig",
     "LoadedPredictor",

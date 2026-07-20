@@ -5,7 +5,7 @@
 설치 후에는 아래처럼 사용합니다.
 
 ```python
-from modeling_module import train, load_predictor, predict, build_dataloader
+from modeling_module import DistributionLoss, train, load_predictor, predict, build_dataloader
 ```
 
 중요한 이름은 아래와 같습니다.
@@ -24,7 +24,7 @@ from modeling_module import train, load_predictor, predict, build_dataloader
 공식 public API는 아래를 기준으로 사용하면 됩니다.
 
 - 함수: `train`, `load_predictor`, `predict`, `build_dataset`, `build_dataloader`
-- 타입: `TrainRequest`, `TrainResult`, `DataRequest`
+- 타입: `TrainRequest`, `TrainResult`, `DataRequest`, `DistributionLoss`
 - nested config:
   `TrainerConfig`, `SSLConfig`, `RuntimeConfig`, `ArtifactConfig`,
   `DataWindowConfig`, `DataColumnConfig`, `ExogenousConfig`, `LoaderConfig`,
@@ -69,17 +69,17 @@ pip check
 
 아래 표는 public registry에 연결된 구현 범위입니다.
 
-| Family request | Canonical artifact | 구현된 학습/checkpoint mode | Continuous exogenous | PatchTST SSL |
-|---|---|---|---|---|
-| `patchtst` | `patchtst_base` | point, Normal, StudentT | past/future optional | `full`, `ssl_only` |
-| `patchtst` | `patchtst_quantile` | q10/q50/q90 | past/future optional | `full`, `ssl_only` |
-| `patchmixer` | `patchmixer_base` | point, Normal, StudentT | past/future optional | 미지원 |
-| `patchmixer` | `patchmixer_quantile` | q10/q50/q90 | past/future optional | 미지원 |
-| `titan` | `titan_base` | point, Normal, StudentT | past/future optional | 미지원 |
-| `titan` | `titan_lmm` | point, Normal, StudentT | past/future optional | 미지원 |
-| `titan` | `titan_seq2seq` | point, Normal, StudentT | past/future optional | 미지원 |
-| `exotst` | `exotst_base` | point, Normal, StudentT | past/future 모두 필수 | 미지원 |
-| `timexer` | `timexer_base` | point only | past 필수, future 금지 | 미지원 |
+| Family request | Canonical artifact | Status | 구현된 학습/checkpoint mode | Continuous exogenous | PatchTST SSL |
+|---|---|---|---|---|---|
+| `patchtst` | `patchtst_base` | 지원 | point, Normal, StudentT | past/future optional | `full`, `ssl_only` |
+| `patchtst` | `patchtst_quantile` | 지원 | q10/q50/q90 | past/future optional | `full`, `ssl_only` |
+| `patchmixer` | `patchmixer_base` | 지원 | point, Normal, StudentT | past/future optional | 미지원 |
+| `patchmixer` | `patchmixer_quantile` | 지원 | q10/q50/q90 | past/future optional | 미지원 |
+| `titan` | `titan_base` | Deprecated | point, Normal, StudentT | past/future optional | 미지원 |
+| `titan` | `titan_lmm` | Deprecated | point, Normal, StudentT | past/future optional | 미지원 |
+| `titan` | `titan_seq2seq` | Deprecated | point, Normal, StudentT | past/future optional | 미지원 |
+| `exotst` | `exotst_base` | 지원 | point, Normal, StudentT | past/future 모두 필수 | 미지원 |
+| `timexer` | `timexer_base` | 지원 | point only | past 필수, future 금지 | 미지원 |
 
 동작 규칙:
 
@@ -91,16 +91,25 @@ pip check
   feature로 인코딩해야 합니다.
 - public distribution checkpoint가 지원하는 분포는 `Normal`, `StudentT`입니다.
   `Poisson`, `Bernoulli`, `NegativeBinomial`, `Tweedie`는 data materialization 전에 거부합니다.
-- strict distribution E2E 복원 회귀 테스트는 현재 `patchtst_base`, `patchmixer_base`,
-  `titan_base`, `exotst_base`의 `Normal`/`StudentT`에 고정되어 있습니다. Titan LMM/Seq2Seq의
-  distribution 경로는 구현되어 있으며 point E2E smoke가 별도로 고정됩니다.
+- Titan은 신규 검증 matrix와 DSIO default에서 제외합니다. Registry key, 직접 학습과 지원
+  checkpoint load는 deprecation 기간 동안 유지하며 public 학습 요청은 `FutureWarning`을 냅니다.
 - point/distribution checkpoint prediction은 현재 `{"point": ...}`를 반환합니다. Quantile
   checkpoint는 `q10`, `q50`, `q90`과 `point=q50`을 반환합니다.
-- Distribution loss constructor는 아직 top-level stable public API가 아닙니다. 표의 distribution
-  항목은 현재 구현과 checkpoint compatibility 범위를 뜻합니다.
+- `DistributionLoss`는 top-level stable selector입니다. Public training/checkpoint 계약은
+  `Normal`, `StudentT`만 지원합니다.
 - `ssl.mode="full"`과 `ssl.mode="ssl_only"`는 request에 PatchTST artifact와 artifact `save_dir`가
   필요합니다. Mixed request에서는 SSL이 PatchTST에만 적용되고 다른 family는 supervised로
   실행됩니다. `ssl_only`는 PatchTST supervised checkpoint 없이 pretraining checkpoint만 만듭니다.
+
+Distribution 학습은 다음처럼 선택합니다.
+
+```python
+from modeling_module import DistributionLoss, TrainerConfig
+
+trainer = TrainerConfig(
+    loss=DistributionLoss(distribution="Normal"),
+)
+```
 
 ## Checkpoint Compatibility
 
@@ -197,8 +206,8 @@ print(result.ckpt_paths)
 ```python
 from modeling_module import (
     ArchitectureConfig,
+    PatchMixerArchitectureConfig,
     PatchTSTArchitectureConfig,
-    TitanArchitectureConfig,
 )
 
 req = TrainRequest(
@@ -206,7 +215,7 @@ req = TrainRequest(
         df=target_df,
         window=DataWindowConfig(lookback=104, horizon=27, freq="weekly"),
     ),
-    models=["patchtst_base", "titan_base"],
+    models=["patchtst_base", "patchmixer_base"],
     architecture=ArchitectureConfig(
         patchtst=PatchTSTArchitectureConfig(
             patch_len=13,
@@ -214,10 +223,11 @@ req = TrainRequest(
             d_model=384,
             n_layers=5,
         ),
-        titan=TitanArchitectureConfig(
-            d_model=512,
-            n_layers=5,
-            n_heads=8,
+        patchmixer=PatchMixerArchitectureConfig(
+            patch_len=13,
+            stride=6,
+            d_model=192,
+            e_layers=6,
         ),
     ),
     trainer=TrainerConfig(warmup_epochs=3, spike_epochs=2, base_lr=1e-3),
