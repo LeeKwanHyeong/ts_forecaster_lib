@@ -1,0 +1,3 @@
+# Overlay installed into the non-SELLM RTX 5090 validation venv.
+# The approved base GPU environment supplies the remaining runtime dependencies.
+scikit-learn==1.7.2 --hash=sha256:e5bf3d930aee75a65478df91ac1225ff89cd28e9ac7bd1196853a9229b6adb0b

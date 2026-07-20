@@ -230,6 +230,8 @@ Private wheel filename/ABI 정책은 다음과 같습니다.
 - native extension을 포함하지 않으므로 ABI tag는 `none`, platform tag는 `any`입니다. `.so`, `.pyd`,
   `.dll`, `.dylib`가 발견되면 `any` wheel 생성을 거부합니다.
 - release artifact에서는 기본 install gate를 유지합니다. `--skip-install-check`는 로컬 진단용 우회 옵션입니다.
+- RTX 5090 non-SELLM 환경은 [`docs/5090_non_sellm_bootstrap.md`](docs/5090_non_sellm_bootstrap.md)의
+  pinned overlay와 provenance/CUDA gate를 사용합니다.
 
 원하는 public wheel이 이미 있으면 직접 넘길 수도 있습니다.
 

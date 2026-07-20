@@ -138,6 +138,11 @@ Wrapper 뒤에 전달한 인수는 Python CLI로 그대로 넘어갑니다.
 
 5090에서는 CUDA 실행이 검증된 project environment를 `PYTHON_BIN`으로 명시합니다. `auto`는
 CUDA probe 실패 시 CPU로 fallback하므로 운영 학습은 `--device cuda`로 실패 경계를 고정합니다.
+Non-SELLM private wheel 환경은 repository root의
+[`docs/5090_non_sellm_bootstrap.md`](../../../docs/5090_non_sellm_bootstrap.md) 절차로 생성합니다.
+단, 이 runner는 checkout의 `src`를 import path 앞에 추가하므로 `PYTHON_BIN`의 설치 wheel을 직접
+검증하지 않습니다. 반드시 승인된 clean non-SELLM checkout에서 실행하고, private-wheel install
+gate와 runner smoke 결과를 서로 다른 검증 증거로 기록합니다.
 
 ```bash
 PYTHON_BIN=/path/to/project/python
