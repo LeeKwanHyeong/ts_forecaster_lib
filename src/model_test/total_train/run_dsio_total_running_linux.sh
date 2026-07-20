@@ -9,6 +9,7 @@ ARTIFACT_ROOT="${ARTIFACT_ROOT:-$REPO_ROOT/artifacts/total_train}"
 MODE="${MODE:-exo}"
 ENDO_MODELS="${ENDO_MODELS:-patchtst patchmixer titan}"
 EXO_MODELS="${EXO_MODELS:-exotst timexer}"
+SSL_MODE="${SSL_MODE:-sl_only}"
 CLEAN_OUTPUT="${CLEAN_OUTPUT:-0}"
 SAMPLE_PART_COUNT="${SAMPLE_PART_COUNT:-}"
 LOG_TO_FILE="${LOG_TO_FILE:-1}"
@@ -24,6 +25,7 @@ CMD=(
   "$PYTHON_BIN" "$REPO_ROOT/src/model_test/total_train/dsio_total_running.py"
   --mode "$MODE"
   --artifact-root "$ARTIFACT_ROOT"
+  --ssl-mode "$SSL_MODE"
 )
 
 if [[ ${#ENDO_MODELS_ARR[@]} -gt 0 ]]; then
@@ -52,6 +54,7 @@ echo "[run] ARTIFACT_ROOT=$ARTIFACT_ROOT"
 echo "[run] MODE=$MODE"
 echo "[run] ENDO_MODELS=$ENDO_MODELS"
 echo "[run] EXO_MODELS=$EXO_MODELS"
+echo "[run] SSL_MODE=$SSL_MODE"
 echo "[run] CLEAN_OUTPUT=$CLEAN_OUTPUT"
 echo "[run] SAMPLE_PART_COUNT=$SAMPLE_PART_COUNT"
 echo "[run] PYTORCH_CUDA_ALLOC_CONF=$PYTORCH_CUDA_ALLOC_CONF"
@@ -70,10 +73,3 @@ if [[ "$LOG_TO_FILE" == "1" ]]; then
 else
   exec "${CMD[@]}"
 fi
-
-
-#python /Users/igwanhyeong/PycharmProjects/ts_forecaster_lib/src/model_test/total_train/dsio_total_running.py \
-#  --mode exo \
-#  --exo-models exotst timexer \
-#  --sample-part-count 500 \
-#  --seed 42

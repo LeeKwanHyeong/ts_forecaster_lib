@@ -654,7 +654,8 @@ def run_exo(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Run DSIO weekly total training for endogenous-only and/or endogenous+exogenous models."
+        description="Run DSIO weekly total training for endogenous-only and/or exogenous models.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--mode", choices=["endo", "exo", "both"], default="both")
     parser.add_argument("--artifact-root", type=Path, default=REPO_ROOT / "artifacts" / "total_train")
@@ -668,7 +669,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--warmup-epochs", type=int, default=3)
     parser.add_argument("--spike-epochs", type=int, default=2)
     parser.add_argument("--lr", type=float, default=1e-3)
-    parser.add_argument("--ssl-mode", choices=["off", "sl_only", "full"], default="full")
+    parser.add_argument(
+        "--ssl-mode",
+        choices=["off", "sl_only", "full"],
+        default="sl_only",
+        help=(
+            "PatchTST SSL mode. Use full only for a request containing PatchTST; "
+            "the default ExoTST/TimeXer stages are supervised-only."
+        ),
+    )
     parser.add_argument("--ssl-pretrain-epochs", type=int, default=2)
     parser.add_argument("--ssl-mask-ratio", type=float, default=0.3)
     parser.add_argument("--ssl-loss-type", type=str, default="mse")
