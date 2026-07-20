@@ -53,7 +53,9 @@ from modeling_module import train, load_predictor, build_dataloader
 - request/result 타입: `TrainRequest`, `TrainResult`, `DataRequest`
 - nested config 타입:
   `TrainerConfig`, `SSLConfig`, `RuntimeConfig`, `ArtifactConfig`,
-  `DataWindowConfig`, `DataColumnConfig`, `ExogenousConfig`, `LoaderConfig`
+  `DataWindowConfig`, `DataColumnConfig`, `ExogenousConfig`, `LoaderConfig`,
+  `ArchitectureConfig`, `PatchTSTArchitectureConfig`, `PatchMixerArchitectureConfig`,
+  `TitanArchitectureConfig`, `ExoTSTArchitectureConfig`, `TimexerArchitectureConfig`
 
 권장 사용 방식은 dataclass 기반입니다.
 
@@ -92,6 +94,7 @@ public API 시그니처는 그대로 유지할 수 있습니다.
 - `titan_lmm`
 - `titan_seq2seq`
 - `exotst_base`
+- `timexer_base`
 
 family 이름으로도 요청할 수 있습니다.
 
@@ -99,6 +102,7 @@ family 이름으로도 요청할 수 있습니다.
 - `patchmixer`
 - `titan`
 - `exotst`
+- `timexer`
 
 예를 들어:
 
@@ -107,23 +111,38 @@ family 이름으로도 요청할 수 있습니다.
 
 ## Current Model Status
 
-아래 표는 현재 `modeling_module` public API 기준으로 실제 학습/체크포인트 복원 경로에 연결된 모델들입니다.
+아래 표는 public registry에 연결된 구현 범위입니다.
 
-| Family | Canonical Key | 역할 | 예측 타입 | Exogenous | 비고 |
-|---|---|---|---|---|---|
-| PatchTST | `patchtst_base` | 기본 supervised 모델 | point / distribution | optional | public API의 기본 fallback family |
-| PatchTST | `patchtst_quantile` | 분위수 예측 | quantile | optional | `models=["patchtst"]` 에 포함 |
-| PatchMixer | `patchmixer_base` | 기본 supervised 모델 | point / distribution | optional | public API 연결됨 |
-| PatchMixer | `patchmixer_quantile` | 분위수 예측 | quantile | optional | `models=["patchmixer"]` 에 포함 |
-| Titan | `titan_base` | family default Titan variant | point / distribution | optional | `models=["titan"]` 에 포함 |
-| Titan | `titan_lmm` | family default Titan variant | point / distribution | optional | `models=["titan"]` 에 포함 |
-| Titan | `titan_seq2seq` | family default Titan variant | point / distribution | optional | `models=["titan"]` 에 포함 |
-| ExoTST | `exotst_base` | exogenous 중심 모델 | point / distribution | required | past continuous exo + future exo 필요 |
+| Family | Canonical Key | 구현된 학습/checkpoint mode | Continuous exogenous | SSL |
+|---|---|---|---|---|
+| PatchTST | `patchtst_base` | point, Normal, StudentT | past/future optional | `full`, `ssl_only` |
+| PatchTST | `patchtst_quantile` | q10/q50/q90 | past/future optional | `full`, `ssl_only` |
+| PatchMixer | `patchmixer_base` | point, Normal, StudentT | past/future optional | 미지원 |
+| PatchMixer | `patchmixer_quantile` | q10/q50/q90 | past/future optional | 미지원 |
+| Titan | `titan_base` | point, Normal, StudentT | past/future optional | 미지원 |
+| Titan | `titan_lmm` | point, Normal, StudentT | past/future optional | 미지원 |
+| Titan | `titan_seq2seq` | point, Normal, StudentT | past/future optional | 미지원 |
+| ExoTST | `exotst_base` | point, Normal, StudentT | past/future 모두 필수 | 미지원 |
+| TimeXer | `timexer_base` | point only | past 필수, future 금지 | 미지원 |
 
 추가 메모:
 
-- `PatchTST` family는 현재 SSL pretrain + finetune (`ssl.mode="full"`) 경로가 가장 잘 연결되어 있습니다.
-- `ExoTST`는 `use_exogenous_mode=True` 여야 하고, `past_exo_cont_cols` 와 `future_exo_cont_cols` 가 모두 있어야 안전합니다.
+- `PatchTST`의 `full`/`ssl_only`는 artifact `save_dir`가 필수이며 다른 family-only request에는 사용할 수 없습니다.
+- mixed request에서는 SSL이 PatchTST stage에만 적용되고 다른 family는 supervised로 실행됩니다.
+  `ssl_only`는 PatchTST supervised checkpoint 없이 pretraining checkpoint만 만듭니다.
+- `ExoTST`는 `use_exogenous_mode=True`와 past/future continuous exogenous가 모두 필요합니다.
+- `TimeXer` v1은 past continuous exogenous만 사용하며 future/categorical exogenous와
+  quantile/distribution output을 거부합니다.
+- categorical past exogenous는 현재 모든 public family에서 fail-fast합니다.
+- checkpoint-safe distribution은 `Normal`, `StudentT`입니다. `Poisson`, `Bernoulli`,
+  `NegativeBinomial`, `Tweedie`는 data materialization 전에 거부합니다.
+- strict distribution E2E 복원은 현재 PatchTST/PatchMixer/Titan/ExoTST base 4종에 고정되어
+  있습니다. Titan LMM/Seq2Seq distribution 경로는 구현되어 있고 point E2E smoke가 고정됩니다.
+- point/distribution predictor는 현재 location을 `point`로 반환하며, quantile predictor는
+  `q10`, `q50`, `q90`과 `point=q50`을 반환합니다.
+- Distribution loss constructor는 아직 top-level stable public API가 아니며, 표의 distribution
+  항목은 구현/checkpoint compatibility 범위입니다.
+- `models` 생략 또는 빈 목록은 `patchtst_base`, `patchtst_quantile`로 확장됩니다.
 - `models=["titan"]` 는 현재 `titan_base`, `titan_lmm`, `titan_seq2seq` 를 함께 학습합니다.
 - artifact key를 직접 주면 family 전체가 아니라 그 모델만 학습됩니다.
   예: `models=["titan_lmm"]`, `models=["titan_seq2seq"]`, `models=["titan_base"]`, `models=["patchmixer_quantile"]`, `models=["patchtst_quantile"]`
@@ -187,11 +206,25 @@ python3 tools/build_private_wheel.py
 
 기본 동작:
 
-- 먼저 public wheel을 build
+- 현재 `src/modeling_module` 만 clean staging한 뒤 public wheel을 build
 - wheel을 unpack
 - `modeling_module/__init__.py` 와 `modeling_module/api/**/*.py` 만 source로 유지
 - 나머지 `modeling_module/**/*.py` 는 `.pyc` 로 컴파일 후 source 제거
 - `dist/private/` 아래에 private wheel 생성
+- 빈 임시 venv에 `--no-deps --no-index` 로 wheel만 설치해 metadata와 설치 경로를 검사
+- repository 밖의 격리 모드 Python에서 그 venv의 wheel과 기존 ML 의존성을 사용해 public import와
+  `build_dataset` smoke를 실행
+
+Private wheel filename/ABI 정책은 다음과 같습니다.
+
+- 기본 filename: `modeling_module-<version>-1private-cp<major><minor>-none-any.whl`
+  (CPython 3.12에서 빌드하면 `...-1private-cp312-none-any.whl`)
+- wheel build tag는 숫자로 시작해야 하며 기본값은 `1private`입니다. `private1`은 허용하지 않습니다.
+- internal `.pyc` 때문에 Python tag는 빌드한 CPython minor에 고정합니다. 정확한 bytecode magic도
+  `PRIVATE-BUILD.json`에 기록하고 모든 `.pyc`를 설치 전에 검사합니다.
+- native extension을 포함하지 않으므로 ABI tag는 `none`, platform tag는 `any`입니다. `.so`, `.pyd`,
+  `.dll`, `.dylib`가 발견되면 `any` wheel 생성을 거부합니다.
+- release artifact에서는 기본 install gate를 유지합니다. `--skip-install-check`는 로컬 진단용 우회 옵션입니다.
 
 원하는 public wheel이 이미 있으면 직접 넘길 수도 있습니다.
 
@@ -370,7 +403,8 @@ req.ssl = SSLConfig(
 )
 ```
 
-현재 기준으로 `full` / `ssl_only` 경로는 PatchTST family에서 가장 의미가 큽니다.
+`full`/`ssl_only`는 PatchTST artifact와 artifact `save_dir`가 모두 필요합니다. PatchTST가 없는
+request에는 `sl_only` 또는 `off`를 사용합니다.
 
 ## Inference
 
@@ -455,8 +489,9 @@ device를 생략하면 library가 자동으로 usable accelerator를 탐색합�
 
 중요한 계약:
 
-- single-model run이면 `primary_ckpt_path` 와 `best_ckpt_path` 가 채워집니다.
-- multi-model / family run이면 이 두 convenience field는 `None` 이고, 실제 결과는 `ckpt_paths` 를 사용해야 합니다.
+- 최종 supervised checkpoint가 정확히 하나 생성되면 `primary_ckpt_path`와 `best_ckpt_path`가
+  채워집니다.
+- 그 외에는 `ckpt_paths`를 사용하고, SSL-only 결과는 `pretrain_ckpt_paths`를 사용합니다.
 
 artifact directory에는 보통 아래가 생성됩니다.
 
@@ -480,55 +515,34 @@ artifact directory에는 보통 아래가 생성됩니다.
 
 ## DSIO Total Train Script
 
-리눅스 서버에서 장시간 학습을 안정적으로 돌릴 때는 notebook보다 운영용 Python 스크립트를 쓰는 편이 좋습니다.
+리눅스 서버에서는 notebook 대신
+[DSIO total-train runner guide](src/model_test/total_train/README.md)를 기준으로 실행합니다.
 
-- `src/model_test/total_train/dsio_total_running.py`
+현재 executable default는 `lookback=104`, `horizon=27`, endogenous/exogenous batch
+`1024/512`, `ssl_mode="sl_only"`입니다. 기본 model group은 다음 scenario로 나뉩니다.
 
-이 스크립트는 현재 DSIO 본사 데이터 기준 total train 실행용입니다.
+- `endo_only`: PatchTST, PatchMixer, Titan
+- `exo_future`: ExoTST
+- `exo_past_only`: TimeXer
 
-- `tb_master_target.parquet` 기반 endogenous-only 학습
-- `tb_master_target_exo.parquet` 우선, 없으면 `tb_master_exo.parquet` + target join 기반 endogenous + exogenous 학습
-- family 단위 `patchtst`, `patchmixer`, `titan` 전체 학습
-- `TrainRequest(architecture=...)` 기반 모델 구조 override 지원
-
-기본값은 현재 운영 기준 balanced weekly 설정입니다.
-
-- `lookback=104`
-- `endo_batch_size=2048`
-- `exo_batch_size=1024`
-- `warmup_epochs=3`
-- `spike_epochs=2`
-- `ssl_mode="full"`
-- `ssl_pretrain_epochs=2`
-
-예시:
+작은 preflight 예시:
 
 ```bash
-python src/model_test/total_train/dsio_total_running.py --mode both
-python src/model_test/total_train/dsio_total_running.py --mode endo
-python src/model_test/total_train/dsio_total_running.py --mode exo
+PYTHON_BIN=/path/to/project/python \
+ARTIFACT_ROOT="$PWD/artifacts/total_train_smoke" \
+MODE=exo \
+EXO_MODELS="exotst_base" \
+SAMPLE_PART_COUNT=8 \
+CLEAN_OUTPUT=1 \
+src/model_test/total_train/run_dsio_total_running_linux.sh \
+  --device cuda --exo-batch-size 32 \
+  --warmup-epochs 1 --spike-epochs 0
 ```
 
-자주 바꾸는 옵션은 CLI로 바로 조절할 수 있습니다.
-
-```bash
-python src/model_test/total_train/dsio_total_running.py \
-  --mode both \
-  --lookback 104 \
-  --endo-batch-size 2048 \
-  --exo-batch-size 1024 \
-  --num-workers 8 \
-  --patch-len 13 \
-  --stride 6 \
-  --patchtst-d-model 384 \
-  --patchmixer-d-model 256 \
-  --titan-d-model 384
-```
-
-artifact 기본 저장 경로는 아래입니다.
-
-- `artifacts/total_train/dsio/endo_only`
-- `artifacts/total_train/dsio/endo_plus_exo`
+기본 artifact root는 `artifacts/total_train`이며 scenario directory는 `endo_only`,
+`exo_future`, `exo_past_only`입니다. PatchTST full SSL은 PatchTST-only stage에
+`SSL_MODE=full`을 명시해 별도로 실행합니다. 5090 운영 실행에서는 `--device cuda`로 CPU fallback을
+막고, smoke root를 운영 artifact root와 분리합니다.
 
 ## Tests
 
@@ -549,5 +563,7 @@ python3 -m pytest -q
 ## Current Notes
 
 - backward-compatible flat dict style도 아직 동작하지만, 새 코드는 dataclass 스타일을 권장합니다.
-- ExoTST는 past continuous exogenous와 future exogenous가 모두 있어야 안전합니다.
+- ExoTST는 past/future continuous exogenous가 모두 필요합니다.
+- TimeXer v1은 past continuous exogenous-only 모델입니다.
+- categorical exogenous는 continuous channel로 인코딩하기 전에는 public API가 거부합니다.
 - Patch 기반 모델은 frequency별 `patch_len` 이상 `lookback` 이 필요합니다.

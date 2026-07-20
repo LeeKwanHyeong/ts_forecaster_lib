@@ -29,9 +29,12 @@ from modeling_module import train, load_predictor, predict, build_dataloader
   `TrainerConfig`, `SSLConfig`, `RuntimeConfig`, `ArtifactConfig`,
   `DataWindowConfig`, `DataColumnConfig`, `ExogenousConfig`, `LoaderConfig`,
   `ArchitectureConfig`, `PatchTSTArchitectureConfig`, `TitanArchitectureConfig`,
-  `PatchMixerArchitectureConfig`
+  `PatchMixerArchitectureConfig`, `ExoTSTArchitectureConfig`,
+  `TimexerArchitectureConfig`
 
 ## Installation
+
+Python 3.10 이상이 필요합니다. 새 환경에서는 dependency를 포함한 일반 설치를 권장합니다.
 
 기본 설치:
 
@@ -45,45 +48,71 @@ notebook 환경까지 같이 쓰려면:
 pip install "modeling-module[notebook]"
 ```
 
-이미 `torch`, CUDA, `sktime`, `gluonts`, `datasets` 같은 패키지가 깔려 있는 기존 ML 환경에서
-wheel만 교체하고 싶다면 dependency 재해결을 피하는 편이 안전합니다.
+추가 extra는 `[plot]`, `[survival]`, 그리고 이를 합친 `[all]`입니다.
+
+`--no-deps`는 wheel이 요구하는 dependency를 대상 환경이 이미 모두 충족하는 경우에만 사용합니다.
+설치 후에는 반드시 `pip check`로 확인합니다.
 
 ```bash
 pip install --no-deps --force-reinstall /path/to/modeling_module-0.1.1-py3-none-any.whl
+pip check
 ```
 
 즉:
 
 - 새 가상환경: 일반 `pip install ...`
-- 기존 GPU / 연구용 환경: 보통 `--no-deps` 로 library wheel만 교체
+- dependency를 외부에서 고정한 GPU 환경: 요구사항을 먼저 확인한 뒤에만 `--no-deps`
 
 개발 환경이나 editable install은 repository의 개발자 문서를 참고하면 됩니다.
 
 ## Supported Models
 
-현재 public registry 기준 canonical model key는 아래와 같습니다.
+아래 표는 public registry에 연결된 구현 범위입니다.
 
-- `patchtst_base`
-- `patchtst_quantile`
-- `patchmixer_base`
-- `patchmixer_quantile`
-- `titan_base`
-- `titan_lmm`
-- `titan_seq2seq`
-- `exotst_base`
-
-family 이름으로도 요청할 수 있습니다.
-
-- `patchtst`
-- `patchmixer`
-- `titan`
-- `exotst`
+| Family request | Canonical artifact | 구현된 학습/checkpoint mode | Continuous exogenous | PatchTST SSL |
+|---|---|---|---|---|
+| `patchtst` | `patchtst_base` | point, Normal, StudentT | past/future optional | `full`, `ssl_only` |
+| `patchtst` | `patchtst_quantile` | q10/q50/q90 | past/future optional | `full`, `ssl_only` |
+| `patchmixer` | `patchmixer_base` | point, Normal, StudentT | past/future optional | 미지원 |
+| `patchmixer` | `patchmixer_quantile` | q10/q50/q90 | past/future optional | 미지원 |
+| `titan` | `titan_base` | point, Normal, StudentT | past/future optional | 미지원 |
+| `titan` | `titan_lmm` | point, Normal, StudentT | past/future optional | 미지원 |
+| `titan` | `titan_seq2seq` | point, Normal, StudentT | past/future optional | 미지원 |
+| `exotst` | `exotst_base` | point, Normal, StudentT | past/future 모두 필수 | 미지원 |
+| `timexer` | `timexer_base` | point only | past 필수, future 금지 | 미지원 |
 
 동작 규칙:
 
-- `models=["patchtst"]` 처럼 family를 주면 해당 family의 기본 artifact들이 학습됩니다.
-- `models=["patchtst_quantile"]` 처럼 artifact key를 직접 주면 그 모델만 학습됩니다.
-- `models=["titan"]` 는 현재 `titan_base`, `titan_lmm`, `titan_seq2seq` 를 함께 학습합니다.
+- family key는 표에 나열된 canonical artifact로 확장됩니다.
+- artifact key를 직접 주면 해당 artifact만 학습합니다.
+- `models`를 생략하거나 빈 목록을 주면 `patchtst` family가 기본값이며
+  `patchtst_base`, `patchtst_quantile` 순서로 확장됩니다.
+- categorical past exogenous 입력은 현재 모든 public family에서 fail-fast합니다. 먼저 continuous
+  feature로 인코딩해야 합니다.
+- public distribution checkpoint가 지원하는 분포는 `Normal`, `StudentT`입니다.
+  `Poisson`, `Bernoulli`, `NegativeBinomial`, `Tweedie`는 data materialization 전에 거부합니다.
+- strict distribution E2E 복원 회귀 테스트는 현재 `patchtst_base`, `patchmixer_base`,
+  `titan_base`, `exotst_base`의 `Normal`/`StudentT`에 고정되어 있습니다. Titan LMM/Seq2Seq의
+  distribution 경로는 구현되어 있으며 point E2E smoke가 별도로 고정됩니다.
+- point/distribution checkpoint prediction은 현재 `{"point": ...}`를 반환합니다. Quantile
+  checkpoint는 `q10`, `q50`, `q90`과 `point=q50`을 반환합니다.
+- Distribution loss constructor는 아직 top-level stable public API가 아닙니다. 표의 distribution
+  항목은 현재 구현과 checkpoint compatibility 범위를 뜻합니다.
+- `ssl.mode="full"`과 `ssl.mode="ssl_only"`는 request에 PatchTST artifact와 artifact `save_dir`가
+  필요합니다. Mixed request에서는 SSL이 PatchTST에만 적용되고 다른 family는 supervised로
+  실행됩니다. `ssl_only`는 PatchTST supervised checkpoint 없이 pretraining checkpoint만 만듭니다.
+
+## Checkpoint Compatibility
+
+- 현재 포맷은 `modeling_module.ckpt.v3`입니다. Output mode, distribution, parameter order,
+  output multiplier와 loss 설정을 함께 저장하며 현재 artifact 검증에는 `strict=True`를 권장합니다.
+- `Normal`/`StudentT`는 저장 전후 head·loss·parameter names·state shape가 동일해야 합니다.
+- 실제 fixture 기준 legacy v2 PatchTST/PatchMixer distribution artifact만 구조적으로 복원되며,
+  유실된 historical loss option은 warning과 함께 기본값을 사용합니다. 복원 즉시 v3로 다시 저장하는
+  것을 권장합니다.
+- legacy v1과 Titan/ExoTST legacy distribution fixture는 필요한 identity/구조를 안전하게 추론할
+  수 없어 거부합니다. 저장된 head와 metadata가 충돌하면 `strict=False`에서도 point model로 부분
+  복원하지 않고 fail-closed합니다.
 
 ## Data Format
 
@@ -109,6 +138,10 @@ exogenous 사용 시에도 한 테이블로 학습할 수 있습니다.
 - 과거 구간에서는 `y` 와 `past_exo_*` 가 사용됩니다.
 - 미래 구간에서는 `future_exo_cont_cols` 가 known future covariate로 사용됩니다.
 - 미래 row에서는 `y` 가 `null` 이어도 됩니다.
+- future-exogenous width가 설정된 predictor에는 batch 공용 `(horizon, width)` 또는
+  `(batch, horizon, width)`를 전달할 수 있고 `future_exo_cb`도 지원합니다. 누락·unexpected input과
+  batch·horizon·width 오류는 model forward 전에 거부합니다.
+- categorical exogenous column은 현재 public training 계약에서 지원하지 않습니다.
 
 예시:
 
@@ -254,13 +287,16 @@ from modeling_module import predict
 pred = predict(result.primary_ckpt_path, batch, device="cpu", horizon=27)
 ```
 
-single-model run이면 `primary_ckpt_path` 가 채워집니다.
-family run이나 multi-model run이면 `ckpt_paths` 에서 원하는 모델 checkpoint를 선택해야 합니다.
+최종 supervised checkpoint가 정확히 하나 생성된 경우에만 `primary_ckpt_path`가 채워집니다.
+그 외에는 `ckpt_paths`에서 선택하고, SSL-only 결과는 `pretrain_ckpt_paths`를 사용합니다.
 
 ## Notes
 
 - 새 코드는 flat dict보다 dataclass 스타일을 권장합니다.
-- `ExoTST`는 `past_exo_cont_cols` 와 `future_exo_cont_cols` 가 모두 필요합니다.
+- `ExoTST`는 past/future continuous exogenous가 모두 필요합니다.
+- `TimeXer` v1은 past continuous exogenous만 사용하며 future/categorical exogenous와
+  quantile/distribution output을 거부합니다.
 - Patch 기반 모델은 frequency별 `patch_len` 이상 `lookback` 이 필요합니다.
-- `ssl.mode="full"` 경로는 현재 PatchTST family에서 가장 의미가 큽니다.
+- `ssl.mode="full"`/`"ssl_only"`는 request에 PatchTST target과 artifact directory가 필요하며,
+  mixed request에서는 PatchTST stage에만 적용됩니다.
 - 일부 배포 환경에서는 internal module이 sourceless compiled artifact 형태로 제공될 수 있습니다.
