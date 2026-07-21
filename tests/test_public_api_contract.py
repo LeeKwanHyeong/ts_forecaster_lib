@@ -55,6 +55,7 @@ def test_public_api_exports_official_surface():
         "predict",
         "build_dataset",
         "build_dataloader",
+        "forecast",
         "TrainRequest",
         "TrainResult",
         "DataRequest",
@@ -73,6 +74,9 @@ def test_public_api_exports_official_surface():
         "DataColumnConfig",
         "ExogenousConfig",
         "LoaderConfig",
+        "ForecastRequest",
+        "ForecastResult",
+        "ForecastRuntimeConfig",
     }
 
     for name in expected:

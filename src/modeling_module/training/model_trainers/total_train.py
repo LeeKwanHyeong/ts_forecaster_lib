@@ -16,8 +16,10 @@ from modeling_module.models.registry import (
     resolve_artifact_model_key,
 )
 from modeling_module.models.PatchMixer.common.configs import PatchMixerConfig
+from modeling_module.models.PatchMixer.original import PatchMixerOriginalConfig
 from modeling_module.models.PatchTST.common.configs import PatchTSTConfig
 from modeling_module.models.PatchTST.self_supervised.PatchTST import PatchTSTPretrainModel
+from modeling_module.models.SELLM.configs import SELLMConfig
 from modeling_module.models.TimeXer.configs import TimeXerConfig
 from modeling_module.models.Titan.common.configs import TitanConfig
 from modeling_module.models.model_builder import (
@@ -26,10 +28,12 @@ from modeling_module.models.model_builder import (
     build_titan_seq2seq,
     build_patch_mixer_quantile,
     build_patch_mixer,
+    build_patch_mixer_original,
     build_patchTST,
     build_patchTST_quantile,
     build_exotst,
     build_timexer,
+    build_sellm,
 )
 from modeling_module.training.config import SpikeLossConfig, TrainingConfig, StageConfig
 from modeling_module.training.model_losses.loss_module import (
@@ -44,6 +48,7 @@ from modeling_module.training.model_trainers.patchmixer_train import train_patch
 from modeling_module.training.model_trainers.patchtst_finetune import train_patchtst_finetune
 from modeling_module.training.model_trainers.patchtst_pretrain import train_patchtst_pretrain
 from modeling_module.training.model_trainers.patchtst_train import train_patchtst
+from modeling_module.training.model_trainers.sellm_train import train_sellm
 from modeling_module.training.model_trainers.timexer_train import train_timexer
 from modeling_module.training.model_trainers.titan_train import train_titan
 from .exotst_train import train_exotst
@@ -705,6 +710,93 @@ def _run_timexer(
     _store_result(results, result_name="TimeXer", best=best, model_key="timexer_base", family_key="timexer")
 
 
+def _run_sellm(
+    *,
+    results: Dict[str, Dict],
+    freq: str,
+    train_loader,
+    val_loader,
+    point_train_cfg: TrainingConfig,
+    stages: List[StageConfig],
+    device: str,
+    lookback: int,
+    horizon: int,
+    patch_len: int,
+    use_exogenous_mode: bool,
+    exo_dim: int,
+    future_exo_cb: Optional[Callable],
+    past_cont_dim: int,
+    past_cat_dim: int,
+    save_root: Optional[Path] = None,
+    requested_artifact_keys: Optional[Iterable[str]] = None,
+    architecture_override: Optional[Mapping[str, Any]] = None,
+    **kwargs,
+):
+    """SELLM runner for semantic-enhanced point forecasting."""
+
+    requested = _requested_target_set(requested_artifact_keys)
+    if not _wants_artifact(requested, "sellm_base"):
+        return
+
+    if int(past_cat_dim) > 0:
+        print(
+            "[WARN] SELLM v1 ignores categorical past exogenous inputs. "
+            "Encode them as continuous/future features if they should affect the forecast."
+        )
+    if use_exogenous_mode and int(past_cont_dim) > 0 and int(exo_dim) <= 0 and future_exo_cb is None:
+        print(
+            "[WARN] SELLM v1 uses future continuous exogenous inputs only; "
+            "past_exo_cont will be ignored for this artifact."
+        )
+
+    loss_obj = getattr(point_train_cfg, "loss", None)
+    mode = infer_supervised_mode(loss_obj)
+    if mode != "point":
+        raise NotImplementedError(f"[total_train] SELLM v1 supports only point mode, got {mode!r}.")
+
+    cfg_kwargs = asdict(point_train_cfg)
+    cfg_kwargs["loss"] = loss_obj
+    cfg_kwargs.update(
+        dict(
+            y_dim=1,
+            future_exo_dim=(max(int(exo_dim), 0) if use_exogenous_mode else 0),
+            token_len=max(int(patch_len), 1),
+            use_exogenous_mode=bool(use_exogenous_mode),
+        )
+    )
+    if architecture_override:
+        cfg_kwargs.update({key: value for key, value in dict(architecture_override).items() if value is not None})
+
+    sellm_cfg = SELLMConfig(**cfg_kwargs)
+    sellm_model = build_sellm(sellm_cfg).to(device)
+
+    llm_runtime = sellm_cfg.llm_source if sellm_cfg.use_pretrained_llm else "fallback"
+    print(
+        f"SELLM ({freq.capitalize()}) use_pretrained_llm={sellm_cfg.use_pretrained_llm} "
+        f"llm_runtime={llm_runtime}"
+    )
+    best = train_sellm(
+        model=sellm_model,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        stages=list(stages),
+        train_cfg=point_train_cfg,
+        device=device,
+    )
+
+    if save_root:
+        ckpt_path = _make_ckpt_path(save_root, freq, "SELLMBase", lookback, horizon)
+        save_model(
+            sellm_model,
+            sellm_cfg,
+            ckpt_path,
+            extra_meta={"model_key": "sellm_base", "family_key": "sellm"},
+        )
+        best["ckpt_path"] = str(ckpt_path)
+
+    _store_result(results, result_name="SELLM", best=best, model_key="sellm_base", family_key="sellm")
+
+
 def _run_patchtst(
     *,
     results: Dict[str, Dict],
@@ -1217,7 +1309,7 @@ def _run_patchmixer(
     requested_artifact_keys: Optional[Iterable[str]] = None,
     architecture_override: Optional[Mapping[str, Any]] = None,
 ):
-    """PatchMixer (Base/Dist + Quantile) runner."""
+    """PatchMixer enhanced and canonical-original artifact runner."""
     if stages is None:
         stages = [StageConfig(epochs=1, lr=1e-4, spike_enabled=False)]
 
@@ -1225,7 +1317,18 @@ def _run_patchmixer(
     mode, out_mul, param_names, dist_name = _infer_mode_and_dist(loss_point_obj)
     requested = _requested_target_set(requested_artifact_keys)
     run_base = _wants_artifact(requested, "patchmixer_base")
+    run_original = _wants_artifact(requested, "patchmixer_original")
     run_quantile = _wants_artifact(requested, "patchmixer_quantile")
+
+    if run_original and mode != "point":
+        raise NotImplementedError(
+            "PatchMixerOriginal supports point loss only, "
+            f"got supervised mode {mode!r}."
+        )
+    if run_original and use_exogenous_mode:
+        raise NotImplementedError(
+            "PatchMixerOriginal is an endogenous-only baseline."
+        )
 
     quantiles = (0.1, 0.5, 0.9)
     loss_q_obj = coerce_quantile_loss(loss_quantile, quantiles=quantiles)
@@ -1248,8 +1351,10 @@ def _run_patchmixer(
         enc_in=1,
         d_model=128,
         e_layers=6,
+        mixer_kernel_size=5,
         patch_len=patch_len,
         stride=stride,
+        dropout=0.1,
         f_out=256,
         head_hidden=256,
 
@@ -1338,6 +1443,47 @@ def _run_patchmixer(
             family_key="patchmixer",
         )
 
+    if run_original:
+        pm_original_cfg = PatchMixerOriginalConfig.from_config(pm_kwargs)
+        pm_original_model = build_patch_mixer_original(pm_original_cfg)
+        original_train_cfg = replace(point_train_cfg, use_exogenous_mode=False)
+
+        print(f"PatchMixer Original ({freq.capitalize()}) mode=point")
+        best_pm_original = train_patchmixer(
+            pm_original_model,
+            train_loader,
+            val_loader,
+            device=device,
+            train_cfg=original_train_cfg,
+            stages=list(stages),
+            future_exo_cb=None,
+        )
+        if save_root:
+            ckpt_path = _make_ckpt_path(
+                save_root,
+                freq,
+                "PatchMixerOriginal",
+                lookback,
+                horizon,
+            )
+            save_model(
+                pm_original_model,
+                pm_original_cfg,
+                ckpt_path,
+                extra_meta={
+                    "model_key": "patchmixer_original",
+                    "family_key": "patchmixer",
+                },
+            )
+            best_pm_original["ckpt_path"] = str(ckpt_path)
+        _store_result(
+            results,
+            result_name="PatchMixer Original",
+            best=best_pm_original,
+            model_key="patchmixer_original",
+            family_key="patchmixer",
+        )
+
     if run_quantile:
         pm_q_cfg = PatchMixerConfig(**pm_kwargs)
         pm_q_cfg.loss = loss_q_obj
@@ -1377,6 +1523,7 @@ MODEL_REGISTRY: Dict[str, Callable] = {
     "patchmixer": _run_patchmixer,
     "exotst": _run_exotst,
     "timexer": _run_timexer,
+    "sellm": _run_sellm,
 }
 
 
@@ -1602,6 +1749,8 @@ def run_total_train(
         elif m == "timexer":
             # TimeXer v1 intentionally ignores the library's future-exo fallback callback.
             kwargs.update(dict(patch_len=freq_spec.patch_len, exo_dim=0, future_exo_cb=None))
+        elif m == "sellm":
+            kwargs.update(dict(patch_len=freq_spec.patch_len))
 
         MODEL_REGISTRY[m](**kwargs)
         gc.collect()

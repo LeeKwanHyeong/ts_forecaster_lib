@@ -46,6 +46,12 @@ def _rebuild_patchmixer_weekly(cfgd: dict):
     return PatchMixerConfigWeekly(**cfgd)
 
 
+def _rebuild_patchmixer_original(cfgd: dict):
+    from modeling_module.models.PatchMixer.original import PatchMixerOriginalConfig
+
+    return PatchMixerOriginalConfig.from_config(cfgd)
+
+
 def _rebuild_titan(cfgd: dict):
     return TitanConfig(**cfgd)
 
@@ -61,6 +67,7 @@ _REBUILDERS_BY_CLS = {
     # PatchMixer
     "PatchMixerConfigMonthly": _rebuild_patchmixer_monthly,
     "PatchMixerConfigWeekly": _rebuild_patchmixer_weekly,
+    "PatchMixerOriginalConfig": _rebuild_patchmixer_original,
     # Titan
     "TitanConfig": _rebuild_titan,
     # TimeXer
@@ -390,6 +397,10 @@ def build_checkpoint_payload(
         "torch_version": torch.__version__,
         "saved_at": datetime.now(timezone.utc).isoformat(),
     }
+    for attr in ("architecture_variant", "upstream_repository", "upstream_commit"):
+        value = getattr(model, attr, None)
+        if value is not None:
+            meta[attr] = _sanitize(value)
     if extra_meta:
         meta.update(_sanitize(dict(extra_meta)))
 
@@ -522,7 +533,7 @@ def _canonical_model_key(name: str) -> str:
 
     # 이미 builders가 snake_case로 들어오는 경우
     if sl in {
-        "patchmixer_base", "patchmixer_quantile", "patchmixer_dist"
+        "patchmixer_base", "patchmixer_original", "patchmixer_quantile", "patchmixer_dist",
         "titan_base", "titan_lmm", "titan_seq2seq",
         "patchtst_base", "patchtst_quantile", 'exotst_base', 'timexer_base'
     }:
@@ -536,6 +547,8 @@ def _canonical_model_key(name: str) -> str:
     if "patchtst" in sl and "dist" in sl:
         return "patchtst_dist"
 
+    if "patchmixer" in sl and ("original" in sl or "canonical" in sl or "upstream" in sl):
+        return "patchmixer_original"
     if "patchmixer" in sl and "quant" in sl:
         return "patchmixer_quantile"
     if "patchmixer" in sl:

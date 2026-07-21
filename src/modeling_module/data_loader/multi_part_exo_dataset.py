@@ -1,12 +1,16 @@
-from typing import Optional, List, Dict, Tuple, Sequence, Callable, Any
+from datetime import date, datetime
+from typing import Any, Callable, Dict, List, Literal, Optional, Sequence, Tuple
 
 import numpy as np
 import polars as pl
 import torch
 from torch.utils.data import Dataset
-from datetime import datetime, timedelta
-
-from modeling_module.utils.date_util import DateUtil
+from modeling_module.data_loader.temporal import (
+    add_period,
+    lookback_periods,
+    normalize_period_key,
+    normalize_temporal_frame,
+)
 
 
 # -----------------------------
@@ -28,44 +32,8 @@ def identity_date_indexer(x: int) -> int:
 
 
 def _add_time(dt_int: int, amount: int, freq: str) -> int:
-    """
-    정수형 날짜 포맷(YYYYMM, YYYYMMDD, YYYYWW 등)에 시간을 더하거나 뺍니다.
-    """
-    s = str(dt_int)
-
-    if freq == "hourly":
-        fmt = "%Y%m%d%H"
-        dt_obj = datetime.strptime(s, fmt)
-        new_dt = dt_obj + timedelta(hours=amount)
-        return int(new_dt.strftime(fmt))
-
-    if freq == "daily":
-        fmt = "%Y%m%d"
-        dt_obj = datetime.strptime(s, fmt)
-        new_dt = dt_obj + timedelta(days=amount)
-        return int(new_dt.strftime(fmt))
-
-    if freq == "weekly":
-        if DateUtil:
-            return DateUtil.add_weeks_yyyyww(dt_int, amount)
-        raise ImportError("Weekly logic requires DateUtil module.")
-
-    if freq == "monthly":
-        if DateUtil:
-            return DateUtil.add_months_yyyymm(dt_int, amount)
-
-        y = dt_int // 100
-        m = dt_int % 100
-        m += amount
-        while m < 1:
-            m += 12
-            y -= 1
-        while m > 12:
-            m -= 12
-            y += 1
-        return y * 100 + m
-
-    return dt_int
+    """Shift a canonical integer time key by ``amount`` periods."""
+    return add_period(dt_int, amount, freq)
 
 
 def _generate_time_seq(plan_dt: int, length: int, freq: str) -> np.ndarray:
@@ -73,12 +41,84 @@ def _generate_time_seq(plan_dt: int, length: int, freq: str) -> np.ndarray:
     기준 날짜(plan_dt) '직전'부터 과거로 length 만큼의 날짜 시퀀스를 생성합니다.
     반환은 과거 -> 최근 오름차순.
     """
-    seq = []
-    current = _add_time(plan_dt, -1, freq)
-    for _ in range(length):
-        seq.append(current)
-        current = _add_time(current, -1, freq)
-    return np.asarray(seq[::-1], dtype=np.int64)
+    return lookback_periods(plan_dt, length, freq)
+
+
+def _select_series_frame(
+    df: pl.DataFrame,
+    id_col: str,
+    series_ids: Optional[Sequence[str]],
+    *,
+    unknown_series_policy: Literal["error", "ignore"],
+) -> pl.DataFrame:
+    """Select series deterministically for anchored inference.
+
+    ``None`` selects all series in canonical string order. Explicit IDs retain
+    their first-occurrence request order and unknown IDs fail by default.
+    """
+    if id_col not in df.columns:
+        raise KeyError(f"id_col='{id_col}' not found in df.columns")
+    if unknown_series_policy not in {"error", "ignore"}:
+        raise ValueError("unknown_series_policy must be 'error' or 'ignore'")
+
+    normalized = df.with_columns(pl.col(id_col).cast(pl.String))
+    available = set(normalized[id_col].unique().to_list())
+    if series_ids is None:
+        requested = sorted(available)
+    else:
+        requested = list(dict.fromkeys(str(value) for value in series_ids))
+        if not requested:
+            raise ValueError("series_ids must not be empty; use None to select all series")
+
+    unknown = [series_id for series_id in requested if series_id not in available]
+    if unknown and unknown_series_policy == "error":
+        raise ValueError(f"Unknown series_ids: {unknown}")
+    selected = [series_id for series_id in requested if series_id in available]
+    if not selected:
+        raise ValueError("series_ids selection contains no known series")
+    return pl.concat(
+        [normalized.filter(pl.col(id_col) == series_id) for series_id in selected],
+        how="vertical",
+    )
+
+
+def _lookup_float_sequence(
+    query_dates: Sequence[int],
+    value_map: Dict[int, float],
+    *,
+    fill_missing: str,
+    target_back_steps: int,
+    freq: str,
+    earliest: int,
+) -> np.ndarray:
+    """Resolve a float sequence using the configured missing-value policy."""
+    output = np.empty(len(query_dates), dtype=np.float32)
+    for index, current_date in enumerate(query_dates):
+        value = value_map.get(int(current_date))
+        if value is not None and np.isfinite(value):
+            output[index] = value
+            continue
+        if fill_missing == "zero":
+            output[index] = 0.0
+            continue
+        if fill_missing == "nan":
+            output[index] = np.nan
+            continue
+
+        previous = int(current_date)
+        found = False
+        for _ in range(target_back_steps):
+            previous = _add_time(previous, -1, freq)
+            if previous < earliest:
+                break
+            previous_value = value_map.get(previous)
+            if previous_value is not None and np.isfinite(previous_value):
+                output[index] = previous_value
+                found = True
+                break
+        if not found:
+            output[index] = 0.0
+    return output
 
 
 # ============================================================
@@ -106,6 +146,7 @@ class MultiPartExoTrainingDataset(Dataset):
         qty_col: str = "y",
         past_exo_cont_cols: Optional[Sequence[str]] = None,
         past_exo_cat_cols: Optional[Sequence[str]] = None,
+        future_exo_cont_cols: Optional[Sequence[str]] = None,
         future_exo_cb: Optional[Callable] = None,  # kept for signature compatibility
         date_indexer: Optional[Callable[[int], int]] = None,
         cat_indexers: Optional[Dict[str, Any]] = None,
@@ -120,6 +161,7 @@ class MultiPartExoTrainingDataset(Dataset):
 
         self.past_exo_cont_cols = list(past_exo_cont_cols) if past_exo_cont_cols else []
         self.past_exo_cat_cols = list(past_exo_cat_cols) if past_exo_cat_cols else []
+        self.future_exo_cont_cols = list(future_exo_cont_cols) if future_exo_cont_cols else []
 
         self.future_exo_cb = future_exo_cb
         self.date_indexer = date_indexer or identity_date_indexer
@@ -136,7 +178,8 @@ class MultiPartExoTrainingDataset(Dataset):
         if self.qty_col not in df.columns:
             raise KeyError(f"qty_col='{self.qty_col}' not found in df.columns")
 
-        for g in df.partition_by(self.id_col):
+        normalized_df = normalize_temporal_frame(df, self.date_col, self.freq)
+        for g in normalized_df.partition_by(self.id_col, maintain_order=True):
             g = g.sort(self.date_col)
             uid = str(g[self.id_col][0])
 
@@ -158,6 +201,15 @@ class MultiPartExoTrainingDataset(Dataset):
                 if cont_list else np.zeros((T, 0), dtype=np.float32)
             )
 
+            future_cont_list: List[np.ndarray] = []
+            for col in self.future_exo_cont_cols:
+                if col in g.columns:
+                    future_cont_list.append(_to_numpy(g[col]).astype(np.float32, copy=False))
+            future_exo_cont = (
+                np.stack(future_cont_list, axis=-1).astype(np.float32, copy=False)
+                if future_cont_list else np.zeros((T, 0), dtype=np.float32)
+            )
+
             # Past categorical exo: [T, E_cat] int64
             cat_list: List[np.ndarray] = []
             for col in self.past_exo_cat_cols:
@@ -177,7 +229,13 @@ class MultiPartExoTrainingDataset(Dataset):
                 if cat_list else np.zeros((T, 0), dtype=np.int64)
             )
 
-            self.series[uid] = {"y": y_all, "d": d_all, "exo_cont": exo_cont, "exo_cat": exo_cat}
+            self.series[uid] = {
+                "y": y_all,
+                "d": d_all,
+                "exo_cont": exo_cont,
+                "exo_cat": exo_cat,
+                "future_exo_cont": future_exo_cont,
+            }
 
             n_windows = T - self.lookback - self.horizon + 1
             if n_windows <= 0:
@@ -185,6 +243,8 @@ class MultiPartExoTrainingDataset(Dataset):
 
             self.id_to_indices[uid] = []
             for i in range(n_windows):
+                if not np.isfinite(y_all[i:i + self.lookback + self.horizon]).all():
+                    continue
                 gidx = len(self.index_map)
                 self.index_map.append((uid, i))
                 self.id_to_indices[uid].append(gidx)
@@ -200,6 +260,7 @@ class MultiPartExoTrainingDataset(Dataset):
         d_all: np.ndarray = pack["d"]           # int64
         exo_cont: np.ndarray = pack["exo_cont"] # float32, (T, E_cont)
         exo_cat: np.ndarray = pack["exo_cat"]   # int64,   (T, E_cat)
+        future_exo_cont: np.ndarray = pack["future_exo_cont"]
 
         L = self.lookback
         H = self.horizon
@@ -208,6 +269,7 @@ class MultiPartExoTrainingDataset(Dataset):
         y_win = y_all[i + L:i + L + H]       # (H,) float32
         pe_cont = exo_cont[i:i + L]          # (L, E_cont) float32
         pe_cat = exo_cat[i:i + L]            # (L, E_cat)  int64
+        fe_cont = future_exo_cont[i + L:i + L + H]
 
         last_dt = int(d_all[i + L - 1])
         next_dt = _add_time(last_dt, 1, self.freq)
@@ -218,7 +280,10 @@ class MultiPartExoTrainingDataset(Dataset):
         pe_cont_t = torch.from_numpy(pe_cont)          # float32
         pe_cat_t = torch.from_numpy(pe_cat)            # int64 == torch.long
 
-        return x, y, uid, start_idx, pe_cont_t, pe_cat_t
+        future_payload: int | torch.Tensor = start_idx
+        if fe_cont.shape[-1] > 0:
+            future_payload = torch.from_numpy(fe_cont)
+        return x, y, uid, future_payload, pe_cont_t, pe_cat_t
 
 
 # ============================================================
@@ -239,7 +304,7 @@ class MultiPartExoAnchoredInferenceDataset(Dataset):
         df: pl.DataFrame,
         lookback: int,
         horizon: int,
-        plan_dt: int,
+        plan_dt: date | datetime | int,
         freq: str,
         *,
         id_col: str = "unique_id",
@@ -247,6 +312,9 @@ class MultiPartExoAnchoredInferenceDataset(Dataset):
         qty_col: str = "y",
         past_exo_cont_cols: Optional[Sequence[str]] = None,
         past_exo_cat_cols: Optional[Sequence[str]] = None,
+        future_exo_cont_cols: Optional[Sequence[str]] = None,
+        series_ids: Optional[Sequence[str]] = None,
+        unknown_series_policy: Literal["error", "ignore"] = "error",
         fill_missing: str = "ffill",
         target_back_steps: int = 100,
         future_exo_cb: Optional[Callable] = None,
@@ -255,8 +323,8 @@ class MultiPartExoAnchoredInferenceDataset(Dataset):
     ):
         self.lookback = int(lookback)
         self.horizon = int(horizon)
-        self.plan_dt = int(plan_dt)
         self.freq = freq.lower()
+        self.plan_dt = normalize_period_key(plan_dt, self.freq)
 
         self.id_col = id_col
         self.date_col = date_col
@@ -264,6 +332,7 @@ class MultiPartExoAnchoredInferenceDataset(Dataset):
 
         self.past_exo_cont_cols = list(past_exo_cont_cols) if past_exo_cont_cols else []
         self.past_exo_cat_cols = list(past_exo_cat_cols) if past_exo_cat_cols else []
+        self.future_exo_cont_cols = list(future_exo_cont_cols) if future_exo_cont_cols else []
 
         self.fill_missing = fill_missing
         self.target_back_steps = int(target_back_steps)
@@ -280,9 +349,16 @@ class MultiPartExoAnchoredInferenceDataset(Dataset):
         self.past_exo_cats: List[np.ndarray] = []
         self.future_exo_conts: List[np.ndarray] = []
 
+        normalized_df = normalize_temporal_frame(df, self.date_col, self.freq)
+        selected_df = _select_series_frame(
+            normalized_df,
+            self.id_col,
+            series_ids,
+            unknown_series_policy=unknown_series_policy,
+        )
         win_dates = _generate_time_seq(self.plan_dt, self.lookback, self.freq)
 
-        for g in df.partition_by(self.id_col):
+        for g in selected_df.partition_by(self.id_col, maintain_order=True):
             uid = str(g[self.id_col][0])
 
             dts = _to_numpy(g[self.date_col]).astype(np.int64, copy=False)
@@ -418,15 +494,30 @@ class MultiPartExoAnchoredInferenceDataset(Dataset):
             start_idx = int(self.date_indexer(next_dt))
             self.start_idxs.append(start_idx)
 
-            fe = np.zeros((self.horizon, 0), dtype=np.float32)
-            if self.future_exo_cb is not None:
-                res = self.future_exo_cb(start_idx, self.horizon, device="cpu")
-                if isinstance(res, torch.Tensor):
-                    fe = res.detach().cpu().to(torch.float32).numpy()
-                else:
-                    fe = np.asarray(res, dtype=np.float32)
-                if fe.ndim != 2 or fe.shape[0] != self.horizon:
-                    raise ValueError(f"future_exo_cb must return (H, E). got {fe.shape}")
+            future_dates = np.asarray(
+                [_add_time(self.plan_dt, step, self.freq) for step in range(self.horizon)],
+                dtype=np.int64,
+            )
+            future_cont_list: List[np.ndarray] = []
+            for col in self.future_exo_cont_cols:
+                if col not in g.columns:
+                    continue
+                values = _to_numpy(g[col]).astype(np.float32, copy=False)
+                value_map = {int(dt): float(value) for dt, value in zip(dts, values)}
+                future_cont_list.append(
+                    _lookup_float_sequence(
+                        future_dates,
+                        value_map,
+                        fill_missing=self.fill_missing,
+                        target_back_steps=self.target_back_steps,
+                        freq=self.freq,
+                        earliest=earliest,
+                    )
+                )
+            fe = (
+                np.stack(future_cont_list, axis=-1).astype(np.float32, copy=False)
+                if future_cont_list else np.zeros((self.horizon, 0), dtype=np.float32)
+            )
 
             self.inputs.append(x.astype(np.float32, copy=False))
             self.past_exo_conts.append(pe_cont_mat)
@@ -446,4 +537,6 @@ class MultiPartExoAnchoredInferenceDataset(Dataset):
         start_idx = int(self.start_idxs[idx])
         uid = self.ids[idx]
 
-        return x, y_dummy, uid, start_idx, peC, peK
+        fe = torch.from_numpy(self.future_exo_conts[idx])
+        future_payload: int | torch.Tensor = fe if fe.shape[-1] > 0 else start_idx
+        return x, y_dummy, uid, future_payload, peC, peK

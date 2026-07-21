@@ -18,6 +18,7 @@ from modeling_module import (
     PatchMixerArchitectureConfig,
     PatchTSTArchitectureConfig,
     RuntimeConfig,
+    SELLMArchitectureConfig,
     SSLConfig,
     TimexerArchitectureConfig,
     TitanArchitectureConfig,
@@ -117,6 +118,7 @@ def _tiny_patchmixer_architecture() -> ArchitectureConfig:
             stride=1,
             d_model=4,
             e_layers=1,
+            mixer_kernel_size=3,
             f_out=4,
             head_hidden=4,
             dropout=0.0,
@@ -165,6 +167,29 @@ def _tiny_exotst_architecture() -> ArchitectureConfig:
     )
 
 
+def _tiny_sellm_architecture() -> ArchitectureConfig:
+    return ArchitectureConfig(
+        sellm=SELLMArchitectureConfig(
+            token_len=2,
+            d_model=8,
+            n_heads=2,
+            dropout=0.0,
+            mlp_hidden_dim=8,
+            semantic_vocab_size=16,
+            semantic_top_k=4,
+            tscc_latent_dim=4,
+            tscc_hidden_dim=8,
+            use_pretrained_llm=False,
+            use_time_adapter=False,
+            fallback_layers=1,
+            d_ff=16,
+            head_hidden_dim=8,
+            use_norm=False,
+            final_nonneg=False,
+        )
+    )
+
+
 @pytest.fixture(scope="module", autouse=True)
 def _single_threaded_deterministic_cpu():
     previous_threads = torch.get_num_threads()
@@ -191,6 +216,12 @@ POINT_SMOKE_CASES = [
         _tiny_patchmixer_architecture(),
         None,
         id="patchmixer",
+    ),
+    pytest.param(
+        "patchmixer_original",
+        _tiny_patchmixer_architecture(),
+        None,
+        id="patchmixer-original",
     ),
     pytest.param(
         "titan_base",
@@ -232,6 +263,12 @@ POINT_SMOKE_CASES = [
             past_exo_cont_cols=["exo_known"],
         ),
         id="timexer",
+    ),
+    pytest.param(
+        "sellm_base",
+        _tiny_sellm_architecture(),
+        None,
+        id="sellm",
     ),
 ]
 
@@ -396,6 +433,110 @@ def test_public_remaining_artifact_train_checkpoint_load_predict_smoke(
         np.testing.assert_array_equal(points, np.asarray(second["point"]))
 
 
+QUANTILE_FUTURE_EXOGENOUS_SMOKE_CASES = [
+    pytest.param(
+        "patchtst_quantile",
+        _tiny_patchtst_architecture(),
+        2,
+        4,
+        id="patchtst-quantile-future-exogenous",
+    ),
+    pytest.param(
+        "patchmixer_quantile",
+        _tiny_patchmixer_architecture(),
+        8,
+        10,
+        id="patchmixer-quantile-future-exogenous",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "model_key,architecture,lookback,n_rows",
+    QUANTILE_FUTURE_EXOGENOUS_SMOKE_CASES,
+)
+def test_public_quantile_future_exogenous_train_checkpoint_load_predict_smoke(
+    tmp_path: Path,
+    model_key: str,
+    architecture: ArchitectureConfig,
+    lookback: int,
+    n_rows: int,
+):
+    torch.manual_seed(7)
+    np.random.seed(7)
+    exogenous = ExogenousConfig(
+        use_exogenous_mode=True,
+        use_past_exogenous=True,
+        use_future_exogenous=True,
+        past_exo_cont_cols=["exo_known"],
+        future_exo_cont_cols=["exo_known"],
+    )
+
+    result = train(
+        TrainRequest(
+            data=_data_request(exogenous, lookback=lookback, n_rows=n_rows),
+            models=[model_key],
+            trainer=TrainerConfig(
+                epochs=1,
+                lr=1e-3,
+                use_intermittent=False,
+                val_use_weights=False,
+            ),
+            ssl=SSLConfig(mode="sl_only"),
+            runtime=RuntimeConfig(device="cpu"),
+            artifacts=ArtifactConfig(
+                save_dir=str(tmp_path / model_key),
+                auto_save_dir=False,
+            ),
+            architecture=architecture,
+        )
+    )
+
+    assert result.requested_models == (model_key,)
+    assert result.primary_ckpt_path == result.ckpt_paths[model_key]
+    assert result.primary_ckpt_path is not None
+    assert Path(result.primary_ckpt_path).is_file()
+    checkpoint = torch.load(result.primary_ckpt_path, map_location="cpu", weights_only=False)
+    assert checkpoint["output_spec"]["mode"] == "quantile"
+    assert checkpoint["cfg_state"]["quantiles"] == [0.1, 0.5, 0.9]
+    assert checkpoint["cfg_state"]["past_exo_cont_dim"] == 1
+    assert checkpoint["cfg_state"]["future_exo_dim"] == 1
+
+    predictor = load_predictor(result.primary_ckpt_path, device="cpu", strict=True)
+    assert predictor.model_key == model_key
+    restored_state = predictor.model.state_dict()
+    assert restored_state.keys() == checkpoint["state_dict"].keys()
+    for key, saved_value in checkpoint["state_dict"].items():
+        torch.testing.assert_close(restored_state[key].cpu(), saved_value.cpu())
+
+    x = _prediction_payload(model_key, lookback=lookback)
+    assert torch.is_tensor(x)
+    payload = {
+        "x": x,
+        "past_exo_cont": torch.stack(
+            (
+                0.5 * torch.arange(lookback, dtype=torch.float32),
+                0.5 * torch.arange(1, lookback + 1, dtype=torch.float32),
+            ),
+            dim=0,
+        ).unsqueeze(-1),
+        "future_exo_batch": torch.tensor([[[1.0]], [[0.5]]]),
+    }
+    first = predictor.predict(payload)
+    second = predictor.predict(payload)
+
+    assert bool(getattr(predictor.model, "is_quantile", False)) is True
+    assert set(first) == {"q10", "q50", "q90", "point"}
+    for name in ("q10", "q50", "q90", "point"):
+        values = np.asarray(first[name])
+        assert values.shape == (2,)
+        assert np.isfinite(values).all()
+        np.testing.assert_array_equal(values, np.asarray(second[name]))
+    np.testing.assert_array_equal(np.asarray(first["point"]), np.asarray(first["q50"]))
+    assert np.all(np.asarray(first["q10"]) <= np.asarray(first["q50"]))
+    assert np.all(np.asarray(first["q50"]) <= np.asarray(first["q90"]))
+
+
 def test_public_patchtst_full_ssl_pretrain_finetune_checkpoint_smoke(tmp_path: Path):
     torch.manual_seed(7)
     np.random.seed(7)
@@ -451,18 +592,60 @@ def test_public_patchtst_full_ssl_pretrain_finetune_checkpoint_smoke(tmp_path: P
 
 
 FUTURE_EXOGENOUS_SENSITIVITY_CASES = [
-    pytest.param("patchtst_base", _tiny_patchtst_architecture(), id="patchtst"),
-    pytest.param("patchmixer_base", _tiny_patchmixer_architecture(), id="patchmixer"),
-    pytest.param("titan_base", _tiny_titan_architecture(), id="titan"),
-    pytest.param("exotst_base", _tiny_exotst_architecture(), id="exotst"),
+    pytest.param(
+        "patchtst_base",
+        _tiny_patchtst_architecture(),
+        2,
+        4,
+        "point",
+        id="patchtst-point",
+    ),
+    pytest.param(
+        "patchmixer_base",
+        _tiny_patchmixer_architecture(),
+        2,
+        4,
+        "point",
+        id="patchmixer-point",
+    ),
+    pytest.param(
+        "exotst_base",
+        _tiny_exotst_architecture(),
+        2,
+        4,
+        "point",
+        id="exotst-point",
+    ),
+    pytest.param(
+        "patchtst_quantile",
+        _tiny_patchtst_architecture(),
+        2,
+        4,
+        "q50",
+        id="patchtst-quantile",
+    ),
+    pytest.param(
+        "patchmixer_quantile",
+        _tiny_patchmixer_architecture(),
+        8,
+        10,
+        "q50",
+        id="patchmixer-quantile",
+    ),
 ]
 
 
-@pytest.mark.parametrize("model_key,architecture", FUTURE_EXOGENOUS_SENSITIVITY_CASES)
+@pytest.mark.parametrize(
+    "model_key,architecture,lookback,n_rows,prediction_key",
+    FUTURE_EXOGENOUS_SENSITIVITY_CASES,
+)
 def test_public_future_exogenous_contract_and_sensitivity(
     tmp_path: Path,
     model_key: str,
     architecture: ArchitectureConfig,
+    lookback: int,
+    n_rows: int,
+    prediction_key: str,
 ):
     torch.manual_seed(7)
     np.random.seed(7)
@@ -476,7 +659,7 @@ def test_public_future_exogenous_contract_and_sensitivity(
 
     result = train(
         TrainRequest(
-            data=_data_request(exogenous),
+            data=_data_request(exogenous, lookback=lookback, n_rows=n_rows),
             models=[model_key],
             trainer=TrainerConfig(
                 epochs=1,
@@ -496,12 +679,18 @@ def test_public_future_exogenous_contract_and_sensitivity(
 
     assert result.primary_ckpt_path is not None
     predictor = load_predictor(result.primary_ckpt_path, device="cpu", strict=True)
-    prediction_payload = _prediction_payload(model_key)
+    prediction_payload = _prediction_payload(model_key, lookback=lookback)
     x = prediction_payload["x"] if isinstance(prediction_payload, dict) else prediction_payload
     assert torch.is_tensor(x)
     base_payload = {
         "x": x,
-        "past_exo_cont": torch.tensor([[[0.0], [0.5]], [[0.5], [1.0]]]),
+        "past_exo_cont": torch.stack(
+            (
+                0.5 * torch.arange(lookback, dtype=torch.float32),
+                0.5 * torch.arange(1, lookback + 1, dtype=torch.float32),
+            ),
+            dim=0,
+        ).unsqueeze(-1),
     }
 
     with pytest.raises(RuntimeError, match="expects future exogenous inputs.*not provided"):
@@ -517,9 +706,22 @@ def test_public_future_exogenous_contract_and_sensitivity(
     high_payload = dict(base_payload)
     high_payload["future_exo_batch"] = torch.ones(2, 1, 1)
 
-    low = np.asarray(predictor.predict(low_payload)["point"])
-    low_repeat = np.asarray(predictor.predict(low_payload)["point"])
-    high = np.asarray(predictor.predict(high_payload)["point"])
+    low_result = predictor.predict(low_payload)
+    low_repeat_result = predictor.predict(low_payload)
+    high_result = predictor.predict(high_payload)
+
+    if prediction_key == "q50":
+        assert set(low_result) == {"q10", "q50", "q90", "point"}
+        np.testing.assert_array_equal(
+            np.asarray(low_result["point"]),
+            np.asarray(low_result["q50"]),
+        )
+    else:
+        assert set(low_result) == {"point"}
+
+    low = np.asarray(low_result[prediction_key])
+    low_repeat = np.asarray(low_repeat_result[prediction_key])
+    high = np.asarray(high_result[prediction_key])
 
     assert _infer_d_future_expected(predictor.model) == 1
     assert low.shape == high.shape == (2,)

@@ -3,7 +3,13 @@ import importlib
 import polars as pl
 import pytest
 
-from modeling_module import ArtifactConfig, SSLConfig, TrainRequest, train
+from modeling_module import (
+    ArtifactConfig,
+    DistributionLoss,
+    SSLConfig,
+    TrainRequest,
+    train,
+)
 
 
 def _make_daily_df(n_rows: int = 10) -> pl.DataFrame:
@@ -292,6 +298,69 @@ def test_train_rejects_timexer_with_categorical_exogenous_input(tmp_path):
                 "auto_save_dir": False,
             }
         )
+
+
+def test_train_rejects_patchmixer_original_distribution_before_data_resolution(
+    monkeypatch,
+):
+    train_module = importlib.import_module("modeling_module.api.train")
+    reached_data_resolution = False
+
+    def unexpected_resolve_loaders(payload):
+        nonlocal reached_data_resolution
+        reached_data_resolution = True
+        raise AssertionError("data resolution must not run")
+
+    monkeypatch.setattr(train_module, "_resolve_loaders", unexpected_resolve_loaders)
+
+    with pytest.raises(ValueError, match="patchmixer_original supports point loss only"):
+        train(
+            TrainRequest(
+                models=["patchmixer_original"],
+                trainer={"loss": DistributionLoss("Normal")},
+                artifacts=ArtifactConfig(save_dir=None, auto_save_dir=False),
+            )
+        )
+
+    assert reached_data_resolution is False
+
+
+def test_train_rejects_patchmixer_original_exogenous_inputs_before_training(
+    monkeypatch,
+    tmp_path,
+):
+    train_module = importlib.import_module("modeling_module.api.train")
+    reached_training = False
+
+    def unexpected_training(*args, **kwargs):
+        nonlocal reached_training
+        reached_training = True
+        raise AssertionError("model construction and training must not run")
+
+    monkeypatch.setattr(train_module, "run_total_train", unexpected_training)
+
+    with pytest.raises(ValueError, match="canonical upstream baseline supports endogenous"):
+        train(
+            {
+                "data": {
+                    "df": _make_daily_df_with_future_exo(),
+                    "lookback": 14,
+                    "horizon": 2,
+                    "freq": "daily",
+                    "batch_size": 2,
+                    "past_exo_cont_cols": ["exo_hist"],
+                    "future_exo_cont_cols": ["promo_flag"],
+                },
+                "models": ["patchmixer_original"],
+                "use_exogenous_mode": True,
+                "trainer": {"epochs": 1, "lr": 1e-3},
+                "device": "cpu",
+                "save_dir": str(tmp_path / "patchmixer-original-exogenous"),
+                "auto_save_dir": False,
+            }
+        )
+
+    assert reached_training is False
 
 
 @pytest.mark.parametrize(

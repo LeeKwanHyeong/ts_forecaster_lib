@@ -6,7 +6,7 @@ import warnings
 from dataclasses import MISSING, dataclass, field, fields, is_dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Mapping, Optional, Sequence
+from typing import Any, Dict, Literal, Mapping, Optional, Sequence
 
 from modeling_module.api.data import _materialize_payload as _materialize_data_payload
 from modeling_module.api.data import build_datamodule
@@ -175,6 +175,7 @@ class PatchMixerArchitectureConfig:
     stride: Optional[int] = None
     d_model: Optional[int] = None
     e_layers: Optional[int] = None
+    mixer_kernel_size: Optional[int] = None
     f_out: Optional[int] = None
     head_hidden: Optional[int] = None
     dropout: Optional[float] = None
@@ -227,6 +228,42 @@ class TimexerArchitectureConfig:
 
 
 @dataclass
+class SELLMArchitectureConfig:
+    """
+    SELLM family architecture overrides.
+
+    Use `use_pretrained_llm=False` for lightweight CPU tests. When it is True,
+    choose a Hub model ID or an on-premise model directory with `llm_source`.
+    """
+
+    token_len: Optional[int] = None
+    d_model: Optional[int] = None
+    n_heads: Optional[int] = None
+    dropout: Optional[float] = None
+    mlp_hidden_dim: Optional[int] = None
+    mlp_activation: Optional[str] = None
+    semantic_vocab_size: Optional[int] = None
+    semantic_top_k: Optional[int] = None
+    tscc_latent_dim: Optional[int] = None
+    tscc_hidden_dim: Optional[int] = None
+    tscc_kl_weight: Optional[float] = None
+    use_pretrained_llm: Optional[bool] = None
+    llm_source: Optional[Literal["huggingface", "local"]] = None
+    llm_model_name: Optional[str] = None
+    llm_local_path: Optional[str] = None
+    llm_revision: Optional[str] = None
+    freeze_llm: Optional[bool] = None
+    use_time_adapter: Optional[bool] = None
+    time_adapter_rank: Optional[int] = None
+    time_adapter_layers: Optional[int] = None
+    fallback_layers: Optional[int] = None
+    d_ff: Optional[int] = None
+    head_hidden_dim: Optional[int] = None
+    use_norm: Optional[bool] = None
+    final_nonneg: Optional[bool] = None
+
+
+@dataclass
 class ArchitectureConfig:
     """
     Family-level model architecture overrides.
@@ -243,6 +280,7 @@ class ArchitectureConfig:
     patchmixer: Optional[PatchMixerArchitectureConfig | Mapping[str, Any]] = None
     exotst: Optional[ExoTSTArchitectureConfig | Mapping[str, Any]] = None
     timexer: Optional[TimexerArchitectureConfig | Mapping[str, Any]] = None
+    sellm: Optional[SELLMArchitectureConfig | Mapping[str, Any]] = None
 
 
 @dataclass
@@ -437,6 +475,7 @@ _ARCHITECTURE_ALLOWED_KEYS: dict[str, set[str]] = {
         "stride",
         "d_model",
         "e_layers",
+        "mixer_kernel_size",
         "f_out",
         "head_hidden",
         "dropout",
@@ -472,6 +511,33 @@ _ARCHITECTURE_ALLOWED_KEYS: dict[str, set[str]] = {
         "activation",
         "use_norm",
     },
+    "sellm": {
+        "token_len",
+        "d_model",
+        "n_heads",
+        "dropout",
+        "mlp_hidden_dim",
+        "mlp_activation",
+        "semantic_vocab_size",
+        "semantic_top_k",
+        "tscc_latent_dim",
+        "tscc_hidden_dim",
+        "tscc_kl_weight",
+        "use_pretrained_llm",
+        "llm_source",
+        "llm_model_name",
+        "llm_local_path",
+        "llm_revision",
+        "freeze_llm",
+        "use_time_adapter",
+        "time_adapter_rank",
+        "time_adapter_layers",
+        "fallback_layers",
+        "d_ff",
+        "head_hidden_dim",
+        "use_norm",
+        "final_nonneg",
+    },
 }
 
 
@@ -487,6 +553,8 @@ def _family_from_training_target(name: str) -> str:
         return "exotst"
     if canonical == "timexer" or canonical.startswith("timexer_"):
         return "timexer"
+    if canonical == "sellm" or canonical.startswith("sellm_"):
+        return "sellm"
     raise ValueError(f"Unsupported architecture override target: {name!r}")
 
 
@@ -922,6 +990,13 @@ def _validate_checkpoint_safe_distribution_loss(payload: Mapping[str, Any]) -> N
     if not is_distribution_loss:
         return
 
+    requested_models = payload.get("models_to_run") or expand_training_targets(None)
+    if "patchmixer_original" in requested_models:
+        raise ValueError(
+            "patchmixer_original supports point loss only; distribution checkpoints "
+            "are not part of the canonical upstream contract."
+        )
+
     distribution = getattr(loss_obj, "distribution", None)
     if distribution is None or str(distribution) in _CHECKPOINT_SAFE_DISTRIBUTIONS:
         return
@@ -1026,6 +1101,15 @@ def _validate_training_request(
         lookback=lookback_i,
         horizon=horizon_i,
     )
+
+    if (
+        "patchmixer_original" in requested_models
+        and bool(payload.get("use_exogenous_mode", False))
+    ):
+        raise ValueError(
+            "Invalid training request for patchmixer_original: the canonical upstream "
+            "baseline supports endogenous inputs only."
+        )
 
     categorical_models = [
         model for model in requested_models if _family_from_training_target(model) != "timexer"

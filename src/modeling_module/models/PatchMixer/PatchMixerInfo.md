@@ -8,11 +8,18 @@
 | Artifact key | Output mode | Checkpoint-safe loss |
 |---|---|---|
 | `patchmixer_base` | point 또는 distribution | point loss, `Normal`, `StudentT` |
+| `patchmixer_original` | endogenous point | point loss only |
 | `patchmixer_quantile` | q10/q50/q90 | quantile loss |
 
 `patchmixer_base`는 point 전용 모델이 아니라 `out_mul`에 따라 point와 distribution parameter를
 출력하는 unified model입니다. Quantile은 별도 artifact입니다. Distribution checkpoint의 public
 prediction 결과는 현재 location을 `{"point": ...}`로 노출합니다.
+
+기본 선택 전략은 기능별로 구분합니다. 내생변수 point 예측은 RTX 5090 3-seed 검증에서 승격된
+`patchmixer_original`, 외생변수 point와 distribution은 `patchmixer_base`, quantile은
+`patchmixer_quantile`을 사용합니다. 코드는 `get_patchmixer_default_model_key`로 조회합니다. 기존
+`patchmixer` family 확장 순서와 checkpoint alias는 호환성을 위해 변경하지 않습니다. 상세 근거와
+제약은 [PatchMixerBaseline.md](PatchMixerBaseline.md)에 고정합니다.
 
 ## Data contract
 

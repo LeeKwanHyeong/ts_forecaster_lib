@@ -249,6 +249,57 @@ class PatchMixerAdapter(DefaultAdapter):
         return None
 
 
+def _has_nonempty_features(value: Any) -> bool:
+    if value is None:
+        return False
+    if torch.is_tensor(value):
+        return value.numel() > 0 and (value.ndim == 0 or value.shape[-1] > 0)
+    return True
+
+
+class PatchMixerOriginalAdapter(DefaultAdapter):
+    """Keep the canonical PatchMixer path endogenous-only and shape-strict."""
+
+    def forward(
+            self,
+            model: nn.Module,
+            x_batch: Any,
+            *,
+            future_exo: Optional[torch.Tensor] = None,
+            past_exo_cont: Optional[torch.Tensor] = None,
+            past_exo_cat: Optional[torch.Tensor] = None,
+            part_ids: Optional[List[str]] = None,
+            mode: Optional[str] = None,
+    ) -> torch.Tensor:
+        feature_inputs = {
+            "future_exo": future_exo,
+            "past_exo_cont": past_exo_cont,
+            "past_exo_cat": past_exo_cat,
+        }
+        provided = [
+            name for name, value in feature_inputs.items() if _has_nonempty_features(value)
+        ]
+        if provided:
+            raise RuntimeError(
+                "PatchMixerOriginal is an endogenous-only baseline; unsupported inputs: "
+                + ", ".join(provided)
+            )
+
+        output = super().forward(
+            model,
+            x_batch,
+            part_ids=part_ids,
+            mode=mode,
+        )
+        if not torch.is_tensor(output) or output.ndim != 3:
+            shape = tuple(output.shape) if torch.is_tensor(output) else type(output)
+            raise RuntimeError(
+                "PatchMixerOriginal must return [B,H,N], "
+                f"got {shape}."
+            )
+        return output
+
+
 class TitanAdapter(DefaultAdapter):
     def __init__(self, tta_manager_factory=None):
         self._tta = None

@@ -68,6 +68,18 @@ MODEL_SPECS: dict[str, ModelSpec] = {
         class_names=("PatchMixerModel", "PatchMixerPointModel", "PatchMixerDistributionModel"),
         checkpoint_aliases=("PatchMixer", "PatchMixerBase", "PatchMixerDist"),
     ),
+    "patchmixer_original": ModelSpec(
+        key="patchmixer_original",
+        family="patchmixer",
+        builder_module="modeling_module.models.model_builder",
+        builder_attr="build_patch_mixer_original",
+        label="PatchMixer Original",
+        aliases=("patchmixeroriginal", "patchmixercanonical", "patchmixerupstream"),
+        class_names=("PatchMixerOriginalModel",),
+        checkpoint_aliases=("PatchMixerOriginal", "PatchMixerCanonical"),
+        trainable=True,
+        included_in_family=False,
+    ),
     "patchmixer_quantile": ModelSpec(
         key="patchmixer_quantile",
         family="patchmixer",
@@ -134,6 +146,16 @@ MODEL_SPECS: dict[str, ModelSpec] = {
         class_names=("TimeXerModel",),
         checkpoint_aliases=("TimeXer", "TimeXerBase"),
     ),
+    "sellm_base": ModelSpec(
+        key="sellm_base",
+        family="sellm",
+        builder_module="modeling_module.models.model_builder",
+        builder_attr="build_sellm",
+        label="SELLM Base",
+        aliases=("sellm", "sellmbase", "se_llm", "sellmforecast"),
+        class_names=("SELLMModel",),
+        checkpoint_aliases=("SELLM", "SELLMBase", "SE-LLM"),
+    ),
 }
 
 
@@ -143,6 +165,25 @@ TRAINING_FAMILY_DEFAULTS: dict[str, tuple[str, ...]] = {
     "titan": ("titan_base", "titan_lmm", "titan_seq2seq"),
     "exotst": ("exotst_base",),
     "timexer": ("timexer_base",),
+    "sellm": ("sellm_base",),
+}
+
+
+PATCHMIXER_CAPABILITY_DEFAULTS: dict[str, str] = {
+    "endogenous_point": "patchmixer_original",
+    "exogenous_point": "patchmixer_base",
+    "distribution": "patchmixer_base",
+    "quantile": "patchmixer_quantile",
+}
+
+
+_PATCHMIXER_CAPABILITY_ALIASES: dict[str, str] = {
+    _norm_name("point"): "endogenous_point",
+    _norm_name("endogenous_point"): "endogenous_point",
+    _norm_name("exogenous_point"): "exogenous_point",
+    _norm_name("distribution"): "distribution",
+    _norm_name("dist"): "distribution",
+    _norm_name("quantile"): "quantile",
 }
 
 
@@ -152,6 +193,7 @@ TRAINING_FAMILY_ALIASES: dict[str, tuple[str, ...]] = {
     "titan": ("titan",),
     "exotst": ("exotst",),
     "timexer": ("timexer",),
+    "sellm": ("sellm", "se_llm"),
 }
 
 
@@ -176,6 +218,22 @@ def list_trainable_model_keys() -> list[str]:
 
 def list_training_families() -> list[str]:
     return list(TRAINING_FAMILY_DEFAULTS.keys())
+
+
+def get_patchmixer_default_model_key(capability: str = "endogenous_point") -> str:
+    """Return the promoted PatchMixer artifact for a forecasting capability.
+
+    This selector does not alter family expansion or checkpoint aliases. It is
+    intended for callers that have already resolved the requested capability.
+    """
+    normalized = _norm_name(capability)
+    canonical = _PATCHMIXER_CAPABILITY_ALIASES.get(normalized)
+    if canonical is None:
+        supported = ", ".join(PATCHMIXER_CAPABILITY_DEFAULTS)
+        raise ValueError(
+            f"Unknown PatchMixer capability: {capability!r}. Supported: {supported}."
+        )
+    return PATCHMIXER_CAPABILITY_DEFAULTS[canonical]
 
 
 def get_model_spec(key: str) -> ModelSpec:

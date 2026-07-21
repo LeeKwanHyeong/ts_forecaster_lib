@@ -5,6 +5,7 @@ from .api.train import (
     PatchMixerArchitectureConfig,
     PatchTSTArchitectureConfig,
     RuntimeConfig,
+    SELLMArchitectureConfig,
     SSLConfig,
     TimexerArchitectureConfig,
     TitanArchitectureConfig,
@@ -14,6 +15,7 @@ from .api.train import (
     train,
 )
 from .api.infer import predict, load_predictor
+from .api.forecast import ForecastRequest, ForecastResult, ForecastRuntimeConfig, forecast
 from .api.losses import DistributionLoss
 from .api.data import (
     DataColumnConfig,
@@ -28,6 +30,7 @@ from .api.data import (
 __all__ = [
     'train',
     'predict',
+    'forecast',
     'load_predictor',
     'DistributionLoss',
     'build_dataloader',
@@ -37,6 +40,7 @@ __all__ = [
     'TrainerConfig',
     'SSLConfig',
     'RuntimeConfig',
+    'SELLMArchitectureConfig',
     'ArtifactConfig',
     'ArchitectureConfig',
     'PatchTSTArchitectureConfig',
@@ -49,4 +53,7 @@ __all__ = [
     'DataColumnConfig',
     'ExogenousConfig',
     'LoaderConfig',
+    'ForecastRequest',
+    'ForecastResult',
+    'ForecastRuntimeConfig',
 ]
