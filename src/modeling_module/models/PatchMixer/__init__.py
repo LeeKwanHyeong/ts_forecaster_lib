@@ -13,11 +13,21 @@ __all__ = [
     "PatchMixerBackbone",
     "MultiScalePatchMixerBackbone",
     "make_patch_cfgs",
+    "PatchMixerOriginalConfig",
+    "PatchMixerOriginalLayer",
+    "PatchMixerOriginalBackbone",
+    "PatchMixerOriginalModel",
 ]
 
 if TYPE_CHECKING:
     from .PatchMixer import BaseModel, QuantileModel, make_patch_cfgs
     from .backbone import PatchMixerBackbone, MultiScalePatchMixerBackbone
+    from .original import (
+        PatchMixerOriginalBackbone,
+        PatchMixerOriginalConfig,
+        PatchMixerOriginalLayer,
+        PatchMixerOriginalModel,
+    )
 
 _LAZY = {
     "BaseModel": (".PatchMixer", "BaseModel"),
@@ -25,6 +35,10 @@ _LAZY = {
     "make_patch_cfgs": (".PatchMixer", "make_patch_cfgs"),
     "PatchMixerBackbone": (".backbone", "PatchMixerBackbone"),
     "MultiScalePatchMixerBackbone": (".backbone", "MultiScalePatchMixerBackbone"),
+    "PatchMixerOriginalConfig": (".original", "PatchMixerOriginalConfig"),
+    "PatchMixerOriginalLayer": (".original", "PatchMixerOriginalLayer"),
+    "PatchMixerOriginalBackbone": (".original", "PatchMixerOriginalBackbone"),
+    "PatchMixerOriginalModel": (".original", "PatchMixerOriginalModel"),
 }
 
 
