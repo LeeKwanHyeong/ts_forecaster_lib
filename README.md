@@ -126,10 +126,14 @@ family 이름으로도 요청할 수 있습니다.
 
 | Family | Canonical Key | Status | 구현된 학습/checkpoint mode | Continuous exogenous | SSL |
 |---|---|---|---|---|---|
-| PatchTST | `patchtst_base` | 지원 | point, Normal, StudentT | past/future optional | `full`, `ssl_only` |
-| PatchTST | `patchtst_quantile` | 지원 | q10/q50/q90 | past/future optional | `full`, `ssl_only` |
-| PatchMixer | `patchmixer_base` | 지원 | point, Normal, StudentT | past/future optional | 미지원 |
-| PatchMixer | `patchmixer_quantile` | 지원 | q10/q50/q90 | past/future optional | 미지원 |
+| PatchTST | `patchtst_base` | 지원 | point, Normal, StudentT | endogenous 기본, legacy exogenous 호환 | `full`, `ssl_only` |
+| PatchTST | `patchtst_exogenous` | 지원 | point, Normal, StudentT | past/future 중 하나 이상 필수 | `full`, `ssl_only` |
+| PatchTST | `patchtst_quantile` | 지원 | q10/q50/q90 | endogenous 기본, legacy exogenous 호환 | `full`, `ssl_only` |
+| PatchTST | `patchtst_quantile_exogenous` | 지원 | q10/q50/q90 | past/future 중 하나 이상 필수 | `full`, `ssl_only` |
+| PatchMixer | `patchmixer_base` | 지원 | point, Normal, StudentT | endogenous 기본, legacy exogenous 호환 | 미지원 |
+| PatchMixer | `patchmixer_exogenous` | 지원 | point, Normal, StudentT | past/future 중 하나 이상 필수 | 미지원 |
+| PatchMixer | `patchmixer_quantile` | 지원 | q10/q50/q90 | endogenous 기본, legacy exogenous 호환 | 미지원 |
+| PatchMixer | `patchmixer_quantile_exogenous` | 지원 | q10/q50/q90 | past/future 중 하나 이상 필수 | 미지원 |
 | Titan | `titan_base` | Deprecated | point, Normal, StudentT | past/future optional | 미지원 |
 | Titan | `titan_lmm` | Deprecated | point, Normal, StudentT | past/future optional | 미지원 |
 | Titan | `titan_seq2seq` | Deprecated | point, Normal, StudentT | past/future optional | 미지원 |
@@ -139,6 +143,9 @@ family 이름으로도 요청할 수 있습니다.
 추가 메모:
 
 - `PatchTST`의 `full`/`ssl_only`는 artifact `save_dir`가 필수이며 다른 family-only request에는 사용할 수 없습니다.
+- 신규 exogenous 학습은 `patchtst_exogenous`, `patchtst_quantile_exogenous`,
+  `patchmixer_exogenous`, `patchmixer_quantile_exogenous`를 직접 요청합니다. 이 키들은 기존
+  `patchtst`/`patchmixer` family 기본 확장에는 포함되지 않습니다.
 - mixed request에서는 SSL이 PatchTST stage에만 적용되고 다른 family는 supervised로 실행됩니다.
   `ssl_only`는 PatchTST supervised checkpoint 없이 pretraining checkpoint만 만듭니다.
 - `ExoTST`는 `use_exogenous_mode=True`와 past/future continuous exogenous가 모두 필요합니다.

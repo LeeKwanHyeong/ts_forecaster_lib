@@ -16,6 +16,10 @@ __all__ = [
     "QuantileHead",
     "PatchTSTPointModel",
     "PatchTSTQuantileModel",
+    "PatchTSTEndogenousModel",
+    "PatchTSTExogenousModel",
+    "PatchTSTQuantileEndogenousModel",
+    "PatchTSTQuantileExogenousModel",
     # subpackages
     "common",
     "supervised",
@@ -24,6 +28,12 @@ __all__ = [
 
 if TYPE_CHECKING:
     from .supervised import SupervisedBackbone, PointHead, QuantileHead, PatchTSTPointModel, PatchTSTQuantileModel
+    from .supervised.variants import (
+        PatchTSTEndogenousModel,
+        PatchTSTExogenousModel,
+        PatchTSTQuantileEndogenousModel,
+        PatchTSTQuantileExogenousModel,
+    )
 
 _LAZY = {
     "SupervisedBackbone": (".supervised", "SupervisedBackbone"),
@@ -31,6 +41,10 @@ _LAZY = {
     "QuantileHead": (".supervised", "QuantileHead"),
     "PatchTSTPointModel": (".supervised", "PatchTSTPointModel"),
     "PatchTSTQuantileModel": (".supervised", "PatchTSTQuantileModel"),
+    "PatchTSTEndogenousModel": (".supervised.variants", "PatchTSTEndogenousModel"),
+    "PatchTSTExogenousModel": (".supervised.variants", "PatchTSTExogenousModel"),
+    "PatchTSTQuantileEndogenousModel": (".supervised.variants", "PatchTSTQuantileEndogenousModel"),
+    "PatchTSTQuantileExogenousModel": (".supervised.variants", "PatchTSTQuantileExogenousModel"),
 }
 
 

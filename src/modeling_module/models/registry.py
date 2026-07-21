@@ -24,6 +24,9 @@ class ModelSpec:
     included_in_family: bool = True
     deprecated: bool = False
     deprecation_message: Optional[str] = None
+    exogenous_policy: str = "none"
+    exogenous_inputs: tuple[str, ...] = ()
+    fusion_strategy: Optional[str] = None
 
     def load_builder(self) -> Callable[..., Any]:
         module = import_module(self.builder_module)
@@ -45,8 +48,25 @@ MODEL_SPECS: dict[str, ModelSpec] = {
         builder_attr="build_patchTST",
         label="PatchTST Base",
         aliases=("patchtstbase", "patchtstpoint", "patchtstdist", "patchtst"),
-        class_names=("PatchTSTModel",),
+        class_names=("PatchTSTModel", "PatchTSTEndogenousModel"),
         checkpoint_aliases=("PatchTST", "PatchTSTBase", "PatchTSTDist"),
+        exogenous_policy="optional_legacy",
+        exogenous_inputs=("past_cont", "past_cat", "future_cont"),
+        fusion_strategy="legacy_config_routing",
+    ),
+    "patchtst_exogenous": ModelSpec(
+        key="patchtst_exogenous",
+        family="patchtst",
+        builder_module="modeling_module.models.model_builder",
+        builder_attr="build_patchTST_exogenous",
+        label="PatchTST Exogenous",
+        aliases=("patchtstexo", "patchtstexogenous"),
+        class_names=("PatchTSTExogenousModel",),
+        checkpoint_aliases=("PatchTSTExogenous", "PatchTSTExo"),
+        included_in_family=False,
+        exogenous_policy="required",
+        exogenous_inputs=("past_cont", "past_cat", "future_cont"),
+        fusion_strategy="patch_concat+future_cross_attention",
     ),
     "patchtst_quantile": ModelSpec(
         key="patchtst_quantile",
@@ -55,8 +75,25 @@ MODEL_SPECS: dict[str, ModelSpec] = {
         builder_attr="build_patchTST_quantile",
         label="PatchTST Quantile",
         aliases=("patchtstquantile", "patchtstq"),
-        class_names=("PatchTSTQuantileModel",),
+        class_names=("PatchTSTQuantileModel", "PatchTSTQuantileEndogenousModel"),
         checkpoint_aliases=("PatchTSTQuantile",),
+        exogenous_policy="optional_legacy",
+        exogenous_inputs=("past_cont", "past_cat", "future_cont"),
+        fusion_strategy="legacy_config_routing",
+    ),
+    "patchtst_quantile_exogenous": ModelSpec(
+        key="patchtst_quantile_exogenous",
+        family="patchtst",
+        builder_module="modeling_module.models.model_builder",
+        builder_attr="build_patchTST_quantile_exogenous",
+        label="PatchTST Quantile Exogenous",
+        aliases=("patchtstquantileexo", "patchtstquantileexogenous"),
+        class_names=("PatchTSTQuantileExogenousModel",),
+        checkpoint_aliases=("PatchTSTQuantileExogenous",),
+        included_in_family=False,
+        exogenous_policy="required",
+        exogenous_inputs=("past_cont", "past_cat", "future_cont"),
+        fusion_strategy="patch_concat+future_cross_attention",
     ),
     "patchmixer_base": ModelSpec(
         key="patchmixer_base",
@@ -65,8 +102,30 @@ MODEL_SPECS: dict[str, ModelSpec] = {
         builder_attr="build_patch_mixer",
         label="PatchMixer Base",
         aliases=("patchmixerbase", "patchmixerdist", "patchmixer"),
-        class_names=("PatchMixerModel", "PatchMixerPointModel", "PatchMixerDistributionModel"),
+        class_names=(
+            "PatchMixerModel",
+            "PatchMixerPointModel",
+            "PatchMixerDistributionModel",
+            "PatchMixerEndogenousModel",
+        ),
         checkpoint_aliases=("PatchMixer", "PatchMixerBase", "PatchMixerDist"),
+        exogenous_policy="optional_legacy",
+        exogenous_inputs=("past_cont", "past_cat", "future_cont"),
+        fusion_strategy="legacy_config_routing",
+    ),
+    "patchmixer_exogenous": ModelSpec(
+        key="patchmixer_exogenous",
+        family="patchmixer",
+        builder_module="modeling_module.models.model_builder",
+        builder_attr="build_patch_mixer_exogenous",
+        label="PatchMixer Exogenous",
+        aliases=("patchmixerexo", "patchmixerexogenous"),
+        class_names=("PatchMixerExogenousModel",),
+        checkpoint_aliases=("PatchMixerExogenous", "PatchMixerExo"),
+        included_in_family=False,
+        exogenous_policy="required",
+        exogenous_inputs=("past_cont", "past_cat", "future_cont"),
+        fusion_strategy="gated_residual+future_shift",
     ),
     "patchmixer_original": ModelSpec(
         key="patchmixer_original",
@@ -79,6 +138,7 @@ MODEL_SPECS: dict[str, ModelSpec] = {
         checkpoint_aliases=("PatchMixerOriginal", "PatchMixerCanonical"),
         trainable=True,
         included_in_family=False,
+        exogenous_policy="none",
     ),
     "patchmixer_quantile": ModelSpec(
         key="patchmixer_quantile",
@@ -87,8 +147,25 @@ MODEL_SPECS: dict[str, ModelSpec] = {
         builder_attr="build_patch_mixer_quantile",
         label="PatchMixer Quantile",
         aliases=("patchmixerquantile", "patchmixerq"),
-        class_names=("PatchMixerQuantileModel",),
+        class_names=("PatchMixerQuantileModel", "PatchMixerQuantileEndogenousModel"),
         checkpoint_aliases=("PatchMixerQuantile",),
+        exogenous_policy="optional_legacy",
+        exogenous_inputs=("past_cont", "past_cat", "future_cont"),
+        fusion_strategy="legacy_config_routing",
+    ),
+    "patchmixer_quantile_exogenous": ModelSpec(
+        key="patchmixer_quantile_exogenous",
+        family="patchmixer",
+        builder_module="modeling_module.models.model_builder",
+        builder_attr="build_patch_mixer_quantile_exogenous",
+        label="PatchMixer Quantile Exogenous",
+        aliases=("patchmixerquantileexo", "patchmixerquantileexogenous"),
+        class_names=("PatchMixerQuantileExogenousModel",),
+        checkpoint_aliases=("PatchMixerQuantileExogenous",),
+        included_in_family=False,
+        exogenous_policy="required",
+        exogenous_inputs=("past_cont", "past_cat", "future_cont"),
+        fusion_strategy="gated_residual+future_shift",
     ),
     "titan_base": ModelSpec(
         key="titan_base",
@@ -101,6 +178,8 @@ MODEL_SPECS: dict[str, ModelSpec] = {
         checkpoint_aliases=("TitanBase", "TitanBaseDist"),
         deprecated=True,
         deprecation_message=_TITAN_DEPRECATION_MESSAGE,
+        exogenous_policy="optional_legacy",
+        exogenous_inputs=("past_cont", "future_cont"),
     ),
     "titan_lmm": ModelSpec(
         key="titan_lmm",
@@ -113,6 +192,8 @@ MODEL_SPECS: dict[str, ModelSpec] = {
         checkpoint_aliases=("TitanLMM", "TitanLMMDist"),
         deprecated=True,
         deprecation_message=_TITAN_DEPRECATION_MESSAGE,
+        exogenous_policy="optional_legacy",
+        exogenous_inputs=("past_cont", "future_cont"),
     ),
     "titan_seq2seq": ModelSpec(
         key="titan_seq2seq",
@@ -125,6 +206,8 @@ MODEL_SPECS: dict[str, ModelSpec] = {
         checkpoint_aliases=("TitanSeq2Seq", "TitanSeq2SeqDist"),
         deprecated=True,
         deprecation_message=_TITAN_DEPRECATION_MESSAGE,
+        exogenous_policy="optional_legacy",
+        exogenous_inputs=("past_cont", "future_cont"),
     ),
     "exotst_base": ModelSpec(
         key="exotst_base",
@@ -135,6 +218,9 @@ MODEL_SPECS: dict[str, ModelSpec] = {
         aliases=("exotst", "exotstbase"),
         class_names=("ExoTST",),
         checkpoint_aliases=("ExoTST", "ExoTSTBase"),
+        exogenous_policy="required",
+        exogenous_inputs=("past_cont", "future_cont"),
+        fusion_strategy="dedicated_exogenous_encoder",
     ),
     "timexer_base": ModelSpec(
         key="timexer_base",
@@ -145,6 +231,9 @@ MODEL_SPECS: dict[str, ModelSpec] = {
         aliases=("timexer", "timexerbase"),
         class_names=("TimeXerModel",),
         checkpoint_aliases=("TimeXer", "TimeXerBase"),
+        exogenous_policy="required",
+        exogenous_inputs=("past_cont",),
+        fusion_strategy="global_token_cross_attention",
     ),
     "sellm_base": ModelSpec(
         key="sellm_base",
@@ -155,6 +244,9 @@ MODEL_SPECS: dict[str, ModelSpec] = {
         aliases=("sellm", "sellmbase", "se_llm", "sellmforecast"),
         class_names=("SELLMModel",),
         checkpoint_aliases=("SELLM", "SELLMBase", "SE-LLM"),
+        exogenous_policy="optional",
+        exogenous_inputs=("future_cont",),
+        fusion_strategy="semantic_future_conditioning",
     ),
 }
 
@@ -171,9 +263,10 @@ TRAINING_FAMILY_DEFAULTS: dict[str, tuple[str, ...]] = {
 
 PATCHMIXER_CAPABILITY_DEFAULTS: dict[str, str] = {
     "endogenous_point": "patchmixer_original",
-    "exogenous_point": "patchmixer_base",
+    "exogenous_point": "patchmixer_exogenous",
     "distribution": "patchmixer_base",
     "quantile": "patchmixer_quantile",
+    "exogenous_quantile": "patchmixer_quantile_exogenous",
 }
 
 
@@ -184,6 +277,7 @@ _PATCHMIXER_CAPABILITY_ALIASES: dict[str, str] = {
     _norm_name("distribution"): "distribution",
     _norm_name("dist"): "distribution",
     _norm_name("quantile"): "quantile",
+    _norm_name("exogenous_quantile"): "exogenous_quantile",
 }
 
 

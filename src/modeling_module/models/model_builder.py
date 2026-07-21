@@ -2,7 +2,6 @@ from dataclasses import fields, is_dataclass, asdict
 from typing import Union, Any, Optional, Mapping
 
 from modeling_module.models.ExoTST.configs import ExoTSTConfig
-from modeling_module.models.PatchMixer.PatchMixer import PatchMixerModel, PatchMixerQuantileModel
 from modeling_module.models.PatchMixer.common.configs import PatchMixerConfig
 from modeling_module.models.PatchMixer.original import (
     PatchMixerOriginalConfig,
@@ -41,16 +40,54 @@ def _ensure_patchmixer_config(cfg: Any):
 #     cfg = _ensure_patchmixer_config(cfg)
 #     return PatchMixerModel(cfg, out_mult=out_mult, param_names=param_names)
 def build_patch_mixer(cfg: PatchMixerConfig):
+    """Compatibility builder selecting the strict variant from configured widths."""
     cfg = _ensure_patchmixer_config(cfg)
-    return PatchMixerModel(cfg)
+    from modeling_module.models.PatchMixer.variants import (
+        PatchMixerEndogenousModel,
+        PatchMixerExogenousModel,
+        patchmixer_uses_exogenous_inputs,
+    )
+
+    model_cls = (
+        PatchMixerExogenousModel
+        if patchmixer_uses_exogenous_inputs(cfg)
+        else PatchMixerEndogenousModel
+    )
+    return model_cls(cfg)
+
+
+def build_patch_mixer_exogenous(cfg: PatchMixerConfig):
+    """Build the explicit gated-fusion PatchMixer exogenous variant."""
+    from modeling_module.models.PatchMixer.variants import PatchMixerExogenousModel
+
+    cfg = _ensure_patchmixer_config(cfg)
+    return PatchMixerExogenousModel(cfg)
+
 
 def build_patch_mixer_quantile(cfg):
     """
     기존 quantile builder는 그대로 유지 (QuantileModel이 별도 class인 구조)
     """
-    from modeling_module.models.PatchMixer.PatchMixer import PatchMixerQuantileModel
+    from modeling_module.models.PatchMixer.variants import (
+        PatchMixerQuantileEndogenousModel,
+        PatchMixerQuantileExogenousModel,
+        patchmixer_uses_exogenous_inputs,
+    )
     cfg = _ensure_patchmixer_config(cfg)
-    return PatchMixerQuantileModel(cfg)
+    model_cls = (
+        PatchMixerQuantileExogenousModel
+        if patchmixer_uses_exogenous_inputs(cfg)
+        else PatchMixerQuantileEndogenousModel
+    )
+    return model_cls(cfg)
+
+
+def build_patch_mixer_quantile_exogenous(cfg):
+    """Build the explicit quantile PatchMixer exogenous variant."""
+    from modeling_module.models.PatchMixer.variants import PatchMixerQuantileExogenousModel
+
+    cfg = _ensure_patchmixer_config(cfg)
+    return PatchMixerQuantileExogenousModel(cfg)
 
 
 def _ensure_patchmixer_original_config(cfg: Any) -> PatchMixerOriginalConfig:
@@ -147,17 +184,52 @@ def _ensure_patchtst_config(cfg: Union[PatchTSTConfig, dict, Any]) -> PatchTSTCo
 
 
 def build_patchTST(cfg):
-    """PatchTST 점 예측(Point) 모델 인스턴스 생성."""
+    """Compatibility builder selecting the strict PatchTST input variant."""
     cfg = _ensure_patchtst_config(cfg)
-    from modeling_module.models.PatchTST.supervised.PatchTST import PatchTSTModel
-    return PatchTSTModel.from_config(cfg)
+    from modeling_module.models.PatchTST.supervised.variants import (
+        PatchTSTEndogenousModel,
+        PatchTSTExogenousModel,
+        patchtst_uses_exogenous_inputs,
+    )
+
+    model_cls = (
+        PatchTSTExogenousModel
+        if patchtst_uses_exogenous_inputs(cfg)
+        else PatchTSTEndogenousModel
+    )
+    return model_cls.from_config(cfg)
+
+
+def build_patchTST_exogenous(cfg):
+    """Build the explicit PatchTST exogenous variant."""
+    from modeling_module.models.PatchTST.supervised.variants import PatchTSTExogenousModel
+
+    cfg = _ensure_patchtst_config(cfg)
+    return PatchTSTExogenousModel.from_config(cfg)
 
 
 def build_patchTST_quantile(cfg):
-    """PatchTST 분위수 예측(Quantile) 모델 인스턴스 생성."""
-    from modeling_module.models.PatchTST.supervised.PatchTST import PatchTSTQuantileModel
+    """Compatibility builder selecting the strict quantile input variant."""
+    from modeling_module.models.PatchTST.supervised.variants import (
+        PatchTSTQuantileEndogenousModel,
+        PatchTSTQuantileExogenousModel,
+        patchtst_uses_exogenous_inputs,
+    )
     cfg = _ensure_patchtst_config(cfg)
-    return PatchTSTQuantileModel.from_config(cfg)
+    model_cls = (
+        PatchTSTQuantileExogenousModel
+        if patchtst_uses_exogenous_inputs(cfg)
+        else PatchTSTQuantileEndogenousModel
+    )
+    return model_cls.from_config(cfg)
+
+
+def build_patchTST_quantile_exogenous(cfg):
+    """Build the explicit quantile PatchTST exogenous variant."""
+    from modeling_module.models.PatchTST.supervised.variants import PatchTSTQuantileExogenousModel
+
+    cfg = _ensure_patchtst_config(cfg)
+    return PatchTSTQuantileExogenousModel.from_config(cfg)
 
 
 def _ensure_sellm_config(cfg: Union[SELLMConfig, dict, Any]) -> SELLMConfig:

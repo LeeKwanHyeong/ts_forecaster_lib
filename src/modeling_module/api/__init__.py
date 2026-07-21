@@ -2,10 +2,13 @@ from .data import (
     DataColumnConfig,
     DataRequest,
     DataWindowConfig,
+    ExogenousBatch,
     ExogenousConfig,
+    ExogenousFeatureSchema,
     LoaderConfig,
     build_dataloader,
     build_dataset,
+    build_exogenous_schema,
 )
 from .infer import LoadedPredictor, load_predictor, predict
 from .forecast import ForecastRequest, ForecastResult, ForecastRuntimeConfig, forecast
@@ -35,7 +38,9 @@ __all__ = [
     "DataWindowConfig",
     "DistributionLoss",
     "ExoTSTArchitectureConfig",
+    "ExogenousBatch",
     "ExogenousConfig",
+    "ExogenousFeatureSchema",
     "ForecastRequest",
     "ForecastResult",
     "ForecastRuntimeConfig",
@@ -53,6 +58,7 @@ __all__ = [
     "TrainerConfig",
     "build_dataloader",
     "build_dataset",
+    "build_exogenous_schema",
     "forecast",
     "load_predictor",
     "predict",

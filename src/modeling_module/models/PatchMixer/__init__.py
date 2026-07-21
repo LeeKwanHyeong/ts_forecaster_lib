@@ -17,6 +17,10 @@ __all__ = [
     "PatchMixerOriginalLayer",
     "PatchMixerOriginalBackbone",
     "PatchMixerOriginalModel",
+    "PatchMixerEndogenousModel",
+    "PatchMixerExogenousModel",
+    "PatchMixerQuantileEndogenousModel",
+    "PatchMixerQuantileExogenousModel",
 ]
 
 if TYPE_CHECKING:
@@ -27,6 +31,12 @@ if TYPE_CHECKING:
         PatchMixerOriginalConfig,
         PatchMixerOriginalLayer,
         PatchMixerOriginalModel,
+    )
+    from .variants import (
+        PatchMixerEndogenousModel,
+        PatchMixerExogenousModel,
+        PatchMixerQuantileEndogenousModel,
+        PatchMixerQuantileExogenousModel,
     )
 
 _LAZY = {
@@ -39,6 +49,10 @@ _LAZY = {
     "PatchMixerOriginalLayer": (".original", "PatchMixerOriginalLayer"),
     "PatchMixerOriginalBackbone": (".original", "PatchMixerOriginalBackbone"),
     "PatchMixerOriginalModel": (".original", "PatchMixerOriginalModel"),
+    "PatchMixerEndogenousModel": (".variants", "PatchMixerEndogenousModel"),
+    "PatchMixerExogenousModel": (".variants", "PatchMixerExogenousModel"),
+    "PatchMixerQuantileEndogenousModel": (".variants", "PatchMixerQuantileEndogenousModel"),
+    "PatchMixerQuantileExogenousModel": (".variants", "PatchMixerQuantileExogenousModel"),
 }
 
 

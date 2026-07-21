@@ -37,20 +37,33 @@ def test_expand_training_targets_preserves_single_artifact_requests():
     assert expand_training_targets(["patchtst_quantile"]) == ["patchtst_quantile"]
     assert expand_training_targets(["timexer_base"]) == ["timexer_base"]
     assert expand_training_targets(["sellm_base"]) == ["sellm_base"]
+    assert expand_training_targets(["patchtst_exogenous"]) == ["patchtst_exogenous"]
+    assert expand_training_targets(["patchtst_quantile_exogenous"]) == [
+        "patchtst_quantile_exogenous"
+    ]
+    assert expand_training_targets(["patchmixer_exogenous"]) == ["patchmixer_exogenous"]
+    assert expand_training_targets(["patchmixer_quantile_exogenous"]) == [
+        "patchmixer_quantile_exogenous"
+    ]
 
 
 def test_patchmixer_capability_defaults_promote_original_without_changing_family_expansion():
     assert PATCHMIXER_CAPABILITY_DEFAULTS == {
         "endogenous_point": "patchmixer_original",
-        "exogenous_point": "patchmixer_base",
+        "exogenous_point": "patchmixer_exogenous",
         "distribution": "patchmixer_base",
         "quantile": "patchmixer_quantile",
+        "exogenous_quantile": "patchmixer_quantile_exogenous",
     }
     assert get_patchmixer_default_model_key() == "patchmixer_original"
     assert get_patchmixer_default_model_key("point") == "patchmixer_original"
-    assert get_patchmixer_default_model_key("exogenous-point") == "patchmixer_base"
+    assert get_patchmixer_default_model_key("exogenous-point") == "patchmixer_exogenous"
     assert get_patchmixer_default_model_key("dist") == "patchmixer_base"
     assert get_patchmixer_default_model_key("quantile") == "patchmixer_quantile"
+    assert (
+        get_patchmixer_default_model_key("exogenous-quantile")
+        == "patchmixer_quantile_exogenous"
+    )
     assert expand_training_targets(["patchmixer"]) == [
         "patchmixer_base",
         "patchmixer_quantile",
@@ -77,6 +90,30 @@ def test_infer_artifact_model_key_from_checkpoint_prefers_meta():
     ) == "patchmixer_quantile"
     assert infer_artifact_model_key_from_checkpoint({"model_class": "TitanLMMDist"}) == "titan_lmm"
     assert infer_artifact_model_key_from_checkpoint({"model_class": "SELLMModel"}) == "sellm_base"
+    assert infer_artifact_model_key_from_checkpoint(
+        {"model_class": "PatchTSTExogenousModel"}
+    ) == "patchtst_exogenous"
+    assert infer_artifact_model_key_from_checkpoint(
+        {"model_class": "PatchMixerQuantileExogenousModel"}
+    ) == "patchmixer_quantile_exogenous"
+
+
+@pytest.mark.parametrize(
+    ("model_key", "fusion_strategy"),
+    (
+        ("patchtst_exogenous", "patch_concat+future_cross_attention"),
+        ("patchtst_quantile_exogenous", "patch_concat+future_cross_attention"),
+        ("patchmixer_exogenous", "gated_residual+future_shift"),
+        ("patchmixer_quantile_exogenous", "gated_residual+future_shift"),
+    ),
+)
+def test_explicit_exogenous_registry_contract(model_key, fusion_strategy):
+    spec = get_model_spec(model_key)
+
+    assert spec.exogenous_policy == "required"
+    assert spec.exogenous_inputs == ("past_cont", "past_cat", "future_cont")
+    assert spec.fusion_strategy == fusion_strategy
+    assert spec.included_in_family is False
 
 
 def test_train_result_uses_canonical_model_keys(tmp_path):

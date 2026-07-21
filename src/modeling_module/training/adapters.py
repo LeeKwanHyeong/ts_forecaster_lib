@@ -3,6 +3,8 @@ import inspect
 import torch
 import torch.nn as nn
 
+from modeling_module.data_loader.exogenous_contracts import ExogenousBatch
+
 PREFERRED_KEYS = ("pred", "yhat", "output", "logits")
 
 
@@ -99,6 +101,24 @@ class DefaultAdapter:
         - `inspect` 기반의 `_model_accepts_kw` 함수를 통해 인자 지원 여부 확인.
         - 지원하지 않는 인자는 제외하여 런타임 에러(Unexpected Keyword Argument) 방지.
         """
+        batch_size = int(x.shape[0]) if torch.is_tensor(x) and x.ndim >= 1 else None
+        lookback = int(x.shape[1]) if torch.is_tensor(x) and x.ndim >= 2 else None
+        horizon_value = getattr(model, "horizon", None)
+        horizon = int(horizon_value) if horizon_value is not None else None
+        exogenous = ExogenousBatch.from_legacy(
+            future_exo=future_exo,
+            past_exo_cont=past_exo_cont,
+            past_exo_cat=past_exo_cat,
+            batch_size=batch_size,
+        ).validate(
+            batch_size=batch_size,
+            lookback=lookback,
+            horizon=horizon,
+        )
+        future_exo = exogenous.future_cont
+        past_exo_cont = exogenous.past_cont
+        past_exo_cat = exogenous.past_cat
+
         accepts: Dict[str, bool] = {
             "future_exo": _model_accepts_kw(model, "future_exo"),
             "past_exo_cont": _model_accepts_kw(model, "past_exo_cont"),

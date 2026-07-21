@@ -1102,6 +1102,28 @@ def _validate_training_request(
         horizon=horizon_i,
     )
 
+    explicit_exogenous_models = {
+        "patchtst_exogenous",
+        "patchtst_quantile_exogenous",
+        "patchmixer_exogenous",
+        "patchmixer_quantile_exogenous",
+    }
+    requested_explicit_exogenous = sorted(
+        explicit_exogenous_models.intersection(requested_models)
+    )
+    if requested_explicit_exogenous:
+        requested = ", ".join(requested_explicit_exogenous)
+        if not bool(payload.get("use_exogenous_mode", False)):
+            raise ValueError(
+                f"Invalid training request for {requested}: explicit exogenous models require "
+                "use_exogenous_mode=True."
+            )
+        if not any((int(past_cont_dim), int(past_cat_dim), int(future_exo_dim))):
+            raise ValueError(
+                f"Invalid training request for {requested}: at least one past or future "
+                "exogenous feature is required."
+            )
+
     if (
         "patchmixer_original" in requested_models
         and bool(payload.get("use_exogenous_mode", False))
