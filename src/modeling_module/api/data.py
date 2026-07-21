@@ -7,7 +7,12 @@ from typing import Any, Literal, Mapping, Optional, Sequence
 
 import polars as pl
 
-from modeling_module._internal.data_runtime import MultiPartDataModule, MultiPartExoDataModule
+from modeling_module._internal.data_runtime import (
+    ExogenousBatch,
+    ExogenousFeatureSchema,
+    MultiPartDataModule,
+    MultiPartExoDataModule,
+)
 
 
 def _is_default_value(value: Any, default_value: Any) -> bool:
@@ -352,6 +357,38 @@ def _normalize_backend(payload: Mapping[str, Any]) -> str:
     return "exo"
 
 
+def _build_exogenous_schema_from_payload(
+    payload: Mapping[str, Any],
+    *,
+    df: Optional[pl.DataFrame] = None,
+) -> ExogenousFeatureSchema:
+    schema = ExogenousFeatureSchema.from_columns(
+        past_cont=payload.get("past_exo_cont_cols"),
+        past_cat=payload.get("past_exo_cat_cols"),
+        future_cont=payload.get("future_exo_cont_cols"),
+    )
+    if df is not None:
+        requested = set(schema.past_cont_names)
+        requested.update(schema.past_cat_names)
+        requested.update(schema.future_cont_names)
+        missing = sorted(requested.difference(df.columns))
+        if missing:
+            raise ValueError(
+                "Exogenous schema references missing dataframe columns: "
+                + ", ".join(missing)
+            )
+    return schema
+
+
+def build_exogenous_schema(
+    cfg: DataRequest | Mapping[str, Any],
+) -> ExogenousFeatureSchema:
+    """Resolve and validate the ordered exogenous feature schema for a data request."""
+    payload = _materialize_payload(cfg)
+    df = _load_dataframe(payload)
+    return _build_exogenous_schema_from_payload(payload, df=df)
+
+
 def build_datamodule(cfg: DataRequest | Mapping[str, Any]) -> Any:
     """
     Build the internal datamodule used by the library data API.
@@ -361,6 +398,7 @@ def build_datamodule(cfg: DataRequest | Mapping[str, Any]) -> Any:
     """
     payload = _materialize_payload(cfg)
     df = _load_dataframe(payload)
+    exogenous_schema = _build_exogenous_schema_from_payload(payload, df=df)
 
     lookback = payload.get("lookback")
     horizon = payload.get("horizon")
@@ -380,7 +418,7 @@ def build_datamodule(cfg: DataRequest | Mapping[str, Any]) -> Any:
             else:
                 raise ValueError("simple backend supports only weekly/monthly. Use backend='exo' for daily/hourly.")
 
-        return MultiPartDataModule(
+        datamodule = MultiPartDataModule(
             df=df,
             lookback=int(lookback),
             horizon=int(horizon),
@@ -390,8 +428,10 @@ def build_datamodule(cfg: DataRequest | Mapping[str, Any]) -> Any:
             shuffle=bool(payload.get("shuffle", True)),
             seed=int(payload.get("seed", 42)),
         )
+        datamodule.exogenous_schema = exogenous_schema
+        return datamodule
 
-    return MultiPartExoDataModule(
+    datamodule = MultiPartExoDataModule(
         df=df,
         lookback=int(lookback),
         horizon=int(horizon),
@@ -415,6 +455,8 @@ def build_datamodule(cfg: DataRequest | Mapping[str, Any]) -> Any:
         cat_indexer_target_col=payload.get("cat_indexer_target_col"),
         split_mode=str(payload.get("split_mode", "window")),
     )
+    datamodule.exogenous_schema = exogenous_schema
+    return datamodule
 
 
 def build_dataset(cfg: DataRequest | Mapping[str, Any]) -> Any:
@@ -499,8 +541,11 @@ __all__ = [
     "DataColumnConfig",
     "DataRequest",
     "DataWindowConfig",
+    "ExogenousBatch",
     "ExogenousConfig",
+    "ExogenousFeatureSchema",
     "LoaderConfig",
     "build_dataloader",
     "build_dataset",
+    "build_exogenous_schema",
 ]

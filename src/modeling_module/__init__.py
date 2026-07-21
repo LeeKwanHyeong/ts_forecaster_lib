@@ -21,10 +21,13 @@ from .api.data import (
     DataColumnConfig,
     DataRequest,
     DataWindowConfig,
+    ExogenousBatch,
     ExogenousConfig,
+    ExogenousFeatureSchema,
     LoaderConfig,
     build_dataloader,
     build_dataset,
+    build_exogenous_schema,
 )
 
 __all__ = [
@@ -35,6 +38,7 @@ __all__ = [
     'DistributionLoss',
     'build_dataloader',
     'build_dataset',
+    'build_exogenous_schema',
     'TrainRequest',
     'TrainResult',
     'TrainerConfig',
@@ -52,6 +56,8 @@ __all__ = [
     'DataWindowConfig',
     'DataColumnConfig',
     'ExogenousConfig',
+    'ExogenousBatch',
+    'ExogenousFeatureSchema',
     'LoaderConfig',
     'ForecastRequest',
     'ForecastResult',

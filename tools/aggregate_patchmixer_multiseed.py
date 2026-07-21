@@ -522,9 +522,10 @@ def _decision(aggregate: Mapping[str, Any], performance: Mapping[str, Any]) -> d
         "checks": checks,
         "capability_defaults": {
             "endogenous_point": point_default,
-            "exogenous_point": "patchmixer_base",
+            "exogenous_point": "patchmixer_exogenous",
             "distribution": "patchmixer_base",
             "quantile": "patchmixer_quantile",
+            "exogenous_quantile": "patchmixer_quantile_exogenous",
         },
         "compatibility_contract": {
             "patchmixer_family_expansion": ["patchmixer_base", "patchmixer_quantile"],
@@ -535,7 +536,7 @@ def _decision(aggregate: Mapping[str, Any], performance: Mapping[str, Any]) -> d
             "Accuracy evidence covers one Walmart weekly dataset and three disjoint-series splits.",
             "Enhanced wins seed 22 on both aggregate MAE evaluations.",
             "Original has lower mean last-origin MAE but regresses mean last-origin sMAPE.",
-            "Original is endogenous-only and point-only; exogenous, distribution, and quantile requests stay Enhanced.",
+            "Original is endogenous-only and point-only; exogenous, distribution, and quantile requests stay on Enhanced variants.",
         ],
     }
 

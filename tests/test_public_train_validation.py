@@ -365,6 +365,100 @@ def test_train_rejects_patchmixer_original_exogenous_inputs_before_training(
 
 @pytest.mark.parametrize(
     "model_key",
+    [
+        "patchtst_exogenous",
+        "patchtst_quantile_exogenous",
+        "patchmixer_exogenous",
+        "patchmixer_quantile_exogenous",
+    ],
+)
+def test_train_rejects_explicit_exogenous_models_without_exogenous_mode(
+    monkeypatch,
+    tmp_path,
+    model_key,
+):
+    train_module = importlib.import_module("modeling_module.api.train")
+    reached_training = False
+
+    def unexpected_training(*args, **kwargs):
+        nonlocal reached_training
+        reached_training = True
+        raise AssertionError("model construction and training must not run")
+
+    monkeypatch.setattr(train_module, "run_total_train", unexpected_training)
+
+    with pytest.raises(ValueError, match="explicit exogenous models require use_exogenous_mode=True"):
+        train(
+            {
+                "data": {
+                    "df": _make_daily_df_with_future_exo(),
+                    "lookback": 14,
+                    "horizon": 2,
+                    "freq": "daily",
+                    "batch_size": 2,
+                    "past_exo_cont_cols": ["exo_hist"],
+                    "future_exo_cont_cols": ["promo_flag"],
+                },
+                "models": [model_key],
+                "use_exogenous_mode": False,
+                "trainer": {"epochs": 1, "lr": 1e-3},
+                "device": "cpu",
+                "save_dir": str(tmp_path / model_key),
+                "auto_save_dir": False,
+            }
+        )
+
+    assert reached_training is False
+
+
+@pytest.mark.parametrize(
+    "model_key",
+    [
+        "patchtst_exogenous",
+        "patchtst_quantile_exogenous",
+        "patchmixer_exogenous",
+        "patchmixer_quantile_exogenous",
+    ],
+)
+def test_train_rejects_explicit_exogenous_models_without_features(
+    monkeypatch,
+    tmp_path,
+    model_key,
+):
+    train_module = importlib.import_module("modeling_module.api.train")
+    reached_training = False
+
+    def unexpected_training(*args, **kwargs):
+        nonlocal reached_training
+        reached_training = True
+        raise AssertionError("model construction and training must not run")
+
+    monkeypatch.setattr(train_module, "run_total_train", unexpected_training)
+
+    with pytest.raises(ValueError, match="at least one past or future exogenous feature is required"):
+        train(
+            {
+                "data": {
+                    "df": _make_daily_df(n_rows=30),
+                    "lookback": 14,
+                    "horizon": 2,
+                    "freq": "daily",
+                    "batch_size": 2,
+                },
+                "models": [model_key],
+                "use_exogenous_mode": True,
+                "trainer": {"epochs": 1, "lr": 1e-3},
+                "device": "cpu",
+                "save_dir": str(tmp_path / model_key),
+                "auto_save_dir": False,
+            }
+        )
+
+    assert reached_training is False
+
+
+@pytest.mark.parametrize(
+    "model_key",
     ["patchtst_base", "patchmixer_base", "titan_base", "exotst_base"],
 )
 def test_train_rejects_categorical_exogenous_inputs_before_model_construction(

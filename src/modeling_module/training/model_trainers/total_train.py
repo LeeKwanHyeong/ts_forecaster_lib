@@ -26,11 +26,15 @@ from modeling_module.models.model_builder import (
     build_titan_base,
     build_titan_lmm,
     build_titan_seq2seq,
+    build_patch_mixer_exogenous,
     build_patch_mixer_quantile,
+    build_patch_mixer_quantile_exogenous,
     build_patch_mixer,
     build_patch_mixer_original,
     build_patchTST,
+    build_patchTST_exogenous,
     build_patchTST_quantile,
+    build_patchTST_quantile_exogenous,
     build_exotst,
     build_timexer,
     build_sellm,
@@ -840,8 +844,34 @@ def _run_patchtst(
             "Provide `save_dir` before starting PatchTST SSL training."
         )
     requested = _requested_target_set(requested_artifact_keys)
-    run_base = _wants_artifact(requested, "patchtst_base")
-    run_quantile = _wants_artifact(requested, "patchtst_quantile")
+    run_explicit_exogenous = requested is not None and "patchtst_exogenous" in requested
+    run_explicit_quantile_exogenous = (
+        requested is not None and "patchtst_quantile_exogenous" in requested
+    )
+    run_base = _wants_artifact(requested, "patchtst_base") or run_explicit_exogenous
+    run_quantile = (
+        _wants_artifact(requested, "patchtst_quantile")
+        or run_explicit_quantile_exogenous
+    )
+
+    if requested is not None and {
+        "patchtst_base",
+        "patchtst_exogenous",
+    }.issubset(requested):
+        raise ValueError("Request either patchtst_base or patchtst_exogenous, not both.")
+    if requested is not None and {
+        "patchtst_quantile",
+        "patchtst_quantile_exogenous",
+    }.issubset(requested):
+        raise ValueError(
+            "Request either patchtst_quantile or patchtst_quantile_exogenous, not both."
+        )
+    if (run_explicit_exogenous or run_explicit_quantile_exogenous) and not use_exogenous_mode:
+        raise ValueError("Explicit PatchTST exogenous variants require use_exogenous_mode=True.")
+    if (run_explicit_exogenous or run_explicit_quantile_exogenous) and not any(
+        (int(exo_dim), int(past_cont_dim), int(past_cat_dim))
+    ):
+        raise ValueError("Explicit PatchTST exogenous variants require configured exogenous features.")
 
     # ------------------------------------------------------------
     # 1) PatchTST common kwargs
@@ -945,6 +975,7 @@ def _run_patchtst(
           f"past_exo_cat_dim={pt_kwargs.get('past_exo_cat_dim')}")
 
     if run_base:
+        point_model_key = "patchtst_exogenous" if run_explicit_exogenous else "patchtst_base"
         pt_train_cfg = PatchTSTConfig(
             **pt_kwargs,
             loss=loss_point_obj,
@@ -954,8 +985,9 @@ def _run_patchtst(
             dist_name=dist_name,
         )
 
-        pt_base = build_patchTST(pt_train_cfg)
-        name_base = "PatchTST"
+        point_builder = build_patchTST_exogenous if run_explicit_exogenous else build_patchTST
+        pt_base = point_builder(pt_train_cfg)
+        name_base = "PatchTST Exogenous" if run_explicit_exogenous else "PatchTST"
         print(f"{name_base} ({freq.capitalize()})")
 
         if (use_ssl_mode == "full") and (pretrain_ckpt_path is not None):
@@ -983,12 +1015,13 @@ def _run_patchtst(
             )
 
         if save_root:
-            ckpt_path = _make_ckpt_path(save_root, freq, "PatchTST", lookback, horizon)
+            artifact_name = "PatchTSTExogenous" if run_explicit_exogenous else "PatchTST"
+            ckpt_path = _make_ckpt_path(save_root, freq, artifact_name, lookback, horizon)
             save_model(
                 pt_base,
                 pt_train_cfg,
                 ckpt_path,
-                extra_meta={"model_key": "patchtst_base", "family_key": "patchtst"},
+                extra_meta={"model_key": point_model_key, "family_key": "patchtst"},
             )
             best_pt_base["ckpt_path"] = str(ckpt_path)
             if (use_ssl_mode == "full") and (pretrain_ckpt_path is not None):
@@ -997,7 +1030,7 @@ def _run_patchtst(
             results,
             result_name=name_base,
             best=best_pt_base,
-            model_key="patchtst_base",
+            model_key=point_model_key,
             family_key="patchtst",
         )
 
@@ -1005,13 +1038,28 @@ def _run_patchtst(
     # 5) Supervised - Quantile
     # ============================================================
     if run_quantile:
+        quantile_model_key = (
+            "patchtst_quantile_exogenous"
+            if run_explicit_quantile_exogenous
+            else "patchtst_quantile"
+        )
         quantiles = (0.1, 0.5, 0.9)
         loss_q_obj = coerce_quantile_loss(loss_quantile, quantiles=quantiles)
         quantile_train_cfg = replace(quantile_train_cfg, loss=loss_q_obj)
 
         pt_q_cfg = PatchTSTConfig(**pt_kwargs, quantiles=quantiles, loss=loss_q_obj)
-        pt_q = build_patchTST_quantile(pt_q_cfg)
-        print(f"PatchTST Quantile ({freq.capitalize()})")
+        quantile_builder = (
+            build_patchTST_quantile_exogenous
+            if run_explicit_quantile_exogenous
+            else build_patchTST_quantile
+        )
+        pt_q = quantile_builder(pt_q_cfg)
+        quantile_name = (
+            "PatchTST Quantile Exogenous"
+            if run_explicit_quantile_exogenous
+            else "PatchTST Quantile"
+        )
+        print(f"{quantile_name} ({freq.capitalize()})")
 
         if (use_ssl_mode == "full") and (pretrain_ckpt_path is not None):
             best_pt_q = train_patchtst_finetune(
@@ -1038,12 +1086,17 @@ def _run_patchtst(
             )
 
         if save_root:
-            ckpt_path_q = _make_ckpt_path(save_root, freq, "PatchTSTQuantile", lookback, horizon)
+            artifact_name = (
+                "PatchTSTQuantileExogenous"
+                if run_explicit_quantile_exogenous
+                else "PatchTSTQuantile"
+            )
+            ckpt_path_q = _make_ckpt_path(save_root, freq, artifact_name, lookback, horizon)
             save_model(
                 pt_q,
                 pt_q_cfg,
                 ckpt_path_q,
-                extra_meta={"model_key": "patchtst_quantile", "family_key": "patchtst"},
+                extra_meta={"model_key": quantile_model_key, "family_key": "patchtst"},
             )
             best_pt_q["ckpt_path"] = str(ckpt_path_q)
             if (use_ssl_mode == "full") and (pretrain_ckpt_path is not None):
@@ -1051,9 +1104,9 @@ def _run_patchtst(
 
         _store_result(
             results,
-            result_name="PatchTST Quantile",
+            result_name=quantile_name,
             best=best_pt_q,
-            model_key="patchtst_quantile",
+            model_key=quantile_model_key,
             family_key="patchtst",
         )
 
@@ -1316,9 +1369,35 @@ def _run_patchmixer(
     loss_point_obj = loss if loss is not None else (loss_point if loss_point is not None else point_train_cfg.loss)
     mode, out_mul, param_names, dist_name = _infer_mode_and_dist(loss_point_obj)
     requested = _requested_target_set(requested_artifact_keys)
-    run_base = _wants_artifact(requested, "patchmixer_base")
+    run_explicit_exogenous = requested is not None and "patchmixer_exogenous" in requested
+    run_explicit_quantile_exogenous = (
+        requested is not None and "patchmixer_quantile_exogenous" in requested
+    )
+    run_base = _wants_artifact(requested, "patchmixer_base") or run_explicit_exogenous
     run_original = _wants_artifact(requested, "patchmixer_original")
-    run_quantile = _wants_artifact(requested, "patchmixer_quantile")
+    run_quantile = (
+        _wants_artifact(requested, "patchmixer_quantile")
+        or run_explicit_quantile_exogenous
+    )
+
+    if requested is not None and {
+        "patchmixer_base",
+        "patchmixer_exogenous",
+    }.issubset(requested):
+        raise ValueError("Request either patchmixer_base or patchmixer_exogenous, not both.")
+    if requested is not None and {
+        "patchmixer_quantile",
+        "patchmixer_quantile_exogenous",
+    }.issubset(requested):
+        raise ValueError(
+            "Request either patchmixer_quantile or patchmixer_quantile_exogenous, not both."
+        )
+    if (run_explicit_exogenous or run_explicit_quantile_exogenous) and not use_exogenous_mode:
+        raise ValueError("Explicit PatchMixer exogenous variants require use_exogenous_mode=True.")
+    if (run_explicit_exogenous or run_explicit_quantile_exogenous) and not any(
+        (int(exo_dim), int(past_cont_dim), int(past_cat_dim))
+    ):
+        raise ValueError("Explicit PatchMixer exogenous variants require configured exogenous features.")
 
     if run_original and mode != "point":
         raise NotImplementedError(
@@ -1412,11 +1491,16 @@ def _run_patchmixer(
           f"past_exo_cont_dim={pm_kwargs.get('past_exo_cont_dim')} future_cb={_fcb is not None} "
           f"past_exo_cat_dim={pm_kwargs.get('past_exo_cat_dim')}")
     if run_base:
+        point_model_key = (
+            "patchmixer_exogenous" if run_explicit_exogenous else "patchmixer_base"
+        )
         pm_base_cfg = PatchMixerConfig(**pm_kwargs)
         pm_base_cfg.loss = loss_point_obj
-        pm_base_model = build_patch_mixer(pm_base_cfg)
+        point_builder = build_patch_mixer_exogenous if run_explicit_exogenous else build_patch_mixer
+        pm_base_model = point_builder(pm_base_cfg)
 
-        print(f"PatchMixer ({freq.capitalize()}) mode={mode}")
+        point_name = "PatchMixer Exogenous" if run_explicit_exogenous else "PatchMixer"
+        print(f"{point_name} ({freq.capitalize()}) mode={mode}")
         best_pm_base = train_patchmixer(
             pm_base_model,
             train_loader,
@@ -1427,19 +1511,20 @@ def _run_patchmixer(
             future_exo_cb=_fcb,
         )
         if save_root:
-            ckpt_path = _make_ckpt_path(save_root, freq, "PatchMixer", lookback, horizon)
+            artifact_name = "PatchMixerExogenous" if run_explicit_exogenous else "PatchMixer"
+            ckpt_path = _make_ckpt_path(save_root, freq, artifact_name, lookback, horizon)
             save_model(
                 pm_base_model,
                 pm_base_cfg,
                 ckpt_path,
-                extra_meta={"model_key": "patchmixer_base", "family_key": "patchmixer"},
+                extra_meta={"model_key": point_model_key, "family_key": "patchmixer"},
             )
             best_pm_base["ckpt_path"] = str(ckpt_path)
         _store_result(
             results,
-            result_name="PatchMixer",
+            result_name=point_name,
             best=best_pm_base,
-            model_key="patchmixer_base",
+            model_key=point_model_key,
             family_key="patchmixer",
         )
 
@@ -1485,11 +1570,26 @@ def _run_patchmixer(
         )
 
     if run_quantile:
+        quantile_model_key = (
+            "patchmixer_quantile_exogenous"
+            if run_explicit_quantile_exogenous
+            else "patchmixer_quantile"
+        )
         pm_q_cfg = PatchMixerConfig(**pm_kwargs)
         pm_q_cfg.loss = loss_q_obj
-        pm_q_model = build_patch_mixer_quantile(pm_q_cfg)
+        quantile_builder = (
+            build_patch_mixer_quantile_exogenous
+            if run_explicit_quantile_exogenous
+            else build_patch_mixer_quantile
+        )
+        pm_q_model = quantile_builder(pm_q_cfg)
 
-        print(f"PatchMixer Quantile ({freq.capitalize()})")
+        quantile_name = (
+            "PatchMixer Quantile Exogenous"
+            if run_explicit_quantile_exogenous
+            else "PatchMixer Quantile"
+        )
+        print(f"{quantile_name} ({freq.capitalize()})")
         best_pm_q = train_patchmixer(
             pm_q_model,
             train_loader,
@@ -1500,19 +1600,24 @@ def _run_patchmixer(
             future_exo_cb=_fcb,
         )
         if save_root:
-            ckpt_path = _make_ckpt_path(save_root, freq, "PatchMixerQuantile", lookback, horizon)
+            artifact_name = (
+                "PatchMixerQuantileExogenous"
+                if run_explicit_quantile_exogenous
+                else "PatchMixerQuantile"
+            )
+            ckpt_path = _make_ckpt_path(save_root, freq, artifact_name, lookback, horizon)
             save_model(
                 pm_q_model,
                 pm_q_cfg,
                 ckpt_path,
-                extra_meta={"model_key": "patchmixer_quantile", "family_key": "patchmixer"},
+                extra_meta={"model_key": quantile_model_key, "family_key": "patchmixer"},
             )
             best_pm_q["ckpt_path"] = str(ckpt_path)
         _store_result(
             results,
-            result_name="PatchMixer Quantile",
+            result_name=quantile_name,
             best=best_pm_q,
-            model_key="patchmixer_quantile",
+            model_key=quantile_model_key,
             family_key="patchmixer",
         )
 

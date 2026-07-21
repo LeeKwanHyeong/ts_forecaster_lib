@@ -73,7 +73,15 @@ def _prediction_payload(
 ) -> torch.Tensor | dict[str, torch.Tensor]:
     first = 1.0 + 0.5 * torch.arange(lookback, dtype=torch.float32)
     x = torch.stack((first, first + 0.5), dim=0).unsqueeze(-1)
-    if model_key not in {"exotst_base", "timexer_base"}:
+    exogenous_model_keys = {
+        "exotst_base",
+        "timexer_base",
+        "patchtst_exogenous",
+        "patchtst_quantile_exogenous",
+        "patchmixer_exogenous",
+        "patchmixer_quantile_exogenous",
+    }
+    if model_key not in exogenous_model_keys:
         return x
 
     payload = {
@@ -86,7 +94,7 @@ def _prediction_payload(
             dim=0,
         ).unsqueeze(-1),
     }
-    if model_key == "exotst_base":
+    if model_key != "timexer_base":
         payload["future_exo_batch"] = torch.tensor([[[1.0]], [[0.5]]])
     return payload
 
@@ -216,6 +224,30 @@ POINT_SMOKE_CASES = [
         _tiny_patchmixer_architecture(),
         None,
         id="patchmixer",
+    ),
+    pytest.param(
+        "patchtst_exogenous",
+        _tiny_patchtst_architecture(),
+        ExogenousConfig(
+            use_exogenous_mode=True,
+            use_past_exogenous=True,
+            use_future_exogenous=True,
+            past_exo_cont_cols=["exo_known"],
+            future_exo_cont_cols=["exo_known"],
+        ),
+        id="patchtst-exogenous",
+    ),
+    pytest.param(
+        "patchmixer_exogenous",
+        _tiny_patchmixer_architecture(),
+        ExogenousConfig(
+            use_exogenous_mode=True,
+            use_past_exogenous=True,
+            use_future_exogenous=True,
+            past_exo_cont_cols=["exo_known"],
+            future_exo_cont_cols=["exo_known"],
+        ),
+        id="patchmixer-exogenous",
     ),
     pytest.param(
         "patchmixer_original",
@@ -448,6 +480,20 @@ QUANTILE_FUTURE_EXOGENOUS_SMOKE_CASES = [
         10,
         id="patchmixer-quantile-future-exogenous",
     ),
+    pytest.param(
+        "patchtst_quantile_exogenous",
+        _tiny_patchtst_architecture(),
+        2,
+        4,
+        id="patchtst-quantile-explicit-exogenous",
+    ),
+    pytest.param(
+        "patchmixer_quantile_exogenous",
+        _tiny_patchmixer_architecture(),
+        8,
+        10,
+        id="patchmixer-quantile-explicit-exogenous",
+    ),
 ]
 
 
@@ -509,7 +555,8 @@ def test_public_quantile_future_exogenous_train_checkpoint_load_predict_smoke(
     for key, saved_value in checkpoint["state_dict"].items():
         torch.testing.assert_close(restored_state[key].cpu(), saved_value.cpu())
 
-    x = _prediction_payload(model_key, lookback=lookback)
+    prediction_payload = _prediction_payload(model_key, lookback=lookback)
+    x = prediction_payload["x"] if isinstance(prediction_payload, dict) else prediction_payload
     assert torch.is_tensor(x)
     payload = {
         "x": x,

@@ -397,7 +397,12 @@ def build_checkpoint_payload(
         "torch_version": torch.__version__,
         "saved_at": datetime.now(timezone.utc).isoformat(),
     }
-    for attr in ("architecture_variant", "upstream_repository", "upstream_commit"):
+    for attr in (
+        "architecture_variant",
+        "exogenous_fusion_strategy",
+        "upstream_repository",
+        "upstream_commit",
+    ):
         value = getattr(model, attr, None)
         if value is not None:
             meta[attr] = _sanitize(value)
@@ -533,13 +538,19 @@ def _canonical_model_key(name: str) -> str:
 
     # 이미 builders가 snake_case로 들어오는 경우
     if sl in {
-        "patchmixer_base", "patchmixer_original", "patchmixer_quantile", "patchmixer_dist",
+        "patchmixer_base", "patchmixer_exogenous", "patchmixer_original",
+        "patchmixer_quantile", "patchmixer_quantile_exogenous", "patchmixer_dist",
         "titan_base", "titan_lmm", "titan_seq2seq",
-        "patchtst_base", "patchtst_quantile", 'exotst_base', 'timexer_base'
+        "patchtst_base", "patchtst_exogenous", "patchtst_quantile",
+        "patchtst_quantile_exogenous", "exotst_base", "timexer_base",
     }:
         return sl
 
     # 클래스/별칭 정규화
+    if "patchtst" in sl and "quant" in sl and ("exogenous" in sl or "exo" in sl):
+        return "patchtst_quantile_exogenous"
+    if "patchtst" in sl and ("exogenous" in sl or "exo" in sl):
+        return "patchtst_exogenous"
     if "patchtst" in sl and "quant" in sl:
         return "patchtst_quantile"
     if "patchtst" in sl and ("base" in sl or "point" in sl):
@@ -549,6 +560,10 @@ def _canonical_model_key(name: str) -> str:
 
     if "patchmixer" in sl and ("original" in sl or "canonical" in sl or "upstream" in sl):
         return "patchmixer_original"
+    if "patchmixer" in sl and "quant" in sl and ("exogenous" in sl or "exo" in sl):
+        return "patchmixer_quantile_exogenous"
+    if "patchmixer" in sl and ("exogenous" in sl or "exo" in sl):
+        return "patchmixer_exogenous"
     if "patchmixer" in sl and "quant" in sl:
         return "patchmixer_quantile"
     if "patchmixer" in sl:
