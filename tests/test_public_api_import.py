@@ -5,6 +5,10 @@ def test_public_api_import():
     assert hasattr(mm, "load_predictor")
     assert hasattr(mm, "build_dataloader")
     assert hasattr(mm, "build_dataset")
+    assert hasattr(mm, "forecast")
+    assert hasattr(mm, "ForecastRequest")
+    assert hasattr(mm, "ForecastRuntimeConfig")
+    assert hasattr(mm, "ForecastResult")
 
 
 def test_api_subpackage_exports_public_surface():
@@ -17,3 +21,7 @@ def test_api_subpackage_exports_public_surface():
     assert hasattr(api, "build_dataset")
     assert hasattr(api, "TrainRequest")
     assert hasattr(api, "DataRequest")
+    assert hasattr(api, "forecast")
+    assert hasattr(api, "ForecastRequest")
+    assert hasattr(api, "ForecastRuntimeConfig")
+    assert hasattr(api, "ForecastResult")

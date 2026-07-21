@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import MISSING, dataclass, fields, is_dataclass
+from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Mapping, Optional
+from typing import Any, Literal, Mapping, Optional, Sequence
 
 import polars as pl
 
@@ -108,7 +109,7 @@ class LoaderConfig:
     shuffle: bool = True
     seed: int = 42
     stage: str = "train"
-    plan_dt: Optional[int] = None
+    plan_dt: Optional[date | datetime | int] = None
     split_mode: str = "window"
     is_running: Optional[bool] = None
     num_workers: int = 0
@@ -154,7 +155,9 @@ class DataRequest:
     use_future_exogenous: Optional[bool] = None
     backend: Optional[str] = None
     stage: str = "train"
-    plan_dt: Optional[int] = None
+    plan_dt: Optional[date | datetime | int] = None
+    series_ids: Optional[Sequence[str]] = None
+    unknown_series_policy: Literal["error", "ignore"] = "error"
 
     id_col: str = "unique_id"
     date_col: str = "date"
@@ -477,6 +480,13 @@ def build_dataloader(cfg: DataRequest | Mapping[str, Any]) -> Any:
     if stage in {"infer", "inference", "predict"}:
         plan_dt = payload.get("plan_dt")
         if plan_dt is not None:
+            if isinstance(datamodule, MultiPartExoDataModule):
+                return datamodule.get_inference_loader_at_plan(
+                    plan_dt,
+                    series_ids=payload.get("series_ids"),
+                    unknown_series_policy=str(payload.get("unknown_series_policy", "error")),
+                    **loader_kwargs,
+                )
             return datamodule.get_inference_loader_at_plan(int(plan_dt))
         if hasattr(datamodule, "get_inference_loader"):
             return datamodule.get_inference_loader()

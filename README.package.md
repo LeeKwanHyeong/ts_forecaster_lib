@@ -5,7 +5,7 @@
 설치 후에는 아래처럼 사용합니다.
 
 ```python
-from modeling_module import DistributionLoss, train, load_predictor, predict, build_dataloader
+from modeling_module import DistributionLoss, forecast, load_predictor, predict, train
 ```
 
 중요한 이름은 아래와 같습니다.
@@ -23,8 +23,9 @@ from modeling_module import DistributionLoss, train, load_predictor, predict, bu
 
 공식 public API는 아래를 기준으로 사용하면 됩니다.
 
-- 함수: `train`, `load_predictor`, `predict`, `build_dataset`, `build_dataloader`
-- 타입: `TrainRequest`, `TrainResult`, `DataRequest`, `DistributionLoss`
+- 함수: `train`, `forecast`, `load_predictor`, `predict`, `build_dataset`, `build_dataloader`
+- 타입: `TrainRequest`, `TrainResult`, `ForecastRequest`, `ForecastResult`,
+  `ForecastRuntimeConfig`, `DataRequest`, `DistributionLoss`
 - nested config:
   `TrainerConfig`, `SSLConfig`, `RuntimeConfig`, `ArtifactConfig`,
   `DataWindowConfig`, `DataColumnConfig`, `ExogenousConfig`, `LoaderConfig`,
@@ -54,7 +55,7 @@ pip install "modeling-module[notebook]"
 설치 후에는 반드시 `pip check`로 확인합니다.
 
 ```bash
-pip install --no-deps --force-reinstall /path/to/modeling_module-0.1.1-py3-none-any.whl
+pip install --no-deps --force-reinstall /path/to/modeling_module-0.2.0-py3-none-any.whl
 pip check
 ```
 
@@ -75,6 +76,7 @@ pip check
 | `patchtst` | `patchtst_quantile` | 지원 | q10/q50/q90 | past/future optional | `full`, `ssl_only` |
 | `patchmixer` | `patchmixer_base` | 지원 | point, Normal, StudentT | past/future optional | 미지원 |
 | `patchmixer` | `patchmixer_quantile` | 지원 | q10/q50/q90 | past/future optional | 미지원 |
+| explicit only | `patchmixer_original` | 지원 | point only | 미지원 | 미지원 |
 | `titan` | `titan_base` | Deprecated | point, Normal, StudentT | past/future optional | 미지원 |
 | `titan` | `titan_lmm` | Deprecated | point, Normal, StudentT | past/future optional | 미지원 |
 | `titan` | `titan_seq2seq` | Deprecated | point, Normal, StudentT | past/future optional | 미지원 |
@@ -85,6 +87,8 @@ pip check
 
 - family key는 표에 나열된 canonical artifact로 확장됩니다.
 - artifact key를 직접 주면 해당 artifact만 학습합니다.
+- `patchmixer_original`은 upstream 비교용 endogenous baseline이므로 `models`에 직접 지정해야 하며,
+  `patchmixer` family 요청에는 자동으로 포함되지 않습니다.
 - `models`를 생략하거나 빈 목록을 주면 `patchtst` family가 기본값이며
   `patchtst_base`, `patchtst_quantile` 순서로 확장됩니다.
 - categorical past exogenous 입력은 현재 모든 public family에서 fail-fast합니다. 먼저 continuous
@@ -279,6 +283,45 @@ result = train(req)
 ```
 
 ## Inference
+
+Part/series 단위 anchored inference에는 결과를 반환하는 공개 `forecast()` API를 사용합니다.
+Weekly origin은 ISO W0, monthly origin은 M0이며 `horizon_step=0`이 origin 자체입니다.
+상세한 request, 결과 schema, series 선택 정책은 repository의
+`docs/public_forecast_api.md`를 참고합니다.
+
+```python
+from modeling_module import (
+    DataColumnConfig,
+    DataRequest,
+    DataWindowConfig,
+    ExogenousConfig,
+    ForecastRequest,
+    ForecastRuntimeConfig,
+    forecast,
+)
+
+result = forecast(
+    ForecastRequest(
+        checkpoint_path="./checkpoints/patchtst.pt",
+        expected_model_key="patchtst_base",
+        data=DataRequest(
+            df=source_df,
+            backend="exo",
+            window=DataWindowConfig(lookback=52, horizon=27, freq="weekly"),
+            columns=DataColumnConfig(id_col="series", date_col="period", y_col="target"),
+            exogenous=ExogenousConfig(fill_missing="zero"),
+        ),
+        series_ids=["series-a", "series-b"],
+        forecast_origin=202601,
+        runtime=ForecastRuntimeConfig(batch_size=32, device="cpu"),
+    )
+)
+
+predictions = result.predictions
+```
+
+`forecast()`는 파일을 쓰지 않습니다. Database 접근, `.env`, checkpoint/data 경로 결정,
+Parquet 저장 정책은 Consumer가 소유합니다.
 
 checkpoint를 재사용할 계획이면 predictor를 먼저 로드하는 것이 좋습니다.
 

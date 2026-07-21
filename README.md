@@ -15,7 +15,7 @@
 즉, 설치 후 실제 코드에서는 아래처럼 import 합니다.
 
 ```python
-from modeling_module import DistributionLoss, train, load_predictor, build_dataloader
+from modeling_module import DistributionLoss, forecast, load_predictor, train
 ```
 
 ## What This Library Provides
@@ -30,11 +30,15 @@ from modeling_module import DistributionLoss, train, load_predictor, build_datal
 현재 public API에서 직접 다루는 주요 함수와 타입은 아래입니다.
 
 - `train`
+- `forecast`
 - `load_predictor`
 - `predict`
 - `build_dataset`
 - `build_dataloader`
 - `TrainRequest`
+- `ForecastRequest`
+- `ForecastResult`
+- `ForecastRuntimeConfig`
 - `DataRequest`
 - `TrainerConfig`
 - `DistributionLoss`
@@ -50,8 +54,9 @@ from modeling_module import DistributionLoss, train, load_predictor, build_datal
 
 현재 library에서 안정적으로 사용하기를 권장하는 표면은 아래입니다.
 
-- 함수: `train`, `load_predictor`, `predict`, `build_dataset`, `build_dataloader`
-- request/result 타입: `TrainRequest`, `TrainResult`, `DataRequest`
+- 함수: `train`, `forecast`, `load_predictor`, `predict`, `build_dataset`, `build_dataloader`
+- request/result 타입: `TrainRequest`, `TrainResult`, `ForecastRequest`, `ForecastResult`,
+  `ForecastRuntimeConfig`, `DataRequest`
 - nested config 타입:
   `TrainerConfig`, `SSLConfig`, `RuntimeConfig`, `ArtifactConfig`,
   `DataWindowConfig`, `DataColumnConfig`, `ExogenousConfig`, `LoaderConfig`,
@@ -63,6 +68,7 @@ from modeling_module import DistributionLoss, train, load_predictor, build_datal
 
 - training: `train(TrainRequest(...))`
 - data: `build_dataloader(DataRequest(...))`
+- anchored inference: `forecast(ForecastRequest(...))`
 - inference: `predict(...)` 또는 `load_predictor(...)`
 
 flat dict style도 아직 지원하지만, 호환성 목적에 가깝습니다.
@@ -173,7 +179,7 @@ pip install -e .[notebook]
 wheel만 다시 설치할 때는 dependency 재해결을 피하는 편이 안전합니다.
 
 ```bash
-pip install --no-deps --force-reinstall /path/to/modeling_module-0.1.1-py3-none-any.whl
+pip install --no-deps --force-reinstall /path/to/modeling_module-0.2.0-py3-none-any.whl
 ```
 
 최소 의존성만 수동 설치하려면:

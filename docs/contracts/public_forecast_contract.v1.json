@@ -1,0 +1,129 @@
+{
+  "contract_id": "modeling-module.public-anchored-forecast",
+  "contract_version": "1.0.0",
+  "contract_sha256": "07e8d2d825929bd9882d413c32faf76108b3f5e0d147d6a628575e0ebda563bd",
+  "public_surfaces": [
+    "modeling_module",
+    "modeling_module.api"
+  ],
+  "target_api": [
+    {
+      "name": "ForecastRuntimeConfig",
+      "signature": "ForecastRuntimeConfig(batch_size: int = 64, num_workers: int = 0, device: str | None = None, pin_memory: bool = True, persistent_workers: bool = True, prefetch_factor: int = 2)"
+    },
+    {
+      "name": "ForecastRequest",
+      "signature": "ForecastRequest(checkpoint_path: str | Path, expected_model_key: str | None, data: DataRequest, series_ids: Sequence[str] | None, forecast_origin: date | datetime | int, runtime: ForecastRuntimeConfig = <factory>, unknown_series_policy: Literal['error', 'ignore'] = 'error')"
+    },
+    {
+      "name": "ForecastResult",
+      "signature": "ForecastResult(predictions: pl.DataFrame, model_key: str, forecast_origin: int)"
+    },
+    {
+      "name": "forecast",
+      "signature": "forecast(request: ForecastRequest) -> ForecastResult"
+    }
+  ],
+  "forecast_result": {
+    "container": "polars.DataFrame",
+    "ordered_schema": [
+      {
+        "name": "series_id",
+        "dtype": "String",
+        "nullable": false
+      },
+      {
+        "name": "model_key",
+        "dtype": "String",
+        "nullable": false
+      },
+      {
+        "name": "forecast_origin",
+        "dtype": "Int64",
+        "nullable": false
+      },
+      {
+        "name": "horizon_step",
+        "dtype": "Int32",
+        "nullable": false
+      },
+      {
+        "name": "point",
+        "dtype": "Float64",
+        "nullable": false
+      },
+      {
+        "name": "q10",
+        "dtype": "Float64",
+        "nullable": true
+      },
+      {
+        "name": "q50",
+        "dtype": "Float64",
+        "nullable": true
+      },
+      {
+        "name": "q90",
+        "dtype": "Float64",
+        "nullable": true
+      }
+    ],
+    "point_only_models": "q10, q50, and q90 remain present and null",
+    "quantile_point_fallback": "q50 is point when no separate point output exists"
+  },
+  "temporal_semantics": {
+    "weekly_key": "ISO YYYYWW",
+    "monthly_key": "YYYYMM",
+    "daily_key": "YYYYMMDD",
+    "hourly_key": "YYYYMMDDHH",
+    "weekly_origin": "W0 is forecast_origin and horizon_step 0",
+    "monthly_origin": "M0 is forecast_origin and horizon_step 0",
+    "lookback": "The L canonical periods immediately before forecast_origin, ordered oldest to newest",
+    "iso_week_53": "Accepted only when valid in the ISO week-year",
+    "timezone": "Preserve an aware datetime's represented timezone when deriving its calendar period; do not first convert to UTC"
+  },
+  "series_policy": {
+    "none": "Select all available series in canonical string order",
+    "empty": "Raise ValueError",
+    "duplicates": "De-duplicate by first occurrence",
+    "unknown_default": "Raise ValueError",
+    "unknown_ignore": "Ignore unknown IDs only when explicitly requested; raise when no known IDs remain",
+    "explicit_order": "Preserve request order",
+    "result_order": "Resolved series ordinal then zero-based horizon_step",
+    "batch_stability": "Row identity and order are independent of batch_size"
+  },
+  "compatibility_guarantees": [
+    "load_predictor() remains available",
+    "predict() remains available",
+    "build_dataset() remains available",
+    "build_dataloader() remains available",
+    "fill_missing keeps its existing ffill default",
+    "zero filling is available only when explicitly requested",
+    "the capitalized MultiPartExoDataModule import path may remain as a thin compatibility wrapper",
+    "forecast_to_parquet may remain as a compatibility adapter"
+  ],
+  "non_goals": [
+    "Database access",
+    "Loading .env files",
+    "Consumer checkpoint or data path discovery",
+    "Parquet naming, partitioning, writing, or retention policy",
+    "DSI-specific public names including KH, oper_part_no, and part_ids",
+    "Exposing concrete DataModule or Dataset classes on the stable public surfaces"
+  ],
+  "ownership": {
+    "library": [
+      "checkpoint restoration",
+      "temporal normalization",
+      "anchored window construction",
+      "series selection",
+      "model execution",
+      "forecast result normalization"
+    ],
+    "consumer": [
+      "database and environment integration",
+      "input and checkpoint path selection",
+      "persistence policy"
+    ]
+  },
+  "seal_algorithm": "SHA-256 of sorted compact ASCII canonical JSON after removing only the top-level contract_sha256 field"
+}

@@ -8,6 +8,7 @@ from .data import (
     build_dataset,
 )
 from .infer import LoadedPredictor, load_predictor, predict
+from .forecast import ForecastRequest, ForecastResult, ForecastRuntimeConfig, forecast
 from .losses import DistributionLoss
 from .train import (
     ArtifactConfig,
@@ -34,6 +35,9 @@ __all__ = [
     "DistributionLoss",
     "ExoTSTArchitectureConfig",
     "ExogenousConfig",
+    "ForecastRequest",
+    "ForecastResult",
+    "ForecastRuntimeConfig",
     "LoadedPredictor",
     "LoaderConfig",
     "PatchMixerArchitectureConfig",
@@ -47,6 +51,7 @@ __all__ = [
     "TrainerConfig",
     "build_dataloader",
     "build_dataset",
+    "forecast",
     "load_predictor",
     "predict",
     "train",

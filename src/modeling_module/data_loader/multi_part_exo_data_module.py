@@ -1,4 +1,5 @@
-from typing import Optional, List, Dict, Sequence, Callable, Any
+from datetime import date, datetime
+from typing import Any, Callable, Dict, List, Literal, Optional, Sequence
 
 import numpy as np
 import polars as pl
@@ -20,12 +21,14 @@ except ImportError:
 
 
 def _build_train_collate_fn(*, horizon: int, future_exo_cb=None, cache_size: int = 4096,
+                            part_future_exo_fn=None,
                             scenario_store: Optional[FutureScenarioStore] = None,
                             scenario_mode: str = "append",
                             scenario_missing_policy: str = "error"):
     return TrainCollateWithFutureExo(
         horizon=int(horizon),
         future_exo_cb=future_exo_cb,
+        part_future_exo_fn=part_future_exo_fn,
         cache_size=int(cache_size),
         scenario_store=scenario_store,
         scenario_mode=scenario_mode,
@@ -124,9 +127,11 @@ class MultiPartExoDataModule:
             y_col: str = "HUFL",
             past_exo_cont_cols: Optional[Sequence[str]] = None,
             past_exo_cat_cols: Optional[Sequence[str]] = None,
+            future_exo_cont_cols: Optional[Sequence[str]] = None,
             fill_missing: str = "ffill",
             target_back_steps: int = 100,
             future_exo_cb: Optional[Callable[[int, int, str], np.ndarray | torch.Tensor]] = None,
+            part_future_exo_fn: Optional[Callable] = None,
             date_indexer: Optional[Callable[[int], int]] = None,
             build_cat_indexer_from: Optional[Sequence[str]] = None,
             cat_indexer_target_col: Optional[str] = None,
@@ -160,11 +165,13 @@ class MultiPartExoDataModule:
 
         self.past_exo_cont_cols = list(past_exo_cont_cols) if past_exo_cont_cols else []
         self.past_exo_cat_cols = list(past_exo_cat_cols) if past_exo_cat_cols else []
+        self.future_exo_cont_cols = list(future_exo_cont_cols) if future_exo_cont_cols else []
 
         # 전처리 및 콜백 설정
         self.fill_missing = fill_missing
         self.target_back_steps = int(target_back_steps)
         self.future_exo_cb = future_exo_cb
+        self.part_future_exo_fn = part_future_exo_fn
         self.date_indexer = date_indexer or identity_date_indexer
 
         self.cat_indexers: Dict[str, CategoryIndexer] = {}
@@ -206,6 +213,7 @@ class MultiPartExoDataModule:
             qty_col=self.qty_col,
             past_exo_cont_cols=self.past_exo_cont_cols,
             past_exo_cat_cols=self.past_exo_cat_cols,
+            future_exo_cont_cols=self.future_exo_cont_cols,
             future_exo_cb=self.future_exo_cb,
             date_indexer=self.date_indexer,
             cat_indexers=self.cat_indexers,
@@ -318,6 +326,7 @@ class MultiPartExoDataModule:
         collate_fn = _build_train_collate_fn(
             horizon=self.horizon,
             future_exo_cb=self.future_exo_cb,
+            part_future_exo_fn=self.part_future_exo_fn,
             cache_size=15000,
         )
 
@@ -360,6 +369,7 @@ class MultiPartExoDataModule:
         collate_fn = _build_train_collate_fn(
             horizon=self.horizon,
             future_exo_cb=self.future_exo_cb,
+            part_future_exo_fn=self.part_future_exo_fn,
             cache_size=15000,
         )
 
@@ -381,24 +391,50 @@ class MultiPartExoDataModule:
 
         return DataLoader(**loader_kwargs)
 
-    def get_inference_loader_at_plan(self, plan_dt: int):
-        """
-        특정 계획 시점(plan_dt)을 기준으로 한 추론용 DataLoader 생성.
+    def get_inference_loader_at_plan(
+        self,
+        plan_dt: date | datetime | int,
+        *,
+        series_ids: Optional[Sequence[str]] = None,
+        unknown_series_policy: Literal["error", "ignore"] = "error",
+        batch_size: Optional[int] = None,
+        num_workers: int = 0,
+        pin_memory: bool = True,
+        persistent_workers: bool = True,
+        prefetch_factor: int = 2,
+        drop_last: bool = False,
+    ) -> DataLoader:
+        """Build a deterministic anchored-inference loader.
+
         Args:
-            plan_dt: 추론 기준 시점 (포맷: YYYYMM, YYYYWW, YYYYMMDD 등)
+            plan_dt: Forecast origin as a date-like value or canonical integer.
+            series_ids: Optional ordered series subset; ``None`` selects all.
+            unknown_series_policy: Whether unknown IDs raise or are ignored.
+            batch_size: Per-loader override of the DataModule batch size.
+            num_workers: Number of PyTorch worker processes.
+            pin_memory: Forwarded PyTorch pinned-memory option.
+            persistent_workers: Used only when workers are enabled.
+            prefetch_factor: Used only when workers are enabled.
+            drop_last: Whether to discard an incomplete final batch.
+
+        Returns:
+            A non-shuffled PyTorch DataLoader.
         """
         # 앵커링된 추론 전용 데이터셋 생성
         ds = MultiPartExoAnchoredInferenceDataset(
             df=self.df,
             lookback=self.lookback,
             horizon=self.horizon,
-            plan_dt=int(plan_dt),
+            plan_dt=plan_dt,
             freq=self.freq,
             id_col=self.id_col,
             date_col=self.date_col,
             qty_col=self.qty_col,
             past_exo_cont_cols=self.past_exo_cont_cols,
             past_exo_cat_cols=self.past_exo_cat_cols,
+            future_exo_cont_cols=self.future_exo_cont_cols,
+            series_ids=series_ids,
+            unknown_series_policy=unknown_series_policy,
             fill_missing=self.fill_missing,
             target_back_steps=self.target_back_steps,
             future_exo_cb=self.future_exo_cb,
@@ -409,7 +445,21 @@ class MultiPartExoDataModule:
         collate_fn = _build_train_collate_fn(
             horizon=self.horizon,
             future_exo_cb=self.future_exo_cb,
+            part_future_exo_fn=self.part_future_exo_fn,
             cache_size=15000,
         )
-        return DataLoader(ds, batch_size=self.batch_size, shuffle=False, collate_fn=collate_fn)
-
+        loader_kwargs: Dict[str, Any] = {
+            "dataset": ds,
+            "batch_size": self.batch_size if batch_size is None else int(batch_size),
+            "shuffle": False,
+            "drop_last": bool(drop_last),
+            "num_workers": int(num_workers),
+            "pin_memory": bool(pin_memory),
+            "collate_fn": collate_fn,
+        }
+        if num_workers > 0:
+            loader_kwargs["persistent_workers"] = bool(persistent_workers)
+            loader_kwargs["prefetch_factor"] = int(prefetch_factor)
+        else:
+            loader_kwargs["persistent_workers"] = False
+        return DataLoader(**loader_kwargs)

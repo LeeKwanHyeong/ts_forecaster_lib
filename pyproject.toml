@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "modeling-module"
-version = "0.1.1"
+version = "0.2.0"
 description = "Reusable time-series forecasting training and inference library"
 readme = "README.package.md"
 requires-python = ">=3.10"
