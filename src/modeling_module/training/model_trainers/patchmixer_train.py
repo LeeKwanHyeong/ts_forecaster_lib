@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 from dataclasses import asdict, is_dataclass
 from typing import Optional, Callable
@@ -113,6 +114,9 @@ def train_patchmixer(
         stages = [StageConfig(epochs=train_cfg.epochs, spike_enabled=train_cfg.spike_loss.enabled)]
 
     best = None
+    global_best_loss = float("inf")
+    global_best_state = copy.deepcopy(model.state_dict())
+    global_best_cfg = train_cfg
 
     # 5. 스테이지별 학습 루프 실행
     for i, stg in enumerate(stages, 1):
@@ -140,7 +144,15 @@ def train_patchmixer(
             device = device
         )
         model = trainer.fit(model, tl_i, val_loader, tta_steps=0)
-        best = {"model": model, "cfg": cfg_i}
+        stage_best_loss = float(getattr(trainer, "best_loss_", float("inf")))
+        if stage_best_loss < global_best_loss:
+            global_best_loss = stage_best_loss
+            global_best_state = copy.deepcopy(model.state_dict())
+            global_best_cfg = cfg_i
+        best = {"model": model, "cfg": cfg_i, "best_val_loss": stage_best_loss}
+
+    model.load_state_dict(global_best_state)
+    best = {"model": model, "cfg": global_best_cfg, "best_val_loss": global_best_loss}
 
     # 학습 완료 상태 로그
     print(
