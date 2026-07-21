@@ -1,6 +1,10 @@
+import pytest
+
 from modeling_module.api.train import _make_result
 from modeling_module.models.registry import (
+    PATCHMIXER_CAPABILITY_DEFAULTS,
     expand_training_targets,
+    get_patchmixer_default_model_key,
     get_model_spec,
     get_training_deprecation_messages,
     infer_artifact_model_key_from_checkpoint,
@@ -22,6 +26,7 @@ def test_expand_training_targets_supports_family_and_artifact_keys():
         "titan_seq2seq",
     ]
     assert expand_training_targets(["timexer"]) == ["timexer_base"]
+    assert expand_training_targets(["sellm"]) == ["sellm_base"]
 
 
 def test_expand_training_targets_preserves_single_artifact_requests():
@@ -31,6 +36,28 @@ def test_expand_training_targets_preserves_single_artifact_requests():
     assert expand_training_targets(["patchmixer_quantile"]) == ["patchmixer_quantile"]
     assert expand_training_targets(["patchtst_quantile"]) == ["patchtst_quantile"]
     assert expand_training_targets(["timexer_base"]) == ["timexer_base"]
+    assert expand_training_targets(["sellm_base"]) == ["sellm_base"]
+
+
+def test_patchmixer_capability_defaults_promote_original_without_changing_family_expansion():
+    assert PATCHMIXER_CAPABILITY_DEFAULTS == {
+        "endogenous_point": "patchmixer_original",
+        "exogenous_point": "patchmixer_base",
+        "distribution": "patchmixer_base",
+        "quantile": "patchmixer_quantile",
+    }
+    assert get_patchmixer_default_model_key() == "patchmixer_original"
+    assert get_patchmixer_default_model_key("point") == "patchmixer_original"
+    assert get_patchmixer_default_model_key("exogenous-point") == "patchmixer_base"
+    assert get_patchmixer_default_model_key("dist") == "patchmixer_base"
+    assert get_patchmixer_default_model_key("quantile") == "patchmixer_quantile"
+    assert expand_training_targets(["patchmixer"]) == [
+        "patchmixer_base",
+        "patchmixer_quantile",
+    ]
+
+    with pytest.raises(ValueError, match="Unknown PatchMixer capability"):
+        get_patchmixer_default_model_key("classification")
 
 
 def test_titan_registry_entries_are_deprecated_but_remain_trainable_for_compatibility():
@@ -49,6 +76,7 @@ def test_infer_artifact_model_key_from_checkpoint_prefers_meta():
         {"meta": {"model_key": "patchmixer_quantile"}, "model_class": "PatchMixerModel"}
     ) == "patchmixer_quantile"
     assert infer_artifact_model_key_from_checkpoint({"model_class": "TitanLMMDist"}) == "titan_lmm"
+    assert infer_artifact_model_key_from_checkpoint({"model_class": "SELLMModel"}) == "sellm_base"
 
 
 def test_train_result_uses_canonical_model_keys(tmp_path):

@@ -9,16 +9,23 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Callable, Dict
 
-from .registry import build_model, get_model_builders, list_available_model_keys
+from .registry import (
+    build_model,
+    get_model_builders,
+    get_patchmixer_default_model_key,
+    list_available_model_keys,
+)
 
 __all__ = [
     # unified entrypoint
     "build_model",
     "MODEL_BUILDERS",
     "list_available_models",
+    "get_patchmixer_default_model_key",
 
     # explicit builders (stable public surface)
     "build_patch_mixer",
+    "build_patch_mixer_original",
     "build_patch_mixer_quantile",
     "build_titan_base",
     "build_titan_lmm",
@@ -27,12 +34,16 @@ __all__ = [
     "build_patchTST_quantile",
     "build_exotst",
     "build_timexer",
+    "build_sellm",
+    "PatchMixerOriginalConfig",
 ]
 
 if TYPE_CHECKING:
     from .model_builder import (
         build_exotst,
+        build_sellm,
         build_patch_mixer,
+        build_patch_mixer_original,
         build_patch_mixer_quantile,
         build_titan_base,
         build_titan_lmm,
@@ -41,10 +52,12 @@ if TYPE_CHECKING:
         build_patchTST_quantile,
         build_timexer,
     )
+    from .PatchMixer.original import PatchMixerOriginalConfig
 
 # Lazy import map: import modeling_module.models 시점에 heavy import 방지
 _LAZY = {
     "build_patch_mixer": (".model_builder", "build_patch_mixer"),
+    "build_patch_mixer_original": (".model_builder", "build_patch_mixer_original"),
     "build_patch_mixer_quantile": (".model_builder", "build_patch_mixer_quantile"),
     "build_titan_base": (".model_builder", "build_titan_base"),
     "build_titan_lmm": (".model_builder", "build_titan_lmm"),
@@ -53,6 +66,8 @@ _LAZY = {
     "build_patchTST_quantile": (".model_builder", "build_patchTST_quantile"),
     "build_exotst": (".model_builder", "build_exotst"),
     "build_timexer": (".model_builder", "build_timexer"),
+    "build_sellm": (".model_builder", "build_sellm"),
+    "PatchMixerOriginalConfig": (".PatchMixer.original", "PatchMixerOriginalConfig"),
 }
 
 

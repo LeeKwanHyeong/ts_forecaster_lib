@@ -4,7 +4,12 @@ from typing import Union, Any, Optional, Mapping
 from modeling_module.models.ExoTST.configs import ExoTSTConfig
 from modeling_module.models.PatchMixer.PatchMixer import PatchMixerModel, PatchMixerQuantileModel
 from modeling_module.models.PatchMixer.common.configs import PatchMixerConfig
+from modeling_module.models.PatchMixer.original import (
+    PatchMixerOriginalConfig,
+    PatchMixerOriginalModel,
+)
 from modeling_module.models.PatchTST.common.configs import PatchTSTConfig
+from modeling_module.models.SELLM.configs import SELLMConfig
 from modeling_module.models.TimeXer.configs import TimeXerConfig
 from modeling_module.models.Titan import TitanBaseModel, TitanLMMModel, TitanSeq2SeqModel
 from modeling_module.models.Titan.common.configs import TitanConfig
@@ -46,6 +51,15 @@ def build_patch_mixer_quantile(cfg):
     from modeling_module.models.PatchMixer.PatchMixer import PatchMixerQuantileModel
     cfg = _ensure_patchmixer_config(cfg)
     return PatchMixerQuantileModel(cfg)
+
+
+def _ensure_patchmixer_original_config(cfg: Any) -> PatchMixerOriginalConfig:
+    return PatchMixerOriginalConfig.from_config(cfg)
+
+
+def build_patch_mixer_original(cfg: Any) -> PatchMixerOriginalModel:
+    """Build the canonical upstream-compatible PatchMixer point model."""
+    return PatchMixerOriginalModel(_ensure_patchmixer_original_config(cfg))
 
 
 # -----------------------------
@@ -144,6 +158,26 @@ def build_patchTST_quantile(cfg):
     from modeling_module.models.PatchTST.supervised.PatchTST import PatchTSTQuantileModel
     cfg = _ensure_patchtst_config(cfg)
     return PatchTSTQuantileModel.from_config(cfg)
+
+
+def _ensure_sellm_config(cfg: Union[SELLMConfig, dict, Any]) -> SELLMConfig:
+    if isinstance(cfg, SELLMConfig):
+        return cfg
+    if isinstance(cfg, Mapping):
+        return SELLMConfig(**dict(cfg))
+    if is_dataclass(cfg):
+        return SELLMConfig(**asdict(cfg))
+    if hasattr(cfg, "__dict__"):
+        return SELLMConfig(**dict(vars(cfg)))
+    raise TypeError(f"Unsupported config type for SELLM: {type(cfg)}")
+
+
+def build_sellm(cfg):
+    """Build a Semantic-Enhanced LLM forecaster."""
+    from modeling_module.models.SELLM.SELLM import SELLMModel
+
+    cfg = _ensure_sellm_config(cfg)
+    return SELLMModel.from_config(cfg)
 
 def _ensure_exotst_config(cfg: Union[ExoTSTConfig, dict, Any]) -> ExoTSTConfig:
     """

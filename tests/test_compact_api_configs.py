@@ -17,6 +17,7 @@ from modeling_module import (
     LoaderConfig,
     PatchTSTArchitectureConfig,
     RuntimeConfig,
+    SELLMArchitectureConfig,
     SSLConfig,
     TimexerArchitectureConfig,
     TitanArchitectureConfig,
@@ -266,6 +267,10 @@ def test_train_accepts_family_architecture_overrides(monkeypatch, tmp_path):
                 d_model=384,
                 n_layers=5,
             ),
+            sellm=SELLMArchitectureConfig(
+                llm_source="local",
+                llm_local_path="/models/Qwen2-0.5B",
+            ),
             titan=TitanArchitectureConfig(d_model=512),
         ),
         runtime=RuntimeConfig(device="cpu"),
@@ -283,6 +288,10 @@ def test_train_accepts_family_architecture_overrides(monkeypatch, tmp_path):
         },
         "titan": {
             "d_model": 512,
+        },
+        "sellm": {
+            "llm_source": "local",
+            "llm_local_path": "/models/Qwen2-0.5B",
         },
     }
 
