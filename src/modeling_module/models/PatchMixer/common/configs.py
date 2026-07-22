@@ -158,7 +158,9 @@ class PatchMixerConfig(TrainingConfig):
 
     # ---------- 미래 외생 변수 (Future Exogenous) ----------
     future_exo_dim: int = 0  # 미래 외생 변수 차원 (0일 경우 미사용)
-    exo_is_normalized_default: bool = False  # 외생 변수 정규화 여부 기본값
+    # Deprecated PatchMixer compatibility field. Input scaling belongs to the
+    # data contract; PatchMixer accepts and serializes this value but ignores it.
+    exo_is_normalized_default: bool = False
 
     # ---------- 과거 외생 변수 (Past Exogenous) ----------
     # 주의: 체크포인트 저장/로드 시 누락 방지를 위해 타입 어노테이션 필수
