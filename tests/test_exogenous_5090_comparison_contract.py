@@ -45,12 +45,20 @@ def test_focused_patchmixer_shift_space_cases_isolate_the_shift_coordinate():
             case.past_exogenous,
             case.future_exogenous,
             case.future_shift_space,
+            case.future_normalized_residual_limit,
         )
         for case in MODULE.PATCHMIXER_SHIFT_SPACE_CASES
     ] == [
-        ("patchmixer_endogenous", False, False, None),
-        ("patchmixer_future_shift", False, True, "output"),
-        ("patchmixer_future_shift_normalized", False, True, "normalized"),
+        ("patchmixer_endogenous", False, False, None, None),
+        ("patchmixer_future_shift", False, True, "output", None),
+        ("patchmixer_future_shift_normalized", False, True, "normalized", None),
+        (
+            "patchmixer_future_shift_normalized_bounded",
+            False,
+            True,
+            "normalized",
+            0.15,
+        ),
     ]
     assert MODULE.PATCHMIXER_SHIFT_SPACE_PAIRS == {
         "output_vs_endogenous": (
@@ -65,6 +73,18 @@ def test_focused_patchmixer_shift_space_cases_isolate_the_shift_coordinate():
             "patchmixer_future_shift",
             "patchmixer_future_shift_normalized",
         ),
+        "bounded_vs_endogenous": (
+            "patchmixer_endogenous",
+            "patchmixer_future_shift_normalized_bounded",
+        ),
+        "bounded_vs_output": (
+            "patchmixer_future_shift",
+            "patchmixer_future_shift_normalized_bounded",
+        ),
+        "bounded_vs_normalized": (
+            "patchmixer_future_shift_normalized",
+            "patchmixer_future_shift_normalized_bounded",
+        ),
     }
 
 
@@ -74,6 +94,9 @@ def test_focused_shift_space_configs_share_architecture_and_change_only_space():
     normalized = MODULE._patchmixer_config(
         cases["patchmixer_future_shift_normalized"]
     )
+    bounded = MODULE._patchmixer_config(
+        cases["patchmixer_future_shift_normalized_bounded"]
+    )
 
     assert output.future_exo_dim == normalized.future_exo_dim == len(
         MODULE.FUTURE_EXOGENOUS_COLUMNS
@@ -81,6 +104,10 @@ def test_focused_shift_space_configs_share_architecture_and_change_only_space():
     assert output.past_exo_cont_dim == normalized.past_exo_cont_dim == 0
     assert output.future_exo_shift_space == "output"
     assert normalized.future_exo_shift_space == "normalized"
+    assert bounded.future_exo_shift_space == "normalized"
+    assert output.future_exo_normalized_residual_limit is None
+    assert normalized.future_exo_normalized_residual_limit is None
+    assert bounded.future_exo_normalized_residual_limit == 0.15
 
 
 def test_case_set_cli_defaults_to_historical_comparison_and_accepts_focused_set():
@@ -356,6 +383,10 @@ def test_focused_accuracy_aggregate_reports_each_shift_space_pair():
             "all": _prediction_payload([[1.25, 1.25]]),
             "last": _prediction_payload([[1.25, 1.25]]),
         },
+        "patchmixer_future_shift_normalized_bounded": {
+            "all": _prediction_payload([[1.1, 1.1]]),
+            "last": _prediction_payload([[1.1, 1.1]]),
+        },
     }
     paired = MODULE._candidate_comparison_group(
         predictions,
@@ -375,6 +406,9 @@ def test_focused_accuracy_aggregate_reports_each_shift_space_pair():
     ]
     assert normalized["seed_wins"]["future_shift_normalized"] == 1
     assert normalized["mae_improvement_pct"]["mean"] == pytest.approx(50.0)
+    bounded = comparisons["bounded_vs_output"]["test_all_rolling_windows"]
+    assert bounded["seed_wins"]["future_shift_normalized_bounded"] == 1
+    assert bounded["mae_improvement_pct"]["mean"] == pytest.approx(80.0)
 
 
 def test_input_ablation_reports_positive_degradation_when_inputs_help():
@@ -463,6 +497,14 @@ def test_focused_performance_summary_reports_each_shift_space_pair():
             training_memory=21.0,
             inference_memory=10.5,
         ),
+        _performance_record(
+            "patchmixer_future_shift_normalized_bounded",
+            parameters=110,
+            training_ms=2.4,
+            inference_ms=1.25,
+            training_memory=21.0,
+            inference_memory=10.5,
+        ),
     ]
 
     result = MODULE._performance_summary(
@@ -477,3 +519,4 @@ def test_focused_performance_summary_reports_each_shift_space_pair():
     assert comparisons["normalized_vs_output"][
         "training_peak_allocated_overhead_mib"
     ] == pytest.approx(0.0)
+    assert comparisons["bounded_vs_normalized"]["parameter_overhead"] == 0

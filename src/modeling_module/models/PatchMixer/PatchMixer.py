@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import Any, List, Optional
 
 import torch
@@ -111,6 +112,26 @@ class _ExoMixin(nn.Module):
                 f"{self.future_exo_shift_space!r}; supported values are "
                 f"{supported_future_shift_spaces}."
             )
+        normalized_limit = getattr(
+            cfg,
+            "future_exo_normalized_residual_limit",
+            None,
+        )
+        if normalized_limit is not None:
+            normalized_limit = float(normalized_limit)
+            if not math.isfinite(normalized_limit) or normalized_limit <= 0.0:
+                raise ValueError(
+                    "future_exo_normalized_residual_limit must be a finite "
+                    f"positive value or None, got {normalized_limit!r}."
+                )
+            if self.future_exo_shift_space != "normalized" or not bool(
+                getattr(self, "use_revin", False)
+            ):
+                raise ValueError(
+                    "future_exo_normalized_residual_limit requires "
+                    "future_exo_shift_space='normalized' and use_revin=True."
+                )
+        self.future_exo_normalized_residual_limit = normalized_limit
         # Retained for checkpoint/introspection compatibility; it does not
         # control feature scaling or the target-space shift coordinate.
         self.exo_is_normalized_default = bool(getattr(cfg, "exo_is_normalized_default", False))
@@ -251,6 +272,16 @@ class _ExoMixin(nn.Module):
             residual = residual[:, :self.horizon]
 
         return float(multiplier) * residual
+
+    def _bound_normalized_future_exo_residual(
+        self,
+        residual: torch.Tensor,
+    ) -> torch.Tensor:
+        """Soft-bound a normalized shift in target history-standard-deviation units."""
+        limit = self.future_exo_normalized_residual_limit
+        if limit is None:
+            return residual
+        return float(limit) * torch.tanh(residual / float(limit))
 
     def _pool_past_exo(self, past_exo_cont: Optional[torch.Tensor], past_exo_cat: Optional[torch.Tensor]) -> Optional[
         torch.Tensor]:
@@ -466,6 +497,7 @@ class PatchMixerQuantileModel(_ExoMixin):
                 multiplier=self.exo_scale,
             )
             if residual is not None:
+                residual = self._bound_normalized_future_exo_residual(residual)
                 q = q + residual.unsqueeze(1)
 
         # 4) eval-only clip in RevIN normalized space
@@ -712,6 +744,7 @@ class PatchMixerEnhancedModel(_ExoMixin):
                     multiplier=self.exo_scale,
                 )
                 if residual is not None:
+                    residual = self._bound_normalized_future_exo_residual(residual)
                     y = y + residual
 
             # eval clip (optional)
@@ -760,6 +793,7 @@ class PatchMixerEnhancedModel(_ExoMixin):
                 multiplier=1.0,
             )
             if residual is not None:
+                residual = self._bound_normalized_future_exo_residual(residual)
                 loc = loc + residual.unsqueeze(-1)
 
         if self.use_revin:

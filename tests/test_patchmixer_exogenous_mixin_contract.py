@@ -27,6 +27,7 @@ def _config(
     exogenous: bool,
     distribution: bool = False,
     future_exo_shift_space: str = "output",
+    future_exo_normalized_residual_limit: float | None = None,
     use_revin: bool = False,
 ) -> PatchMixerConfig:
     kwargs = {}
@@ -58,6 +59,9 @@ def _config(
         final_nonneg=False,
         past_exo_mode="z_gate",
         future_exo_shift_space=future_exo_shift_space,
+        future_exo_normalized_residual_limit=(
+            future_exo_normalized_residual_limit
+        ),
         patch_cfgs=((4, 2, 3),),
         per_branch_dim=4,
         fused_dim=8,
@@ -70,6 +74,7 @@ def _future_only_config(
     *,
     distribution: bool = False,
     future_exo_shift_space: str = "output",
+    future_exo_normalized_residual_limit: float | None = None,
     use_revin: bool = True,
 ) -> PatchMixerConfig:
     return PatchMixerConfig(
@@ -91,6 +96,9 @@ def _future_only_config(
         past_exo_mode="none",
         future_exo_dim=2,
         future_exo_shift_space=future_exo_shift_space,
+        future_exo_normalized_residual_limit=(
+            future_exo_normalized_residual_limit
+        ),
         patch_cfgs=((4, 2, 3),),
         per_branch_dim=4,
         fused_dim=8,
@@ -581,6 +589,100 @@ def test_patchmixer_normalized_future_shift_scales_with_target_history_std(
         rtol=1e-4,
         atol=1e-4,
     )
+
+
+@pytest.mark.parametrize(
+    ("model_cls", "distribution"),
+    (
+        (PatchMixerExogenousModel, False),
+        (PatchMixerQuantileExogenousModel, False),
+        (PatchMixerExogenousModel, True),
+    ),
+)
+def test_patchmixer_normalized_residual_soft_limit_bounds_shift_and_keeps_gradients(
+    model_cls,
+    distribution: bool,
+) -> None:
+    limit = 0.15
+    model = model_cls(
+        _future_only_config(
+            distribution=distribution,
+            future_exo_shift_space="normalized",
+            future_exo_normalized_residual_limit=limit,
+        )
+    ).train()
+    selector = torch.nn.Linear(2, 1, bias=False)
+    with torch.no_grad():
+        selector.weight.zero_()
+        selector.weight[0, 0] = 1.0
+    model.exo_head = selector
+
+    pattern = torch.linspace(-1.0, 1.0, steps=8)
+    x = torch.stack((pattern, 1000.0 + 250.0 * pattern)).unsqueeze(-1)
+    future = torch.tensor(
+        [
+            [[0.05, 0.0], [0.30, 0.0]],
+            [[-0.30, 0.0], [1.00, 0.0]],
+        ],
+        requires_grad=True,
+    )
+    zero_future = torch.zeros_like(future)
+
+    def output_tensor(exogenous: torch.Tensor) -> torch.Tensor:
+        output = model(x, future_exo=exogenous)
+        return output["q"] if isinstance(output, dict) else output
+
+    baseline = output_tensor(zero_future)
+    shifted = output_tensor(future)
+    actual_effect = shifted - baseline
+    target_std = torch.sqrt(
+        x.var(dim=1, unbiased=False) + model.revin_layer.eps
+    )
+    bounded_residual = limit * torch.tanh(future[..., 0] / limit)
+    expected_effect = bounded_residual * target_std
+
+    if model_cls is PatchMixerQuantileExogenousModel:
+        expected_effect = expected_effect.unsqueeze(1).expand_as(actual_effect)
+    elif distribution:
+        for parameter_idx in range(actual_effect.shape[-1]):
+            if parameter_idx != model.loc_idx:
+                torch.testing.assert_close(
+                    actual_effect[..., parameter_idx],
+                    torch.zeros_like(actual_effect[..., parameter_idx]),
+                    rtol=0.0,
+                    atol=0.0,
+                )
+        actual_effect = actual_effect[..., model.loc_idx]
+
+    torch.testing.assert_close(
+        actual_effect,
+        expected_effect,
+        rtol=1e-4,
+        atol=1e-4,
+    )
+    shifted.square().mean().backward()
+    assert future.grad is not None
+    assert torch.isfinite(future.grad).all()
+    assert torch.count_nonzero(future.grad) > 0
+
+
+def test_patchmixer_output_shift_does_not_enter_normalized_soft_limit_path() -> None:
+    torch.manual_seed(20260813)
+    model = PatchMixerExogenousModel(
+        _future_only_config(future_exo_shift_space="output")
+    ).eval()
+    assert model.future_exo_normalized_residual_limit is None
+    x, _, _, future = _inputs()
+    with torch.no_grad():
+        expected = model(x, future_exo=future)
+
+    def fail_if_called(_residual: torch.Tensor) -> torch.Tensor:
+        raise AssertionError("output-space shift entered normalized limit path")
+
+    model._bound_normalized_future_exo_residual = fail_if_called
+    with torch.no_grad():
+        actual = model(x, future_exo=future)
+    torch.testing.assert_close(actual, expected, rtol=0.0, atol=0.0)
 
 
 def test_patchmixer_quantile_normalized_shift_is_applied_before_eval_clip() -> None:
