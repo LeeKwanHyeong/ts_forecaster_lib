@@ -1,13 +1,19 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
-from typing import Any, List, Optional, Sequence, Tuple
+from typing import Any, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
 
-from modeling_module.models.PatchMixer.backbone import PatchMixerBackbone, MultiScalePatchMixerBackbone
+from modeling_module.models.PatchMixer.backbone import (
+    MultiScalePatchMixerBackbone,
+    PatchMixerBackbone,
+    PatchMixerOriginalBackbone,
+    PatchMixerOriginalLayer,
+    PatchMixerOriginalRevIN,
+    _infer_patch_cfgs,
+)
 from modeling_module.models.PatchMixer.common.configs import (
     PatchMixerConfig,
     PatchMixerOriginalConfig,
@@ -48,212 +54,6 @@ def _pad_or_slice_last_dim(x: torch.Tensor, target_dim: int, *, pad_value: float
     pad_shape = list(x.shape[:-1]) + [pad]
     pad_t = x.new_full(pad_shape, pad_value)
     return torch.cat([x, pad_t], dim=-1)
-
-
-def _infer_patch_cfgs(lookback: int, n_branches: int = 3) -> List[Tuple[int, int, int]]:
-    """
-    Lookback 길이에 비례하여 결정론적(Deterministic)인 멀티스케일 패치 설정 생성.
-
-    기능:
-    - 입력 길이의 1/4, 1/2, 3/4 비율을 기반으로 패치 길이(Patch Len) 계산.
-    - 각 패치 길이에 적합한 Stride(P//2)와 Kernel Size(3, 5, 7) 자동 매핑.
-    - 반환 형식: List[(Patch_Len, Stride, Kernel_Size)]
-    """
-    # 최소 Lookback 길이 검증
-    assert lookback >= 8
-
-    # 비율에 따른 패치 길이 후보군 생성
-    fracs = [1 / 4, 1 / 2, 3 / 4][:n_branches]
-    raw = [max(4, min(lookback, int(round(lookback * f)))) for f in fracs]
-
-    # 중복 제거 및 정렬
-    P = sorted(list(dict.fromkeys(raw)))
-
-    cfgs: List[Tuple[int, int, int]] = []
-    for i, p in enumerate(P):
-        s = max(1, p // 2)  # Stride는 패치 길이의 절반
-        k = [3, 5, 7][min(i, 2)]  # 스케일별 커널 크기 차등 할당
-        if k % 2 == 0:
-            k += 1  # 홀수 커널 보장
-        cfgs.append((p, s, k))
-    return cfgs
-
-
-# =====================================================================
-# Canonical upstream-compatible point model
-# The definitions in this section remain source-equivalent to the MIT-licensed
-# implementation pinned by PATCHMIXER_UPSTREAM_COMMIT.
-# =====================================================================
-class PatchMixerOriginalRevIN(nn.Module):
-    """Upstream RevIN math kept local to preserve strict output parity."""
-
-    def __init__(
-        self,
-        num_features: int,
-        eps: float = 1e-5,
-        affine: bool = True,
-        subtract_last: bool = False,
-    ) -> None:
-        super().__init__()
-        self.num_features = int(num_features)
-        self.eps = float(eps)
-        self.affine = bool(affine)
-        self.subtract_last = bool(subtract_last)
-        if self.affine:
-            self.affine_weight = nn.Parameter(torch.ones(self.num_features))
-            self.affine_bias = nn.Parameter(torch.zeros(self.num_features))
-
-    def forward(self, x: torch.Tensor, mode: str) -> torch.Tensor:
-        if mode == "norm":
-            self._get_statistics(x)
-            return self._normalize(x)
-        if mode == "denorm":
-            return self._denormalize(x)
-        raise NotImplementedError(f"RevIN mode must be 'norm' or 'denorm', got {mode!r}.")
-
-    def _get_statistics(self, x: torch.Tensor) -> None:
-        dims = tuple(range(1, x.ndim - 1))
-        if self.subtract_last:
-            self.last = x[:, -1, :].unsqueeze(1)
-        else:
-            self.mean = torch.mean(x, dim=dims, keepdim=True).detach()
-        self.stdev = torch.sqrt(
-            torch.var(x, dim=dims, keepdim=True, unbiased=False) + self.eps
-        ).detach()
-
-    def _normalize(self, x: torch.Tensor) -> torch.Tensor:
-        x = x - (self.last if self.subtract_last else self.mean)
-        x = x / self.stdev
-        if self.affine:
-            x = x * self.affine_weight
-            x = x + self.affine_bias
-        return x
-
-    def _denormalize(self, x: torch.Tensor) -> torch.Tensor:
-        if self.affine:
-            x = x - self.affine_bias
-            x = x / (self.affine_weight + self.eps * self.eps)
-        x = x * self.stdev
-        x = x + (self.last if self.subtract_last else self.mean)
-        return x
-
-
-class PatchMixerOriginalLayer(nn.Module):
-    """Upstream separable convolution over `(patch_num, d_model)`."""
-
-    def __init__(self, dim: int, a: int, kernel_size: int = 8) -> None:
-        super().__init__()
-        self.Resnet = nn.Sequential(
-            nn.Conv1d(
-                dim,
-                dim,
-                kernel_size=kernel_size,
-                groups=dim,
-                padding="same",
-            ),
-            nn.GELU(),
-            nn.BatchNorm1d(dim),
-        )
-        self.Conv_1x1 = nn.Sequential(
-            nn.Conv1d(dim, a, kernel_size=1),
-            nn.GELU(),
-            nn.BatchNorm1d(a),
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = x + self.Resnet(x)
-        return self.Conv_1x1(x)
-
-
-class PatchMixerOriginalBackbone(nn.Module):
-    """Canonical single-scale, channel-independent PatchMixer point backbone."""
-
-    def __init__(self, configs: PatchMixerOriginalConfig) -> None:
-        super().__init__()
-        self.nvals = int(configs.enc_in)
-        self.lookback = int(configs.seq_len)
-        self.forecasting = int(configs.pred_len)
-        self.patch_size = int(configs.patch_len)
-        self.stride = int(configs.stride)
-        self.kernel_size = int(configs.mixer_kernel_size)
-        self.patch_num = int(
-            (self.lookback - self.patch_size) / self.stride + 1
-        ) + 1
-        self.a = self.patch_num
-        self.d_model = int(configs.d_model)
-        self.depth = int(configs.e_layers)
-
-        self.PatchMixer_blocks = nn.ModuleList(
-            [
-                PatchMixerOriginalLayer(
-                    dim=self.patch_num,
-                    a=self.a,
-                    kernel_size=self.kernel_size,
-                )
-                for _ in range(self.depth)
-            ]
-        )
-        self.padding_patch_layer = nn.ReplicationPad1d((0, self.stride))
-        self.W_P = nn.Linear(self.patch_size, self.d_model)
-        self.head0 = nn.Sequential(
-            nn.Flatten(start_dim=-2),
-            nn.Linear(self.patch_num * self.d_model, self.forecasting),
-            nn.Dropout(float(configs.head_dropout)),
-        )
-        self.head1 = nn.Sequential(
-            nn.Flatten(start_dim=-2),
-            nn.Linear(self.a * self.d_model, self.forecasting * 2),
-            nn.GELU(),
-            nn.Dropout(float(configs.head_dropout)),
-            nn.Linear(self.forecasting * 2, self.forecasting),
-            nn.Dropout(float(configs.head_dropout)),
-        )
-        self.dropout = nn.Dropout(float(configs.dropout))
-        self.revin = bool(configs.use_revin)
-        if self.revin:
-            self.revin_layer = PatchMixerOriginalRevIN(
-                self.nvals,
-                affine=bool(configs.revin_affine),
-                subtract_last=bool(configs.revin_subtract_last),
-            )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if x.ndim != 3:
-            raise ValueError(
-                f"PatchMixerOriginal expects [B,L,N], got shape {tuple(x.shape)}."
-            )
-        if x.shape[1] != self.lookback:
-            raise ValueError(
-                f"PatchMixerOriginal expected lookback={self.lookback}, got {x.shape[1]}."
-            )
-        if x.shape[2] != self.nvals:
-            raise ValueError(
-                f"PatchMixerOriginal expected enc_in={self.nvals}, got {x.shape[2]}."
-            )
-
-        batch_size, _, nvars = x.shape
-        if self.revin:
-            x = self.revin_layer(x, "norm")
-        x = x.permute(0, 2, 1)
-        x = self.padding_patch_layer(x)
-        x = x.unfold(
-            dimension=-1,
-            size=self.patch_size,
-            step=self.stride,
-        )
-        x = self.W_P(x)
-        x = x.reshape(batch_size * nvars, x.shape[2], x.shape[3])
-        x = self.dropout(x)
-
-        linear_forecast = self.head0(x)
-        for block in self.PatchMixer_blocks:
-            x = block(x)
-        nonlinear_forecast = self.head1(x)
-        x = linear_forecast + nonlinear_forecast
-        x = x.reshape(batch_size, nvars, -1).permute(0, 2, 1)
-        if self.revin:
-            x = self.revin_layer(x, "denorm")
-        return x
 
 
 class PatchMixerOriginalModel(nn.Module):
@@ -1108,3 +908,9 @@ class PatchMixerPointModel(PatchMixerEnhancedModel):
 class PatchMixerDistributionModel(PatchMixerEnhancedModel):
     def __init__(self, cfg: PatchMixerConfig):
         super().__init__(cfg)
+
+
+# Historical public names retained for downstream imports.
+BaseModel = PatchMixerPointModel
+QuantileModel = PatchMixerQuantileModel
+make_patch_cfgs = _infer_patch_cfgs

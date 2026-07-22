@@ -30,13 +30,16 @@ if TYPE_CHECKING:
         BaseModel,
         PatchMixerEnhancedModel,
         PatchMixerModel,
-        PatchMixerOriginalBackbone,
-        PatchMixerOriginalLayer,
         PatchMixerOriginalModel,
         QuantileModel,
+    )
+    from .backbone import (
+        MultiScalePatchMixerBackbone,
+        PatchMixerBackbone,
+        PatchMixerOriginalBackbone,
+        PatchMixerOriginalLayer,
         make_patch_cfgs,
     )
-    from .backbone import PatchMixerBackbone, MultiScalePatchMixerBackbone
     from .variants import (
         PatchMixerEndogenousModel,
         PatchMixerExogenousModel,
@@ -47,11 +50,11 @@ if TYPE_CHECKING:
 _LAZY = {
     "BaseModel": (".PatchMixer", "BaseModel"),
     "QuantileModel": (".PatchMixer", "QuantileModel"),
-    "make_patch_cfgs": (".PatchMixer", "make_patch_cfgs"),
+    "make_patch_cfgs": (".backbone", "make_patch_cfgs"),
     "PatchMixerBackbone": (".backbone", "PatchMixerBackbone"),
     "MultiScalePatchMixerBackbone": (".backbone", "MultiScalePatchMixerBackbone"),
-    "PatchMixerOriginalLayer": (".PatchMixer", "PatchMixerOriginalLayer"),
-    "PatchMixerOriginalBackbone": (".PatchMixer", "PatchMixerOriginalBackbone"),
+    "PatchMixerOriginalLayer": (".backbone", "PatchMixerOriginalLayer"),
+    "PatchMixerOriginalBackbone": (".backbone", "PatchMixerOriginalBackbone"),
     "PatchMixerOriginalModel": (".PatchMixer", "PatchMixerOriginalModel"),
     "PatchMixerEnhancedModel": (".PatchMixer", "PatchMixerEnhancedModel"),
     "PatchMixerModel": (".PatchMixer", "PatchMixerModel"),
