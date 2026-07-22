@@ -526,6 +526,7 @@ def _forward_batch(
     *,
     zero_past: bool = False,
     zero_future: bool = False,
+    omit_future: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, list[str]]:
     inputs = batch[0].cuda(non_blocking=True)
     targets = batch[1].cuda(non_blocking=True)
@@ -534,7 +535,7 @@ def _forward_batch(
         return _point_prediction(model(inputs)), targets, uids
 
     kwargs: dict[str, torch.Tensor] = {}
-    if case.future_exogenous:
+    if case.future_exogenous and not omit_future:
         future_exo = batch[3].cuda(non_blocking=True)
         kwargs["future_exo"] = (
             torch.zeros_like(future_exo) if zero_future else future_exo
@@ -725,12 +726,14 @@ def _predict_loader(
     autocast_context: Callable[[], Any],
     zero_past: bool = False,
     zero_future: bool = False,
+    omit_future: bool = False,
 ) -> dict[str, Any]:
     model.eval()
     targets: list[np.ndarray] = []
     predictions: list[np.ndarray] = []
     last_values: list[np.ndarray] = []
     seasonal_values: list[np.ndarray] = []
+    history_stds: list[np.ndarray] = []
     uids: list[str] = []
     seasonal_start = LOOKBACK - SEASONAL_PERIOD
     for batch in loader:
@@ -742,6 +745,7 @@ def _predict_loader(
                 batch,
                 zero_past=zero_past,
                 zero_future=zero_future,
+                omit_future=omit_future,
             )
         targets.append(batch_targets.float().cpu().numpy())
         predictions.append(batch_predictions.float().cpu().numpy())
@@ -759,12 +763,20 @@ def _predict_loader(
             .cpu()
             .numpy()
         )
+        history_stds.append(
+            torch.sqrt(
+                inputs[:, :, 0].float().var(dim=1, unbiased=False) + 1e-5
+            )
+            .cpu()
+            .numpy()
+        )
         uids.extend(batch_uids)
     return {
         "targets": np.concatenate(targets).astype(np.float64),
         "predictions": np.concatenate(predictions).astype(np.float64),
         "last_value": np.concatenate(last_values).astype(np.float64),
         "seasonal_naive_52": np.concatenate(seasonal_values).astype(np.float64),
+        "history_std": np.concatenate(history_stds).astype(np.float64),
         "uids": np.asarray(uids, dtype=object),
     }
 
@@ -813,6 +825,249 @@ def _prediction_summary(payload: dict[str, Any]) -> dict[str, Any]:
         "forecast_points": int(payload["targets"].size),
         "prediction_sha256": _array_sha256(payload["predictions"]),
         "metrics": _metric_bundle(payload),
+    }
+
+
+def _safe_pearson(first: np.ndarray, second: np.ndarray) -> float | None:
+    first = np.asarray(first, dtype=np.float64).reshape(-1)
+    second = np.asarray(second, dtype=np.float64).reshape(-1)
+    if first.size < 2 or first.size != second.size:
+        return None
+    if np.std(first) < 1e-12 or np.std(second) < 1e-12:
+        return None
+    value = float(np.corrcoef(first, second)[0, 1])
+    return value if math.isfinite(value) else None
+
+
+def _validate_diagnostic_payloads(
+    baseline: dict[str, Any],
+    candidate: dict[str, Any],
+) -> None:
+    for field in ("targets", "uids", "history_std"):
+        if not np.array_equal(baseline[field], candidate[field]):
+            raise RuntimeError(
+                f"Diagnostic evaluations do not share identical {field}."
+            )
+    if baseline["predictions"].shape != candidate["predictions"].shape:
+        raise RuntimeError("Diagnostic prediction shapes do not match.")
+
+
+def _error_comparison(
+    targets: np.ndarray,
+    baseline_predictions: np.ndarray,
+    candidate_predictions: np.ndarray,
+) -> dict[str, float]:
+    baseline_mae = float(np.mean(np.abs(baseline_predictions - targets)))
+    candidate_mae = float(np.mean(np.abs(candidate_predictions - targets)))
+    return {
+        "baseline_mae": baseline_mae,
+        "candidate_mae": candidate_mae,
+        "candidate_mae_delta": candidate_mae - baseline_mae,
+        "candidate_relative_improvement_pct": float(
+            100.0
+            * (baseline_mae - candidate_mae)
+            / max(abs(baseline_mae), 1e-12)
+        ),
+    }
+
+
+def _history_std_quartiles(history_std: np.ndarray) -> list[tuple[str, np.ndarray]]:
+    order = np.argsort(history_std, kind="stable")
+    return [
+        (f"q{index + 1}", indices)
+        for index, indices in enumerate(np.array_split(order, 4))
+        if indices.size
+    ]
+
+
+def _paired_error_diagnostics(
+    baseline: dict[str, Any],
+    candidate: dict[str, Any],
+) -> dict[str, Any]:
+    _validate_diagnostic_payloads(baseline, candidate)
+    targets = baseline["targets"]
+    baseline_predictions = baseline["predictions"]
+    candidate_predictions = candidate["predictions"]
+    history_std = baseline["history_std"]
+    uids = baseline["uids"]
+    window_mae_delta = np.mean(
+        np.abs(candidate_predictions - targets)
+        - np.abs(baseline_predictions - targets),
+        axis=1,
+    )
+
+    by_horizon = [
+        {
+            "horizon": horizon + 1,
+            **_error_comparison(
+                targets[:, horizon],
+                baseline_predictions[:, horizon],
+                candidate_predictions[:, horizon],
+            ),
+        }
+        for horizon in range(targets.shape[1])
+    ]
+    by_series = {
+        uid: {
+            "windows": int(np.count_nonzero(mask)),
+            "history_std_mean": float(np.mean(history_std[mask])),
+            "history_std_median": float(np.median(history_std[mask])),
+            **_error_comparison(
+                targets[mask],
+                baseline_predictions[mask],
+                candidate_predictions[mask],
+            ),
+        }
+        for uid in sorted(set(str(value) for value in uids))
+        for mask in (uids == uid,)
+    }
+    by_history_std_quartile = [
+        {
+            "quartile": name,
+            "windows": int(indices.size),
+            "history_std_min": float(np.min(history_std[indices])),
+            "history_std_mean": float(np.mean(history_std[indices])),
+            "history_std_max": float(np.max(history_std[indices])),
+            **_error_comparison(
+                targets[indices],
+                baseline_predictions[indices],
+                candidate_predictions[indices],
+            ),
+        }
+        for name, indices in _history_std_quartiles(history_std)
+    ]
+    return {
+        "overall": _error_comparison(
+            targets,
+            baseline_predictions,
+            candidate_predictions,
+        ),
+        "history_std": {
+            "min": float(np.min(history_std)),
+            "median": float(np.median(history_std)),
+            "mean": float(np.mean(history_std)),
+            "p90": float(np.quantile(history_std, 0.90)),
+            "max": float(np.max(history_std)),
+        },
+        "window_mae_delta_correlation_with_history_std": _safe_pearson(
+            history_std,
+            window_mae_delta,
+        ),
+        "by_horizon": by_horizon,
+        "by_series": by_series,
+        "by_history_std_quartile": by_history_std_quartile,
+    }
+
+
+def _effect_statistics(
+    effect: np.ndarray,
+    history_std: np.ndarray,
+) -> dict[str, float | None]:
+    absolute = np.abs(effect)
+    per_window_absolute = np.mean(absolute, axis=1)
+    normalized_per_window = per_window_absolute / np.maximum(history_std, 1e-12)
+    return {
+        "mean_signed": float(np.mean(effect)),
+        "mean_absolute": float(np.mean(absolute)),
+        "median_absolute": float(np.median(absolute)),
+        "p90_absolute": float(np.quantile(absolute, 0.90)),
+        "p95_absolute": float(np.quantile(absolute, 0.95)),
+        "p99_absolute": float(np.quantile(absolute, 0.99)),
+        "max_absolute": float(np.max(absolute)),
+        "mean_absolute_in_history_std_units": float(
+            np.mean(normalized_per_window)
+        ),
+        "p95_absolute_in_history_std_units": float(
+            np.quantile(normalized_per_window, 0.95)
+        ),
+        "window_absolute_effect_correlation_with_history_std": _safe_pearson(
+            history_std,
+            per_window_absolute,
+        ),
+    }
+
+
+def _effect_breakdown(
+    effect: np.ndarray,
+    *,
+    history_std: np.ndarray,
+    uids: np.ndarray,
+) -> dict[str, Any]:
+    return {
+        "overall": _effect_statistics(effect, history_std),
+        "by_horizon": [
+            {
+                "horizon": horizon + 1,
+                **_effect_statistics(
+                    effect[:, horizon : horizon + 1],
+                    history_std,
+                ),
+            }
+            for horizon in range(effect.shape[1])
+        ],
+        "by_series": {
+            uid: {
+                "windows": int(np.count_nonzero(mask)),
+                "history_std_mean": float(np.mean(history_std[mask])),
+                **_effect_statistics(effect[mask], history_std[mask]),
+            }
+            for uid in sorted(set(str(value) for value in uids))
+            for mask in (uids == uid,)
+        },
+        "by_history_std_quartile": [
+            {
+                "quartile": name,
+                "windows": int(indices.size),
+                "history_std_min": float(np.min(history_std[indices])),
+                "history_std_mean": float(np.mean(history_std[indices])),
+                "history_std_max": float(np.max(history_std[indices])),
+                **_effect_statistics(effect[indices], history_std[indices]),
+            }
+            for name, indices in _history_std_quartiles(history_std)
+        ],
+    }
+
+
+def _future_shift_diagnostics(
+    full: dict[str, Any],
+    without_future_shift: dict[str, Any],
+    zero_future: dict[str, Any],
+) -> dict[str, Any]:
+    _validate_diagnostic_payloads(without_future_shift, full)
+    _validate_diagnostic_payloads(without_future_shift, zero_future)
+    history_std = full["history_std"]
+    uids = full["uids"]
+    total_effect = full["predictions"] - without_future_shift["predictions"]
+    feature_effect = full["predictions"] - zero_future["predictions"]
+    zero_input_bias_effect = (
+        zero_future["predictions"] - without_future_shift["predictions"]
+    )
+    return {
+        "without_future_shift_prediction_sha256": _array_sha256(
+            without_future_shift["predictions"]
+        ),
+        "zero_future_prediction_sha256": _array_sha256(
+            zero_future["predictions"]
+        ),
+        "error_comparison": _paired_error_diagnostics(
+            without_future_shift,
+            full,
+        ),
+        "total_effect": _effect_breakdown(
+            total_effect,
+            history_std=history_std,
+            uids=uids,
+        ),
+        "feature_conditioned_effect": _effect_breakdown(
+            feature_effect,
+            history_std=history_std,
+            uids=uids,
+        ),
+        "zero_input_bias_effect": _effect_breakdown(
+            zero_input_bias_effect,
+            history_std=history_std,
+            uids=uids,
+        ),
     }
 
 
@@ -915,6 +1170,8 @@ def _candidate_summary(
 def _candidate_comparison_group(
     predictions: dict[str, dict[str, dict[str, Any]]],
     comparison_pairs: dict[str, tuple[str, str]],
+    *,
+    include_diagnostics: bool = False,
 ) -> dict[str, Any]:
     output: dict[str, Any] = {}
     for comparison_name, (baseline_key, candidate_key) in comparison_pairs.items():
@@ -934,6 +1191,17 @@ def _candidate_comparison_group(
                 candidate_name=candidate_name,
             ),
         }
+        if include_diagnostics:
+            output[comparison_name]["diagnostics"] = {
+                "test_all_rolling_windows": _paired_error_diagnostics(
+                    predictions[baseline_key]["all"],
+                    predictions[candidate_key]["all"],
+                ),
+                "test_last_origin_per_series": _paired_error_diagnostics(
+                    predictions[baseline_key]["last"],
+                    predictions[candidate_key]["last"],
+                ),
+            }
     return output
 
 
@@ -1121,6 +1389,47 @@ def _run_accuracy_seed(
             "test_all_rolling_windows": _prediction_summary(all_payload),
             "test_last_origin_per_series": _prediction_summary(last_payload),
         }
+        if case_set == "patchmixer-shift-space" and case.future_exogenous:
+            without_future_all = _predict_loader(
+                model,
+                case,
+                all_loader,
+                autocast_context=autocast_context,
+                omit_future=True,
+            )
+            without_future_last = _predict_loader(
+                model,
+                case,
+                last_loader,
+                autocast_context=autocast_context,
+                omit_future=True,
+            )
+            zero_future_all = _predict_loader(
+                model,
+                case,
+                all_loader,
+                autocast_context=autocast_context,
+                zero_future=True,
+            )
+            zero_future_last = _predict_loader(
+                model,
+                case,
+                last_loader,
+                autocast_context=autocast_context,
+                zero_future=True,
+            )
+            model_results[case.key]["future_shift_diagnostics"] = {
+                "test_all_rolling_windows": _future_shift_diagnostics(
+                    all_payload,
+                    without_future_all,
+                    zero_future_all,
+                ),
+                "test_last_origin_per_series": _future_shift_diagnostics(
+                    last_payload,
+                    without_future_last,
+                    zero_future_last,
+                ),
+            }
         if case.key == "patchmixer_exogenous":
             input_ablations: dict[str, Any] = {}
             for ablation_name, zero_past, zero_future in (
@@ -1197,6 +1506,7 @@ def _run_accuracy_seed(
         paired["patchmixer_shift_space"] = _candidate_comparison_group(
             predictions,
             comparison_pairs,
+            include_diagnostics=True,
         )
 
     split_fingerprint = hashlib.sha256(
@@ -1771,7 +2081,7 @@ def main(argv: list[str] | None = None) -> int:
     ]
     properties = torch.cuda.get_device_properties(0)
     result = {
-        "schema_version": 3,
+        "schema_version": 4,
         "started_at_utc": started_at.isoformat(),
         "finished_at_utc": datetime.now(timezone.utc).isoformat(),
         "elapsed_seconds": time.perf_counter() - started,
@@ -1832,6 +2142,18 @@ def main(argv: list[str] | None = None) -> int:
                 for case in cases
             ],
             "comparison_pairs": comparison_pairs,
+            "diagnostics": (
+                [
+                    "future_shift_total_effect",
+                    "future_shift_feature_conditioned_effect",
+                    "future_shift_zero_input_bias_effect",
+                    "error_by_series",
+                    "error_by_horizon",
+                    "error_by_history_std_rank_quartile",
+                ]
+                if args.case_set == "patchmixer-shift-space"
+                else []
+            ),
             "full_model_input_ablations": (
                 ["zero_past", "zero_future", "zero_all"]
                 if args.case_set == "all"
