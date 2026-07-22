@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 import polars as pl
 import pytest
+import torch
 
 
 TOOL = Path(__file__).resolve().parents[1] / "tools" / "compare_exogenous_models_5090.py"
@@ -307,6 +308,38 @@ def test_future_shift_diagnostics_report_raw_and_history_scaled_effect():
     assert result["error_comparison"]["overall"][
         "candidate_mae_delta"
     ] == pytest.approx(2.5)
+
+
+def test_future_shift_diagnostic_disable_retains_required_input_and_restores_scale():
+    class RequiredFutureModel(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.exo_scale = 0.25
+
+        def forward(
+            self,
+            inputs: torch.Tensor,
+            *,
+            future_exo: torch.Tensor | None = None,
+        ) -> torch.Tensor:
+            if future_exo is None:
+                raise RuntimeError("future_exo is required")
+            return inputs + self.exo_scale * future_exo
+
+    model = RequiredFutureModel()
+    inputs = torch.ones(1, 2)
+    future_exo = torch.full((1, 2), 4.0)
+
+    with MODULE._temporarily_disable_future_shift(model, disabled=True):
+        disabled = model(inputs, future_exo=future_exo)
+        assert model.exo_scale == 0.0
+
+    assert torch.equal(disabled, inputs)
+    assert model.exo_scale == 0.25
+    assert torch.equal(
+        model(inputs, future_exo=future_exo),
+        torch.full((1, 2), 2.0),
+    )
 
 
 def test_focused_accuracy_aggregate_reports_each_shift_space_pair():
