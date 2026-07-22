@@ -415,13 +415,43 @@ def test_gate_oracles_bound_scalar_and_horizon_coordinates():
     )
 
 
+def test_constant_gate_fits_unclipped_quadratic_target_before_clipping():
+    base = np.zeros((2, 1), dtype=np.float64)
+    full = np.ones((2, 1), dtype=np.float64)
+    targets = np.asarray([[10.0], [0.0]], dtype=np.float64)
+    regression_targets, weights = MODULE._mse_gate_regression_targets(
+        base,
+        full,
+        targets,
+        horizon_shared=True,
+    )
+
+    fitted = MODULE._fit_constant_gate(regression_targets, weights)
+
+    np.testing.assert_allclose(regression_targets, [[10.0], [0.0]])
+    np.testing.assert_allclose(fitted, [[1.0]])
+    fitted_mse = MODULE._forecast_mse_with_gate(
+        base,
+        full,
+        targets,
+        fitted.repeat(2, 0),
+    )
+    off_mse = MODULE._forecast_mse_with_gate(
+        base,
+        full,
+        targets,
+        np.zeros((2, 1)),
+    )
+    assert fitted_mse <= off_mse
+
+
 def test_nested_series_oof_gate_does_not_use_held_out_targets():
     uids = np.repeat(np.asarray(["A", "B", "C", "D"], dtype=object), 3)
     features = np.arange(12, dtype=np.float64)[:, None]
     base = np.zeros((12, 2), dtype=np.float64)
     full = np.ones((12, 2), dtype=np.float64)
     targets = np.repeat(np.linspace(0.1, 0.9, 12)[:, None], 2, axis=1)
-    gate_targets, gate_weights = MODULE._mse_optimal_gate_targets(
+    gate_targets, gate_weights = MODULE._mse_gate_regression_targets(
         base,
         full,
         targets,
@@ -441,7 +471,7 @@ def test_nested_series_oof_gate_does_not_use_held_out_targets():
 
     changed_targets = targets.copy()
     changed_targets[uids == "A"] = 20.0
-    changed_gate_targets, changed_gate_weights = MODULE._mse_optimal_gate_targets(
+    changed_gate_targets, changed_gate_weights = MODULE._mse_gate_regression_targets(
         base,
         full,
         changed_targets,
@@ -493,6 +523,10 @@ def test_validation_gate_upper_bound_separates_oof_estimates_from_oracles():
     assert methods["oracle_mse"]["metrics"]["mse"] <= methods["always_on"][
         "metrics"
     ]["mse"]
+    assert methods["validation_fit_constant"]["metrics"]["mse"] <= min(
+        methods["always_off"]["metrics"]["mse"],
+        methods["always_on"]["metrics"]["mse"],
+    )
     assert scalar["evaluations"]["validation_last_origin_per_series"][
         "windows"
     ] == 4
