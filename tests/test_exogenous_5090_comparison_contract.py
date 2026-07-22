@@ -213,7 +213,22 @@ def _prediction_payload(predictions: list[list[float]]) -> dict[str, object]:
     return {
         "targets": np.ones_like(values),
         "predictions": values,
+        "history_std": np.ones(values.shape[0], dtype=np.float64),
         "uids": np.asarray(["A"] * len(values), dtype=object),
+    }
+
+
+def _diagnostic_payload(
+    predictions: list[list[float]],
+    *,
+    history_std: list[float],
+) -> dict[str, object]:
+    values = np.asarray(predictions, dtype=np.float64)
+    return {
+        "targets": np.zeros_like(values),
+        "predictions": values,
+        "history_std": np.asarray(history_std, dtype=np.float64),
+        "uids": np.asarray(["A", "A", "B", "B"], dtype=object),
     }
 
 
@@ -231,6 +246,67 @@ def test_candidate_summary_reports_positive_improvement_for_lower_error():
     assert result["candidate_relative_improvement_pct"]["mae"] == pytest.approx(50.0)
     assert result["overall_mae_winner"] == "past_gate"
     assert result["pointwise_absolute_error_win_rate"]["past_gate"] == 1.0
+
+
+def test_paired_diagnostics_decompose_error_by_scale_series_and_horizon():
+    baseline = _diagnostic_payload(
+        [[0.0, 0.0], [0.0, 0.0], [0.0, 0.0], [0.0, 0.0]],
+        history_std=[1.0, 2.0, 3.0, 4.0],
+    )
+    candidate = _diagnostic_payload(
+        [[1.0, 1.0], [2.0, 2.0], [3.0, 3.0], [4.0, 4.0]],
+        history_std=[1.0, 2.0, 3.0, 4.0],
+    )
+
+    result = MODULE._paired_error_diagnostics(baseline, candidate)
+
+    assert result["overall"]["candidate_mae_delta"] == pytest.approx(2.5)
+    assert result["window_mae_delta_correlation_with_history_std"] == pytest.approx(
+        1.0
+    )
+    assert len(result["by_horizon"]) == 2
+    assert result["by_series"]["A"]["candidate_mae"] == pytest.approx(1.5)
+    assert result["by_series"]["B"]["candidate_mae"] == pytest.approx(3.5)
+    assert [row["quartile"] for row in result["by_history_std_quartile"]] == [
+        "q1",
+        "q2",
+        "q3",
+        "q4",
+    ]
+
+
+def test_future_shift_diagnostics_report_raw_and_history_scaled_effect():
+    without_future = _diagnostic_payload(
+        [[0.0, 0.0], [0.0, 0.0], [0.0, 0.0], [0.0, 0.0]],
+        history_std=[2.0, 4.0, 6.0, 8.0],
+    )
+    zero_future = _diagnostic_payload(
+        [[0.2, 0.2], [0.4, 0.4], [0.6, 0.6], [0.8, 0.8]],
+        history_std=[2.0, 4.0, 6.0, 8.0],
+    )
+    full = _diagnostic_payload(
+        [[1.0, 1.0], [2.0, 2.0], [3.0, 3.0], [4.0, 4.0]],
+        history_std=[2.0, 4.0, 6.0, 8.0],
+    )
+
+    result = MODULE._future_shift_diagnostics(full, without_future, zero_future)
+    effect = result["total_effect"]["overall"]
+
+    assert effect["mean_absolute"] == pytest.approx(2.5)
+    assert effect["mean_absolute_in_history_std_units"] == pytest.approx(0.5)
+    assert effect[
+        "window_absolute_effect_correlation_with_history_std"
+    ] == pytest.approx(1.0)
+    assert len(result["total_effect"]["by_horizon"]) == 2
+    assert result["feature_conditioned_effect"]["overall"][
+        "mean_absolute_in_history_std_units"
+    ] == pytest.approx(0.4)
+    assert result["zero_input_bias_effect"]["overall"][
+        "mean_absolute_in_history_std_units"
+    ] == pytest.approx(0.1)
+    assert result["error_comparison"]["overall"][
+        "candidate_mae_delta"
+    ] == pytest.approx(2.5)
 
 
 def test_focused_accuracy_aggregate_reports_each_shift_space_pair():
