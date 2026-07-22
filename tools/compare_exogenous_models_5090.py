@@ -21,7 +21,7 @@ import statistics
 import subprocess
 import sys
 import time
-from contextlib import nullcontext, redirect_stdout
+from contextlib import contextmanager, nullcontext, redirect_stdout
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from io import StringIO
@@ -519,6 +519,29 @@ def _autocast_factory(precision: str) -> Callable[[], Any]:
     return nullcontext
 
 
+@contextmanager
+def _temporarily_disable_future_shift(
+    model: torch.nn.Module,
+    *,
+    disabled: bool,
+) -> Iterable[None]:
+    """Disable only the additive future shift while retaining input contracts."""
+    if not disabled:
+        yield
+        return
+    if not hasattr(model, "exo_scale"):
+        raise RuntimeError(
+            f"{type(model).__name__} cannot disable its future shift for diagnostics."
+        )
+
+    original_scale = model.exo_scale
+    model.exo_scale = 0.0
+    try:
+        yield
+    finally:
+        model.exo_scale = original_scale
+
+
 def _forward_batch(
     model: torch.nn.Module,
     case: ModelCase,
@@ -535,7 +558,7 @@ def _forward_batch(
         return _point_prediction(model(inputs)), targets, uids
 
     kwargs: dict[str, torch.Tensor] = {}
-    if case.future_exogenous and not omit_future:
+    if case.future_exogenous:
         future_exo = batch[3].cuda(non_blocking=True)
         kwargs["future_exo"] = (
             torch.zeros_like(future_exo) if zero_future else future_exo
@@ -545,7 +568,8 @@ def _forward_batch(
         kwargs["past_exo_cont"] = (
             torch.zeros_like(past_exo_cont) if zero_past else past_exo_cont
         )
-    output = model(inputs, **kwargs)
+    with _temporarily_disable_future_shift(model, disabled=omit_future):
+        output = model(inputs, **kwargs)
     return _point_prediction(output), targets, uids
 
 
