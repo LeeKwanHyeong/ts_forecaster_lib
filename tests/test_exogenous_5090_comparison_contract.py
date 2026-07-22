@@ -256,6 +256,8 @@ def _prediction_payload(predictions: list[list[float]]) -> dict[str, object]:
         "targets": np.ones_like(values),
         "predictions": values,
         "history_std": np.ones(values.shape[0], dtype=np.float64),
+        "history_features": np.ones((values.shape[0], 1), dtype=np.float64),
+        "history_feature_names": ("history_std",),
         "uids": np.asarray(["A"] * len(values), dtype=object),
     }
 
@@ -270,6 +272,8 @@ def _diagnostic_payload(
         "targets": np.zeros_like(values),
         "predictions": values,
         "history_std": np.asarray(history_std, dtype=np.float64),
+        "history_features": np.asarray(history_std, dtype=np.float64)[:, None],
+        "history_feature_names": ("history_std",),
         "uids": np.asarray(["A", "A", "B", "B"], dtype=object),
     }
 
@@ -349,6 +353,162 @@ def test_future_shift_diagnostics_report_raw_and_history_scaled_effect():
     assert result["error_comparison"]["overall"][
         "candidate_mae_delta"
     ] == pytest.approx(2.5)
+
+
+def test_history_gate_features_are_finite_and_history_only():
+    inputs = torch.arange(
+        2 * MODULE.LOOKBACK,
+        dtype=torch.float32,
+    ).reshape(2, MODULE.LOOKBACK, 1)
+
+    features = MODULE._history_gate_features(inputs)
+
+    assert features.shape == (2, len(MODULE.HISTORY_GATE_FEATURE_NAMES))
+    assert torch.isfinite(features).all()
+    assert MODULE.HISTORY_GATE_FEATURE_NAMES == (
+        "log1p_abs_mean",
+        "log1p_std",
+        "last_z",
+        "linear_trend_z",
+        "recent_4_minus_mean_z",
+        "recent_12_minus_mean_z",
+        "seasonal_52_gap_z",
+        "range_z",
+        "zero_fraction",
+    )
+
+
+def test_gate_oracles_bound_scalar_and_horizon_coordinates():
+    base = np.zeros((2, 2), dtype=np.float64)
+    full = np.ones((2, 2), dtype=np.float64)
+    targets = np.asarray([[0.25, 0.75], [2.0, -1.0]], dtype=np.float64)
+
+    scalar, scalar_weights = MODULE._mse_optimal_gate_targets(
+        base,
+        full,
+        targets,
+        horizon_shared=True,
+    )
+    horizon, horizon_weights = MODULE._mse_optimal_gate_targets(
+        base,
+        full,
+        targets,
+        horizon_shared=False,
+    )
+
+    np.testing.assert_allclose(scalar, [[0.5], [0.5]])
+    np.testing.assert_allclose(scalar_weights, [[2.0], [2.0]])
+    np.testing.assert_allclose(horizon, [[0.25, 0.75], [1.0, 0.0]])
+    np.testing.assert_allclose(horizon_weights, np.ones((2, 2)))
+    scalar_mse = MODULE._forecast_mse_with_gate(base, full, targets, scalar)
+    assert scalar_mse <= MODULE._forecast_mse_with_gate(
+        base,
+        full,
+        targets,
+        np.zeros((2, 1)),
+    )
+    assert scalar_mse <= MODULE._forecast_mse_with_gate(
+        base,
+        full,
+        targets,
+        np.ones((2, 1)),
+    )
+
+
+def test_nested_series_oof_gate_does_not_use_held_out_targets():
+    uids = np.repeat(np.asarray(["A", "B", "C", "D"], dtype=object), 3)
+    features = np.arange(12, dtype=np.float64)[:, None]
+    base = np.zeros((12, 2), dtype=np.float64)
+    full = np.ones((12, 2), dtype=np.float64)
+    targets = np.repeat(np.linspace(0.1, 0.9, 12)[:, None], 2, axis=1)
+    gate_targets, gate_weights = MODULE._mse_optimal_gate_targets(
+        base,
+        full,
+        targets,
+        horizon_shared=True,
+    )
+    original, selected = MODULE._nested_group_oof_history_gate(
+        "ridge",
+        (0.1, 1.0),
+        features,
+        gate_targets,
+        gate_weights,
+        uids,
+        base,
+        full,
+        targets,
+    )
+
+    changed_targets = targets.copy()
+    changed_targets[uids == "A"] = 20.0
+    changed_gate_targets, changed_gate_weights = MODULE._mse_optimal_gate_targets(
+        base,
+        full,
+        changed_targets,
+        horizon_shared=True,
+    )
+    changed, changed_selected = MODULE._nested_group_oof_history_gate(
+        "ridge",
+        (0.1, 1.0),
+        features,
+        changed_gate_targets,
+        changed_gate_weights,
+        uids,
+        base,
+        full,
+        changed_targets,
+    )
+
+    assert original[uids == "A"] == pytest.approx(changed[uids == "A"])
+    assert selected["A"] == changed_selected["A"]
+    assert np.all((0.0 <= original) & (original <= 1.0))
+
+
+def test_validation_gate_upper_bound_separates_oof_estimates_from_oracles():
+    uids = np.repeat(np.asarray(["A", "B", "C", "D"], dtype=object), 2)
+    feature = np.linspace(-1.0, 1.0, 8)[:, None]
+    targets = np.repeat(np.linspace(0.0, 1.0, 8)[:, None], 2, axis=1)
+
+    def payload(predictions: np.ndarray) -> dict[str, object]:
+        return {
+            "targets": targets,
+            "predictions": predictions,
+            "history_std": np.ones(8, dtype=np.float64),
+            "history_features": feature,
+            "history_feature_names": ("synthetic_history",),
+            "uids": uids,
+        }
+
+    result = MODULE._history_conditioned_gate_validation_upper_bound(
+        payload(np.full_like(targets, 0.5)),
+        payload(np.ones_like(targets)),
+        payload(np.zeros_like(targets)),
+    )
+
+    assert result["protocol"]["test_targets_used"] is False
+    scalar = result["normalized_residual_gate"]["window_scalar"]
+    methods = scalar["evaluations"]["validation_all_rolling_windows"]["methods"]
+    assert "nested_series_oof_ridge" in methods
+    assert "nested_series_oof_knn" in methods
+    assert methods["oracle_mse"]["metrics"]["mse"] <= methods["always_on"][
+        "metrics"
+    ]["mse"]
+    assert scalar["evaluations"]["validation_last_origin_per_series"][
+        "windows"
+    ] == 4
+    aggregate = MODULE._aggregate_validation_gate_upper_bound(
+        [
+            {"seed": 11, "validation_gate_upper_bound": result},
+            {"seed": 22, "validation_gate_upper_bound": result},
+        ]
+    )
+    ridge = aggregate["normalized_residual_gate"]["window_scalar"][
+        "validation_all_rolling_windows"
+    ]["nested_series_oof_ridge"]
+    assert len(ridge["records"]) == 2
+    assert ridge["mean_mse"] == pytest.approx(
+        methods["nested_series_oof_ridge"]["metrics"]["mse"]
+    )
 
 
 def test_future_shift_diagnostic_disable_retains_required_input_and_restores_scale():
