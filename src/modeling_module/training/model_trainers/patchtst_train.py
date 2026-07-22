@@ -6,7 +6,9 @@ from typing import Optional, Callable
 
 # PatchTST 내부 head 재구성에 필요
 from modeling_module.models.PatchTST.common.patching import compute_patch_num
-from modeling_module.models.PatchTST.supervised.PatchTST import PointHeadWithExo, QuantileHeadWithExo, DistHeadWithExo
+from modeling_module.models.PatchTST.heads.distribution_head import DistHeadWithExo
+from modeling_module.models.PatchTST.heads.point_head import PointHeadWithExo
+from modeling_module.models.PatchTST.heads.quantile_head import QuantileHeadWithExo
 from modeling_module.training.adapters import DefaultAdapter
 from modeling_module.training.config import TrainingConfig, StageConfig, apply_stage
 from modeling_module.training.engine import CommonTrainer

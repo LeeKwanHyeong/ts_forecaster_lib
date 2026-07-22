@@ -3,8 +3,10 @@ import pytest
 from modeling_module.api.train import _make_result
 from modeling_module.models.registry import (
     PATCHMIXER_CAPABILITY_DEFAULTS,
+    PATCHTST_CAPABILITY_DEFAULTS,
     expand_training_targets,
     get_patchmixer_default_model_key,
+    get_patchtst_default_model_key,
     get_model_spec,
     get_training_deprecation_messages,
     infer_artifact_model_key_from_checkpoint,
@@ -71,6 +73,37 @@ def test_patchmixer_capability_defaults_promote_original_without_changing_family
 
     with pytest.raises(ValueError, match="Unknown PatchMixer capability"):
         get_patchmixer_default_model_key("classification")
+
+
+def test_patchtst_capability_defaults_encode_artifact_responsibilities():
+    assert PATCHTST_CAPABILITY_DEFAULTS == {
+        "endogenous_point": "patchtst_base",
+        "exogenous_point": "patchtst_exogenous",
+        "endogenous_distribution": "patchtst_base",
+        "exogenous_distribution": "patchtst_exogenous",
+        "endogenous_quantile": "patchtst_quantile",
+        "exogenous_quantile": "patchtst_quantile_exogenous",
+    }
+    assert get_patchtst_default_model_key() == "patchtst_base"
+    assert get_patchtst_default_model_key("point") == "patchtst_base"
+    assert get_patchtst_default_model_key("exogenous-point") == "patchtst_exogenous"
+    assert get_patchtst_default_model_key("dist") == "patchtst_base"
+    assert (
+        get_patchtst_default_model_key("exogenous-distribution")
+        == "patchtst_exogenous"
+    )
+    assert get_patchtst_default_model_key("quantile") == "patchtst_quantile"
+    assert (
+        get_patchtst_default_model_key("exogenous-quantile")
+        == "patchtst_quantile_exogenous"
+    )
+    assert expand_training_targets(["patchtst"]) == [
+        "patchtst_base",
+        "patchtst_quantile",
+    ]
+
+    with pytest.raises(ValueError, match="Unknown PatchTST capability"):
+        get_patchtst_default_model_key("classification")
 
 
 def test_titan_registry_entries_are_deprecated_but_remain_trainable_for_compatibility():
