@@ -82,6 +82,23 @@ FUTURE_EXOGENOUS_COLUMNS = (
     "exo_unemployment",
     "exo_markdown_sum",
 )
+HISTORY_GATE_FEATURE_NAMES = (
+    "log1p_abs_mean",
+    "log1p_std",
+    "last_z",
+    "linear_trend_z",
+    "recent_4_minus_mean_z",
+    "recent_12_minus_mean_z",
+    "seasonal_52_gap_z",
+    "range_z",
+    "zero_fraction",
+)
+HISTORY_GATE_RIDGE_ALPHAS = (0.01, 0.1, 1.0, 10.0, 100.0, 1000.0)
+HISTORY_GATE_KNN_NEIGHBORS = (8, 16, 32, 64, 128)
+HISTORY_GATE_REFERENCE_KEYS = {
+    "patchmixer_future_shift",
+    "patchmixer_future_shift_normalized",
+}
 
 
 @dataclass(frozen=True)
@@ -777,6 +794,47 @@ def _train_model(
     return model, result
 
 
+def _history_gate_features(inputs: torch.Tensor) -> torch.Tensor:
+    """Build target-history-only features available at forecast time."""
+    if inputs.ndim != 3 or inputs.shape[1] != LOOKBACK or inputs.shape[2] != 1:
+        raise ValueError(
+            f"Expected history [B,{LOOKBACK},1], got {tuple(inputs.shape)}."
+        )
+
+    history = inputs[:, :, 0].float()
+    mean = history.mean(dim=1)
+    std = torch.sqrt(history.var(dim=1, unbiased=False) + 1e-5)
+    centered = history - mean.unsqueeze(1)
+    time_axis = torch.linspace(
+        -1.0,
+        1.0,
+        LOOKBACK,
+        device=history.device,
+        dtype=history.dtype,
+    )
+    linear_trend = torch.sum(centered * time_axis, dim=1) / torch.sum(
+        time_axis.square()
+    )
+    recent_4 = history[:, -4:].mean(dim=1)
+    recent_12 = history[:, -12:].mean(dim=1)
+    seasonal_lag = history[:, -1 - SEASONAL_PERIOD]
+    scale = std.clamp_min(1e-6)
+    return torch.stack(
+        (
+            torch.log1p(mean.abs()),
+            torch.log1p(std),
+            (history[:, -1] - mean) / scale,
+            linear_trend / scale,
+            (recent_4 - mean) / scale,
+            (recent_12 - mean) / scale,
+            (history[:, -1] - seasonal_lag) / scale,
+            (history.max(dim=1).values - history.min(dim=1).values) / scale,
+            torch.mean((history.abs() <= 1e-8).float(), dim=1),
+        ),
+        dim=1,
+    )
+
+
 @torch.no_grad()
 def _predict_loader(
     model: torch.nn.Module,
@@ -794,6 +852,7 @@ def _predict_loader(
     last_values: list[np.ndarray] = []
     seasonal_values: list[np.ndarray] = []
     history_stds: list[np.ndarray] = []
+    history_features: list[np.ndarray] = []
     uids: list[str] = []
     seasonal_start = LOOKBACK - SEASONAL_PERIOD
     for batch in loader:
@@ -830,6 +889,7 @@ def _predict_loader(
             .cpu()
             .numpy()
         )
+        history_features.append(_history_gate_features(inputs).cpu().numpy())
         uids.extend(batch_uids)
     return {
         "targets": np.concatenate(targets).astype(np.float64),
@@ -837,6 +897,8 @@ def _predict_loader(
         "last_value": np.concatenate(last_values).astype(np.float64),
         "seasonal_naive_52": np.concatenate(seasonal_values).astype(np.float64),
         "history_std": np.concatenate(history_stds).astype(np.float64),
+        "history_features": np.concatenate(history_features).astype(np.float64),
+        "history_feature_names": HISTORY_GATE_FEATURE_NAMES,
         "uids": np.asarray(uids, dtype=object),
     }
 
@@ -903,13 +965,616 @@ def _validate_diagnostic_payloads(
     baseline: dict[str, Any],
     candidate: dict[str, Any],
 ) -> None:
-    for field in ("targets", "uids", "history_std"):
+    for field in ("targets", "uids", "history_std", "history_features"):
         if not np.array_equal(baseline[field], candidate[field]):
             raise RuntimeError(
                 f"Diagnostic evaluations do not share identical {field}."
             )
+    if baseline["history_feature_names"] != candidate["history_feature_names"]:
+        raise RuntimeError(
+            "Diagnostic evaluations do not share identical history feature names."
+        )
     if baseline["predictions"].shape != candidate["predictions"].shape:
         raise RuntimeError("Diagnostic prediction shapes do not match.")
+
+
+def _mse_optimal_gate_targets(
+    base_predictions: np.ndarray,
+    full_predictions: np.ndarray,
+    targets: np.ndarray,
+    *,
+    horizon_shared: bool,
+) -> tuple[np.ndarray, np.ndarray]:
+    delta = full_predictions - base_predictions
+    numerator = delta * (targets - base_predictions)
+    denominator = np.square(delta)
+    if horizon_shared:
+        numerator = np.sum(numerator, axis=1, keepdims=True)
+        denominator = np.sum(denominator, axis=1, keepdims=True)
+    gate = np.divide(
+        numerator,
+        denominator,
+        out=np.zeros_like(numerator, dtype=np.float64),
+        where=denominator > 1e-12,
+    )
+    return np.clip(gate, 0.0, 1.0), denominator
+
+
+def _mae_optimal_gate_targets(
+    base_predictions: np.ndarray,
+    full_predictions: np.ndarray,
+    targets: np.ndarray,
+    *,
+    horizon_shared: bool,
+) -> np.ndarray:
+    delta = full_predictions - base_predictions
+    roots = np.divide(
+        targets - base_predictions,
+        delta,
+        out=np.zeros_like(delta, dtype=np.float64),
+        where=np.abs(delta) > 1e-12,
+    )
+    if not horizon_shared:
+        return np.clip(roots, 0.0, 1.0)
+
+    gates = np.zeros((targets.shape[0], 1), dtype=np.float64)
+    for index in range(targets.shape[0]):
+        weights = np.abs(delta[index])
+        active = weights > 1e-12
+        if not np.any(active):
+            continue
+        active_roots = roots[index, active]
+        active_weights = weights[active]
+        order = np.argsort(active_roots, kind="stable")
+        cumulative = np.cumsum(active_weights[order])
+        median_index = int(
+            np.searchsorted(cumulative, 0.5 * cumulative[-1], side="left")
+        )
+        gates[index, 0] = np.clip(
+            active_roots[order[min(median_index, order.size - 1)]],
+            0.0,
+            1.0,
+        )
+    return gates
+
+
+def _binary_oracle_gate(
+    base_predictions: np.ndarray,
+    full_predictions: np.ndarray,
+    targets: np.ndarray,
+    *,
+    horizon_shared: bool,
+) -> np.ndarray:
+    base_error = np.square(base_predictions - targets)
+    full_error = np.square(full_predictions - targets)
+    if horizon_shared:
+        base_error = np.sum(base_error, axis=1, keepdims=True)
+        full_error = np.sum(full_error, axis=1, keepdims=True)
+    return (full_error < base_error).astype(np.float64)
+
+
+def _apply_gate(
+    base_predictions: np.ndarray,
+    full_predictions: np.ndarray,
+    gate: np.ndarray,
+) -> np.ndarray:
+    gate = np.asarray(gate, dtype=np.float64)
+    if gate.ndim == 1:
+        gate = gate[:, None]
+    if gate.ndim != 2 or gate.shape[0] != base_predictions.shape[0]:
+        raise ValueError("Gate must have shape [windows, 1 or horizon].")
+    if gate.shape[1] not in (1, base_predictions.shape[1]):
+        raise ValueError("Gate width must be one or match the forecast horizon.")
+    return base_predictions + gate * (full_predictions - base_predictions)
+
+
+def _fit_constant_gate(
+    gate_targets: np.ndarray,
+    gate_weights: np.ndarray,
+) -> np.ndarray:
+    numerator = np.sum(gate_targets * gate_weights, axis=0, keepdims=True)
+    denominator = np.sum(gate_weights, axis=0, keepdims=True)
+    return np.clip(
+        np.divide(
+            numerator,
+            denominator,
+            out=np.zeros_like(numerator),
+            where=denominator > 1e-12,
+        ),
+        0.0,
+        1.0,
+    )
+
+
+def _standardize_history_features(
+    train_features: np.ndarray,
+    evaluation_features: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    mean = np.mean(train_features, axis=0, keepdims=True)
+    std = np.std(train_features, axis=0, keepdims=True)
+    std = np.where(std < 1e-8, 1.0, std)
+    return (train_features - mean) / std, (evaluation_features - mean) / std
+
+
+def _ridge_gate_predict(
+    train_features: np.ndarray,
+    train_targets: np.ndarray,
+    train_weights: np.ndarray,
+    evaluation_features: np.ndarray,
+    *,
+    alpha: float,
+) -> np.ndarray:
+    train_scaled, evaluation_scaled = _standardize_history_features(
+        train_features,
+        evaluation_features,
+    )
+    train_design = np.column_stack(
+        (np.ones(train_scaled.shape[0], dtype=np.float64), train_scaled)
+    )
+    evaluation_design = np.column_stack(
+        (
+            np.ones(evaluation_scaled.shape[0], dtype=np.float64),
+            evaluation_scaled,
+        )
+    )
+    penalty = np.eye(train_design.shape[1], dtype=np.float64)
+    penalty[0, 0] = 0.0
+    predictions = np.zeros(
+        (evaluation_features.shape[0], train_targets.shape[1]),
+        dtype=np.float64,
+    )
+    for output_index in range(train_targets.shape[1]):
+        weights = train_weights[:, output_index]
+        if np.sum(weights) <= 1e-12:
+            continue
+        weights = weights / max(float(np.mean(weights)), 1e-12)
+        weighted_design = train_design * weights[:, None]
+        system = train_design.T @ weighted_design + alpha * penalty
+        right_hand_side = train_design.T @ (
+            weights * train_targets[:, output_index]
+        )
+        coefficients = np.linalg.pinv(system) @ right_hand_side
+        predictions[:, output_index] = evaluation_design @ coefficients
+    return np.clip(predictions, 0.0, 1.0)
+
+
+def _knn_gate_predict(
+    train_features: np.ndarray,
+    train_targets: np.ndarray,
+    train_weights: np.ndarray,
+    evaluation_features: np.ndarray,
+    *,
+    neighbors: int,
+) -> np.ndarray:
+    train_scaled, evaluation_scaled = _standardize_history_features(
+        train_features,
+        evaluation_features,
+    )
+    squared_distances = np.mean(
+        np.square(evaluation_scaled[:, None, :] - train_scaled[None, :, :]),
+        axis=2,
+    )
+    neighbor_count = min(neighbors, train_scaled.shape[0])
+    neighbor_indices = np.argpartition(
+        squared_distances,
+        kth=neighbor_count - 1,
+        axis=1,
+    )[:, :neighbor_count]
+    neighbor_distances = np.take_along_axis(
+        squared_distances,
+        neighbor_indices,
+        axis=1,
+    )
+    similarity = 1.0 / (np.sqrt(np.maximum(neighbor_distances, 0.0)) + 1e-6)
+    predictions = np.zeros(
+        (evaluation_features.shape[0], train_targets.shape[1]),
+        dtype=np.float64,
+    )
+    for output_index in range(train_targets.shape[1]):
+        local_weights = similarity * train_weights[
+            neighbor_indices,
+            output_index,
+        ]
+        denominator = np.sum(local_weights, axis=1)
+        numerator = np.sum(
+            local_weights * train_targets[neighbor_indices, output_index],
+            axis=1,
+        )
+        predictions[:, output_index] = np.divide(
+            numerator,
+            denominator,
+            out=np.zeros_like(numerator),
+            where=denominator > 1e-12,
+        )
+    return np.clip(predictions, 0.0, 1.0)
+
+
+def _history_gate_predict(
+    learner: str,
+    train_features: np.ndarray,
+    train_targets: np.ndarray,
+    train_weights: np.ndarray,
+    evaluation_features: np.ndarray,
+    hyperparameter: float | int,
+) -> np.ndarray:
+    if learner == "ridge":
+        return _ridge_gate_predict(
+            train_features,
+            train_targets,
+            train_weights,
+            evaluation_features,
+            alpha=float(hyperparameter),
+        )
+    if learner == "knn":
+        return _knn_gate_predict(
+            train_features,
+            train_targets,
+            train_weights,
+            evaluation_features,
+            neighbors=int(hyperparameter),
+        )
+    raise ValueError(f"Unsupported history gate learner: {learner!r}.")
+
+
+def _forecast_mse_with_gate(
+    base_predictions: np.ndarray,
+    full_predictions: np.ndarray,
+    targets: np.ndarray,
+    gate: np.ndarray,
+) -> float:
+    predictions = _apply_gate(base_predictions, full_predictions, gate)
+    return float(np.mean(np.square(predictions - targets)))
+
+
+def _select_history_gate_hyperparameter(
+    learner: str,
+    candidates: tuple[float | int, ...],
+    features: np.ndarray,
+    gate_targets: np.ndarray,
+    gate_weights: np.ndarray,
+    uids: np.ndarray,
+    base_predictions: np.ndarray,
+    full_predictions: np.ndarray,
+    targets: np.ndarray,
+) -> float | int:
+    groups = sorted(set(str(value) for value in uids))
+    if len(groups) < 2:
+        return candidates[0]
+
+    scores: list[float] = []
+    for candidate in candidates:
+        squared_error = 0.0
+        point_count = 0
+        for held_out in groups:
+            evaluation_mask = uids == held_out
+            train_mask = ~evaluation_mask
+            gate = _history_gate_predict(
+                learner,
+                features[train_mask],
+                gate_targets[train_mask],
+                gate_weights[train_mask],
+                features[evaluation_mask],
+                candidate,
+            )
+            predictions = _apply_gate(
+                base_predictions[evaluation_mask],
+                full_predictions[evaluation_mask],
+                gate,
+            )
+            squared_error += float(
+                np.sum(np.square(predictions - targets[evaluation_mask]))
+            )
+            point_count += predictions.size
+        scores.append(squared_error / max(point_count, 1))
+    return candidates[min(range(len(candidates)), key=lambda index: scores[index])]
+
+
+def _nested_group_oof_history_gate(
+    learner: str,
+    candidates: tuple[float | int, ...],
+    features: np.ndarray,
+    gate_targets: np.ndarray,
+    gate_weights: np.ndarray,
+    uids: np.ndarray,
+    base_predictions: np.ndarray,
+    full_predictions: np.ndarray,
+    targets: np.ndarray,
+) -> tuple[np.ndarray, dict[str, float | int]]:
+    groups = sorted(set(str(value) for value in uids))
+    if len(groups) < 3:
+        raise ValueError(
+            "Nested series-out gate validation requires at least three series."
+        )
+
+    gates = np.zeros_like(gate_targets, dtype=np.float64)
+    selected: dict[str, float | int] = {}
+    for held_out in groups:
+        evaluation_mask = uids == held_out
+        train_mask = ~evaluation_mask
+        hyperparameter = _select_history_gate_hyperparameter(
+            learner,
+            candidates,
+            features[train_mask],
+            gate_targets[train_mask],
+            gate_weights[train_mask],
+            uids[train_mask],
+            base_predictions[train_mask],
+            full_predictions[train_mask],
+            targets[train_mask],
+        )
+        gates[evaluation_mask] = _history_gate_predict(
+            learner,
+            features[train_mask],
+            gate_targets[train_mask],
+            gate_weights[train_mask],
+            features[evaluation_mask],
+            hyperparameter,
+        )
+        selected[held_out] = hyperparameter
+    return gates, selected
+
+
+def _group_oof_constant_gate(
+    gate_targets: np.ndarray,
+    gate_weights: np.ndarray,
+    uids: np.ndarray,
+) -> np.ndarray:
+    groups = sorted(set(str(value) for value in uids))
+    if len(groups) < 2:
+        raise ValueError("Series-out constant validation requires two series.")
+    gates = np.zeros_like(gate_targets, dtype=np.float64)
+    for held_out in groups:
+        evaluation_mask = uids == held_out
+        fitted = _fit_constant_gate(
+            gate_targets[~evaluation_mask],
+            gate_weights[~evaluation_mask],
+        )
+        gates[evaluation_mask] = fitted
+    return gates
+
+
+def _last_origin_indices(uids: np.ndarray) -> np.ndarray:
+    return np.asarray(
+        [
+            np.flatnonzero(uids == uid)[-1]
+            for uid in sorted(set(str(value) for value in uids))
+        ],
+        dtype=np.int64,
+    )
+
+
+def _gate_value_statistics(gate: np.ndarray) -> dict[str, float]:
+    values = np.asarray(gate, dtype=np.float64).reshape(-1)
+    return {
+        "mean": float(np.mean(values)),
+        "population_stddev": float(np.std(values)),
+        "min": float(np.min(values)),
+        "max": float(np.max(values)),
+        "fraction_below_0_05": float(np.mean(values < 0.05)),
+        "fraction_above_0_95": float(np.mean(values > 0.95)),
+    }
+
+
+def _relative_metric_improvement(
+    baseline: dict[str, float],
+    candidate: dict[str, float],
+) -> dict[str, float]:
+    return {
+        name: float(
+            100.0
+            * (baseline[name] - candidate[name])
+            / max(abs(baseline[name]), 1e-12)
+        )
+        for name in ("mae", "mse", "rmse")
+    }
+
+
+def _gate_method_evaluations(
+    base_predictions: np.ndarray,
+    full_predictions: np.ndarray,
+    targets: np.ndarray,
+    uids: np.ndarray,
+    methods: dict[str, np.ndarray],
+    *,
+    output_reference: np.ndarray | None,
+) -> dict[str, Any]:
+    evaluations = {
+        "validation_all_rolling_windows": np.arange(targets.shape[0]),
+        "validation_last_origin_per_series": _last_origin_indices(uids),
+    }
+    output: dict[str, Any] = {}
+    for evaluation_name, indices in evaluations.items():
+        method_rows: dict[str, Any] = {}
+        for method_name, gate in methods.items():
+            predictions = _apply_gate(
+                base_predictions[indices],
+                full_predictions[indices],
+                gate[indices],
+            )
+            method_rows[method_name] = {
+                "metrics": _metrics(targets[indices], predictions),
+                "gate": _gate_value_statistics(gate[indices]),
+                "prediction_sha256": _array_sha256(predictions),
+            }
+
+        always_on_metrics = method_rows["always_on"]["metrics"]
+        oracle_mse = method_rows["oracle_mse"]["metrics"]["mse"]
+        oracle_gain = always_on_metrics["mse"] - oracle_mse
+        reference_metrics = (
+            _metrics(targets[indices], output_reference[indices])
+            if output_reference is not None
+            else None
+        )
+        for row in method_rows.values():
+            row["relative_improvement_pct_vs_always_on"] = (
+                _relative_metric_improvement(always_on_metrics, row["metrics"])
+            )
+            row["mse_oracle_gain_capture_pct_from_always_on"] = (
+                float(
+                    100.0
+                    * (always_on_metrics["mse"] - row["metrics"]["mse"])
+                    / oracle_gain
+                )
+                if oracle_gain > 1e-12
+                else None
+            )
+            if reference_metrics is not None:
+                row["relative_improvement_pct_vs_output_reference"] = (
+                    _relative_metric_improvement(reference_metrics, row["metrics"])
+                )
+        output[evaluation_name] = {
+            "windows": int(indices.size),
+            "output_reference_metrics": reference_metrics,
+            "methods": method_rows,
+        }
+    return output
+
+
+def _gate_capacity_analysis(
+    base: dict[str, Any],
+    full: dict[str, Any],
+    *,
+    output_reference: dict[str, Any] | None,
+) -> dict[str, Any]:
+    _validate_diagnostic_payloads(base, full)
+    if output_reference is not None:
+        _validate_diagnostic_payloads(base, output_reference)
+
+    base_predictions = base["predictions"]
+    full_predictions = full["predictions"]
+    targets = base["targets"]
+    features = base["history_features"]
+    uids = base["uids"]
+    output_predictions = (
+        output_reference["predictions"] if output_reference is not None else None
+    )
+    output: dict[str, Any] = {}
+    for name, horizon_shared in (
+        ("window_scalar", True),
+        ("window_horizon", False),
+    ):
+        gate_targets, gate_weights = _mse_optimal_gate_targets(
+            base_predictions,
+            full_predictions,
+            targets,
+            horizon_shared=horizon_shared,
+        )
+        ridge_gate, ridge_selected = _nested_group_oof_history_gate(
+            "ridge",
+            HISTORY_GATE_RIDGE_ALPHAS,
+            features,
+            gate_targets,
+            gate_weights,
+            uids,
+            base_predictions,
+            full_predictions,
+            targets,
+        )
+        knn_gate, knn_selected = _nested_group_oof_history_gate(
+            "knn",
+            HISTORY_GATE_KNN_NEIGHBORS,
+            features,
+            gate_targets,
+            gate_weights,
+            uids,
+            base_predictions,
+            full_predictions,
+            targets,
+        )
+        gate_width = 1 if horizon_shared else targets.shape[1]
+        methods = {
+            "always_off": np.zeros((targets.shape[0], gate_width)),
+            "always_on": np.ones((targets.shape[0], gate_width)),
+            "validation_fit_constant": np.repeat(
+                _fit_constant_gate(gate_targets, gate_weights),
+                targets.shape[0],
+                axis=0,
+            ),
+            "series_oof_constant": _group_oof_constant_gate(
+                gate_targets,
+                gate_weights,
+                uids,
+            ),
+            "nested_series_oof_ridge": ridge_gate,
+            "nested_series_oof_knn": knn_gate,
+            "oracle_binary": _binary_oracle_gate(
+                base_predictions,
+                full_predictions,
+                targets,
+                horizon_shared=horizon_shared,
+            ),
+            "oracle_mse": gate_targets,
+            "oracle_mae": _mae_optimal_gate_targets(
+                base_predictions,
+                full_predictions,
+                targets,
+                horizon_shared=horizon_shared,
+            ),
+        }
+        output[name] = {
+            "gate_width": gate_width,
+            "history_learners": {
+                "nested_series_oof_ridge": {
+                    "candidate_alphas": list(HISTORY_GATE_RIDGE_ALPHAS),
+                    "selected_by_held_out_series": ridge_selected,
+                },
+                "nested_series_oof_knn": {
+                    "candidate_neighbors": list(HISTORY_GATE_KNN_NEIGHBORS),
+                    "selected_by_held_out_series": knn_selected,
+                },
+            },
+            "evaluations": _gate_method_evaluations(
+                base_predictions,
+                full_predictions,
+                targets,
+                uids,
+                methods,
+                output_reference=output_predictions,
+            ),
+        }
+    return output
+
+
+def _history_conditioned_gate_validation_upper_bound(
+    output_shift: dict[str, Any],
+    normalized_shift: dict[str, Any],
+    normalized_without_shift: dict[str, Any],
+) -> dict[str, Any]:
+    _validate_diagnostic_payloads(output_shift, normalized_shift)
+    _validate_diagnostic_payloads(normalized_without_shift, normalized_shift)
+    return {
+        "protocol": {
+            "fit_and_evaluation_scope": "validation split only",
+            "test_targets_used": False,
+            "history_features": list(normalized_shift["history_feature_names"]),
+            "cross_fit": "nested leave-one-series-out",
+            "cross_fit_scope": "post-hoc gate only",
+            "base_model_selection": (
+                "base model checkpoints were selected on the complete validation "
+                "split before post-hoc gate cross-fitting"
+            ),
+            "learner_objective": "weighted MSE-optimal gate regression",
+            "gate_range": [0.0, 1.0],
+            "interpretation": (
+                "optimistic validation capacity characterization, not a held-out "
+                "generalization estimate"
+            ),
+            "oracle_warning": (
+                "oracle methods inspect validation targets and are unattainable "
+                "ceilings, not deployable estimates"
+            ),
+        },
+        "normalized_residual_gate": _gate_capacity_analysis(
+            normalized_without_shift,
+            normalized_shift,
+            output_reference=output_shift,
+        ),
+        "output_to_normalized_blend": _gate_capacity_analysis(
+            output_shift,
+            normalized_shift,
+            output_reference=None,
+        ),
+    }
 
 
 def _error_comparison(
@@ -1403,6 +2068,7 @@ def _run_accuracy_seed(
 
     model_results: dict[str, Any] = {}
     predictions: dict[str, dict[str, dict[str, Any]]] = {}
+    validation_gate_payloads: dict[str, dict[str, dict[str, Any]]] = {}
     for case in cases:
         model, training = _train_model(
             case,
@@ -1449,6 +2115,40 @@ def _run_accuracy_seed(
             "test_all_rolling_windows": _prediction_summary(all_payload),
             "test_last_origin_per_series": _prediction_summary(last_payload),
         }
+        if (
+            case_set == "patchmixer-shift-space"
+            and case.key in HISTORY_GATE_REFERENCE_KEYS
+        ):
+            validation_loader = _make_loader(
+                dataset,
+                validation_indices,
+                batch_size=batch_size,
+                shuffle=False,
+                seed=seed + 2,
+            )
+            validation_payload = _predict_loader(
+                model,
+                case,
+                validation_loader,
+                autocast_context=autocast_context,
+            )
+            validation_gate_payloads[case.key] = {
+                "full": validation_payload,
+            }
+            model_results[case.key]["validation_all_rolling_windows"] = (
+                _prediction_summary(validation_payload)
+            )
+            if case.key == "patchmixer_future_shift_normalized":
+                validation_gate_payloads[case.key]["without_future_shift"] = (
+                    _predict_loader(
+                        model,
+                        case,
+                        validation_loader,
+                        autocast_context=autocast_context,
+                        omit_future=True,
+                    )
+                )
+            del validation_loader
         if case_set == "patchmixer-shift-space" and case.future_exogenous:
             without_future_all = _predict_loader(
                 model,
@@ -1544,6 +2244,7 @@ def _run_accuracy_seed(
         torch.cuda.empty_cache()
 
     paired: dict[str, Any] = {}
+    validation_gate_upper_bound: dict[str, Any] | None = None
     if case_set == "all":
         for family in ("patchtst", "patchmixer"):
             endogenous_key = f"{family}_endogenous"
@@ -1568,6 +2269,19 @@ def _run_accuracy_seed(
             comparison_pairs,
             include_diagnostics=True,
         )
+        output_validation = validation_gate_payloads[
+            "patchmixer_future_shift"
+        ]["full"]
+        normalized_validation = validation_gate_payloads[
+            "patchmixer_future_shift_normalized"
+        ]
+        validation_gate_upper_bound = (
+            _history_conditioned_gate_validation_upper_bound(
+                output_validation,
+                normalized_validation["full"],
+                normalized_validation["without_future_shift"],
+            )
+        )
 
     split_fingerprint = hashlib.sha256(
         json.dumps(splits, sort_keys=True).encode("utf-8")
@@ -1586,6 +2300,7 @@ def _run_accuracy_seed(
         "exogenous_scaler": scaler,
         "models": model_results,
         "paired_comparison": paired,
+        "validation_gate_upper_bound": validation_gate_upper_bound,
     }
 
 
@@ -1640,6 +2355,97 @@ def _aggregate_candidate_comparisons(
     return output
 
 
+def _aggregate_validation_gate_upper_bound(
+    seed_results: list[dict[str, Any]],
+) -> dict[str, Any]:
+    output: dict[str, Any] = {}
+    for analysis_name in (
+        "normalized_residual_gate",
+        "output_to_normalized_blend",
+    ):
+        output[analysis_name] = {}
+        for granularity in ("window_scalar", "window_horizon"):
+            output[analysis_name][granularity] = {}
+            for evaluation in (
+                "validation_all_rolling_windows",
+                "validation_last_origin_per_series",
+            ):
+                first_methods = seed_results[0]["validation_gate_upper_bound"][
+                    analysis_name
+                ][granularity]["evaluations"][evaluation]["methods"]
+                method_output: dict[str, Any] = {}
+                for method_name in first_methods:
+                    records = []
+                    for result in seed_results:
+                        row = result["validation_gate_upper_bound"][analysis_name][
+                            granularity
+                        ]["evaluations"][evaluation]["methods"][method_name]
+                        records.append(
+                            {
+                                "seed": result["seed"],
+                                "mae": row["metrics"]["mae"],
+                                "mse": row["metrics"]["mse"],
+                                "mae_improvement_pct_vs_always_on": row[
+                                    "relative_improvement_pct_vs_always_on"
+                                ]["mae"],
+                                "mse_improvement_pct_vs_always_on": row[
+                                    "relative_improvement_pct_vs_always_on"
+                                ]["mse"],
+                                "mse_oracle_gain_capture_pct_from_always_on": row[
+                                    "mse_oracle_gain_capture_pct_from_always_on"
+                                ],
+                                "mae_improvement_pct_vs_output_reference": (
+                                    row.get(
+                                        "relative_improvement_pct_vs_output_reference",
+                                        {},
+                                    ).get("mae")
+                                ),
+                                "mse_improvement_pct_vs_output_reference": (
+                                    row.get(
+                                        "relative_improvement_pct_vs_output_reference",
+                                        {},
+                                    ).get("mse")
+                                ),
+                            }
+                        )
+                    method_output[method_name] = {
+                        "records": records,
+                        "mean_mae": statistics.fmean(
+                            record["mae"] for record in records
+                        ),
+                        "mean_mse": statistics.fmean(
+                            record["mse"] for record in records
+                        ),
+                        "mean_mae_improvement_pct_vs_always_on": statistics.fmean(
+                            record["mae_improvement_pct_vs_always_on"]
+                            for record in records
+                        ),
+                        "mean_mse_improvement_pct_vs_always_on": statistics.fmean(
+                            record["mse_improvement_pct_vs_always_on"]
+                            for record in records
+                        ),
+                    }
+                    if all(
+                        record["mae_improvement_pct_vs_output_reference"]
+                        is not None
+                        for record in records
+                    ):
+                        method_output[method_name][
+                            "mean_mae_improvement_pct_vs_output_reference"
+                        ] = statistics.fmean(
+                            float(record["mae_improvement_pct_vs_output_reference"])
+                            for record in records
+                        )
+                        method_output[method_name][
+                            "mean_mse_improvement_pct_vs_output_reference"
+                        ] = statistics.fmean(
+                            float(record["mse_improvement_pct_vs_output_reference"])
+                            for record in records
+                        )
+                output[analysis_name][granularity][evaluation] = method_output
+    return output
+
+
 def _aggregate_accuracy(
     seed_results: list[dict[str, Any]],
     *,
@@ -1647,13 +2453,21 @@ def _aggregate_accuracy(
     comparison_pairs: dict[str, tuple[str, str]],
 ) -> dict[str, Any]:
     if case_set == "patchmixer-shift-space":
-        return {
+        output = {
             "patchmixer_shift_space": _aggregate_candidate_comparisons(
                 seed_results,
                 group_name="patchmixer_shift_space",
                 comparison_pairs=comparison_pairs,
             )
         }
+        if all(
+            result.get("validation_gate_upper_bound") is not None
+            for result in seed_results
+        ):
+            output["validation_gate_upper_bound"] = (
+                _aggregate_validation_gate_upper_bound(seed_results)
+            )
+        return output
 
     output: dict[str, Any] = {}
     for family in ("patchtst", "patchmixer"):
@@ -2141,7 +2955,7 @@ def main(argv: list[str] | None = None) -> int:
     ]
     properties = torch.cuda.get_device_properties(0)
     result = {
-        "schema_version": 5,
+        "schema_version": 6,
         "started_at_utc": started_at.isoformat(),
         "finished_at_utc": datetime.now(timezone.utc).isoformat(),
         "elapsed_seconds": time.perf_counter() - started,
@@ -2201,6 +3015,8 @@ def main(argv: list[str] | None = None) -> int:
                     "error_by_series",
                     "error_by_horizon",
                     "error_by_history_std_rank_quartile",
+                    "validation_history_gate_nested_series_oof",
+                    "validation_history_gate_target_aware_oracle_ceiling",
                 ]
                 if args.case_set == "patchmixer-shift-space"
                 else []
