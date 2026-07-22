@@ -79,6 +79,22 @@ r[b, h]   = the effective future-head residual for sample b and horizon h
 The RevIN statistics come only from the observed target history, are computed
 per sample, and are detached by the current RevIN implementation.
 
+### Optional normalized residual bound
+
+`future_exo_normalized_residual_limit: Optional[float] = None` is an opt-in
+safety boundary for the normalized coordinate. A positive value `c` changes
+only the normalized residual before it is added to the forecast:
+
+```text
+r_bounded = c * tanh(r / c)
+```
+
+The field requires `future_exo_shift_space="normalized"` and `use_revin=True`;
+invalid, non-finite, non-positive, output-space, and RevIN-disabled
+combinations fail during model construction. `None` preserves the previous
+equation exactly. The bound creates no parameter or persistent buffer, so
+state-dict schemas and legacy strict loading are unchanged.
+
 - In `output` mode, `r` is in raw target units: `D_b(z) + r`.
 - In `normalized` mode, `r` is in target RevIN units: `D_b(z + r)`.
 
@@ -202,3 +218,29 @@ latency over output in this run. The evidence therefore does not satisfy step
 5: `output` remains the compatibility default, while `normalized` remains an
 explicit opt-in. Endogenous remains preferred when future covariates are not a
 required model input.
+
+### Seed-33 diagnosis and bounded-candidate result
+
+The follow-up diagnostic run at `f175ca1` showed that seed 33 was not driven by
+the future head's zero-input bias. The feature-conditioned effect averaged
+0.1204 history-standard-deviation units versus 0.0069 for zero-input bias. The
+error-delta correlation with history standard deviation was 0.151, and every
+horizon, test series, and history-scale quartile regressed relative to output.
+Series 12 had the largest standardized shift and the largest relative
+regression. Removing the shift from the trained normalized model worsened its
+rolling MAE by 11.170%, demonstrating backbone/head co-adaptation rather than a
+standalone inference-time spike.
+
+The `c=0.15` soft-bound candidate was then evaluated at clean commit `213dd07`
+with the same seeds and protocol. It preserved the legacy three strategies
+exactly and added no parameters or peak VRAM. Against output it recorded
+-2.063% mean rolling improvement and -6.598% mean last-origin improvement. It
+lost all three last-origin seeds and regressed 13.203% on seed 33 rolling.
+Training and inference latency were 1.705% and 2.372% higher than output in the
+final 100-step run.
+
+Consequently, a single global bound is rejected as an accuracy promotion. The
+field remains explicit and disabled by default for safety experiments; no
+default preset may enable it. Any next candidate must condition reliability on
+target history or forecast state and must repeat both rolling and last-origin
+multi-seed validation before promotion.
