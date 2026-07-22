@@ -91,6 +91,8 @@ class _ExoMixin(nn.Module):
         """
         # 1. 미래 외생 변수 (Future Exo) 설정
         self.future_exo_dim = int(getattr(cfg, "future_exo_dim", 0) or 0)
+        # Retained for checkpoint/introspection compatibility; it does not
+        # control feature scaling or the target-space shift coordinate.
         self.exo_is_normalized_default = bool(getattr(cfg, "exo_is_normalized_default", False))
         self.exo_head: Optional[nn.Module] = None
 
@@ -404,9 +406,9 @@ class PatchMixerQuantileModel(_ExoMixin):
         exo_is_normalized: Optional[bool] = None,
         **kwargs,
     ):
-        # NOTE:
-        # 본 구현은 future exo shift를 "denorm 이후(out-space)"에 더하는 방식으로 통일합니다.
-        # 따라서 exo_is_normalized는 사실상 사용하지 않습니다(호환용으로만 받음).
+        # The current future shift is always added after target denormalization.
+        # exo_is_normalized is a deprecated accepted-and-ignored API argument;
+        # input feature scaling belongs to the data-preparation contract.
 
         self._validate_future_exo_contract(future_exo, batch_size=x.size(0))
 

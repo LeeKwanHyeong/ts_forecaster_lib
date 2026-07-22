@@ -145,6 +145,36 @@ than Endogenous until a redesigned gate passes the same three-seed contract.
 Future-feature results also assume every horizon value is available or forecast
 at the prediction origin; upstream feature-forecast error is outside this test.
 
+### b15aaa6 compatibility revalidation
+
+The clip-policy checkpoint `b15aaa670fa3f7a9185ed44d68a99658a587bd91`
+was revalidated in a clean detached worktree on the RTX 5090. It used the same
+6,435-row, 45-series Walmart dataset (SHA-256
+`950a9a9ccc9424d09bb652d908a224d8e225b95f6b48d0d05f79e16c2bb4685f`),
+FP32 seeds 11/22/33, at most 100 epochs with patience 15, and the BF16
+batch-64 20-warm-up/100-measured-step performance protocol.
+
+The complete PatchMixer accuracy aggregate is exactly equal to the prior
+`cf6cb5c` result, not merely equal after rounding. Full Exogenous again records
+-1.814% mean rolling MAE improvement and -3.904% mean last-origin MAE
+improvement relative to Endogenous, so the default-model decision is unchanged.
+Zeroing future inputs changes Full-model rolling predictions by only 11.13,
+20.90, and 17.99 target units for seeds 11, 22, and 33. Gate saturation remains
+between 78.42% and 78.72%.
+
+| PatchMixer case | Parameters | BF16 training step | BF16 inference | Training peak VRAM | Inference peak VRAM |
+|---|---:|---:|---:|---:|---:|
+| Endogenous | 7,077,643 | 4.964 ms | 1.470 ms | 243.22 MiB | 157.75 MiB |
+| Past gate | 7,892,107 | 5.267 ms | 1.626 ms | 252.96 MiB | 164.66 MiB |
+| Future output shift | 7,078,156 | 5.219 ms | 1.583 ms | 241.63 MiB | 158.00 MiB |
+| Full Exogenous | 7,892,620 | 5.542 ms | 1.755 ms | 253.01 MiB | 164.70 MiB |
+
+Full Exogenous adds 814,977 parameters, 11.66% training-step latency, 19.43%
+inference latency, 9.79 MiB training peak allocation, and 6.95 MiB inference
+peak allocation over Endogenous in this rerun. The result file
+`patchmixer_exogenous_b15aaa6_5090.json` has SHA-256
+`3c05ec17b85e2efc583a2241a1f4ea03049483ba677b69bac496be03bb68996b`.
+
 ## Exogenous implementation contract
 
 The current Point and Quantile implementations inherit `_ExoMixin`. Their

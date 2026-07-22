@@ -166,6 +166,6 @@ def train_patchmixer(
     print(
         f"[EXO-train] model.exo_dim={getattr(model, 'exo_dim', 0)}  "
         f"future_exo_cb? {future_exo_cb is not None}  "
-        f"exo_is_normalized={exo_is_normalized}"
+        f"legacy_exo_is_normalized_ignored={exo_is_normalized}"
     )
     return best
