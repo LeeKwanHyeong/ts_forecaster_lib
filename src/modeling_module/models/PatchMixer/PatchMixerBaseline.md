@@ -233,6 +233,62 @@ Point and Quantile now execute both values in the serialized
 to `loc` only. There is no silent fallback to `output`; when RevIN is disabled,
 normalized intentionally uses the identity/output insertion path.
 
+## RTX 5090 shift-space validation
+
+Commit `4d1ce99dfa1a53ee9a232b87c56f5b72a6d3c5d4` was evaluated from a clean
+detached worktree on the RTX 5090 with Python 3.12.13, PyTorch 2.11.0+cu130,
+and CUDA 13.0. The run used the same 6,435-row, 45-series Walmart dataset and
+SHA-256 as the earlier gated-fusion baseline. Accuracy used FP32 MSE, seeds
+11/22/33, ID-disjoint 31/7/7 series splits, at most 100 epochs, and patience 15.
+
+Only the future-shift coordinate was varied: the two exogenous cases have no
+past gate, share the same 513-parameter future head, and differ only in
+`future_exo_shift_space`. The Endogenous and output cases exactly reproduce the
+prior `b15aaa6` split fingerprints, scaler values, training histories, selected
+epochs, metrics, and prediction hashes for all three seeds.
+
+Positive percentages below are the mean of seed-wise MAE improvements relative
+to Endogenous; they are not percentages computed from the displayed mean MAE.
+
+| Strategy | Rolling mean MAE | Last-origin mean MAE | Rolling improvement | Last-origin improvement | Rolling seed wins | Last-origin seed wins |
+|---|---:|---:|---:|---:|---:|---:|
+| Endogenous | 46,603.41 | 48,528.50 | baseline | baseline | - | - |
+| Future output shift | 46,332.03 | 49,344.53 | +0.520% | -2.040% | 2/3 | 1/3 |
+| Future normalized shift | 46,530.15 | 50,684.36 | -0.196% | -5.820% | 2/3 | 1/3 |
+
+Against output directly, normalized records -0.805% mean rolling MAE
+improvement and -3.629% mean last-origin improvement. It wins 2/3 rolling
+seeds, but the seed-33 rolling regression is 7.949%; it wins only 1/3
+last-origin seeds. This is not sufficiently consistent evidence to promote the
+normalized coordinate.
+
+The BF16 batch-64 performance run measured 100 steps after 20 warm-up steps on
+CUDA-resident inputs. Peak allocation is an observed allocator value, so the
+small lower training peak for the exogenous cases is not treated as a
+structural memory saving.
+
+| Strategy | Parameters | Training step | Inference | Training peak VRAM | Inference peak VRAM |
+|---|---:|---:|---:|---:|---:|
+| Endogenous | 7,077,643 | 4.816 ms | 1.459 ms | 243.22 MiB | 157.75 MiB |
+| Future output shift | 7,078,156 | 5.109 ms | 1.563 ms | 241.63 MiB | 158.34 MiB |
+| Future normalized shift | 7,078,156 | 5.129 ms | 1.612 ms | 241.63 MiB | 158.34 MiB |
+
+Normalized and output have identical parameter counts and measured peak VRAM.
+Normalized adds 0.392% training-step latency and 3.140% inference latency over
+output in this run. The complete result file
+`patchmixer_shift_space_4d1ce99_5090.json` has SHA-256
+`697e445bf0861afede0ed957e1c6c7c90310d098ece9ad0eedec691096ea34fa`.
+
+The compatibility and evidence decision is therefore:
+
+- Keep `future_exo_shift_space="output"` as the config and legacy-checkpoint
+  default.
+- Keep `normalized` as an explicit opt-in for targeted datasets; do not
+  accuracy-promote it as the general PatchMixer exogenous default.
+- Prefer the Endogenous route when future covariates are not an explicit input
+  requirement. Neither shift mode improves both rolling and last-origin MAE
+  consistently enough to replace it globally.
+
 ## Default model strategy
 
 - Endogenous point forecasting: `patchmixer_original`
