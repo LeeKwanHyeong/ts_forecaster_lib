@@ -244,3 +244,64 @@ field remains explicit and disabled by default for safety experiments; no
 default preset may enable it. Any next candidate must condition reliability on
 target history or forecast state and must repeat both rolling and last-origin
 multi-seed validation before promotion.
+
+### Validation history-gate capacity result
+
+The follow-up RTX 5090 run at clean commit
+`d9b7bb69b6ff7dc53ac9c16616e7815d5d10e337` tested whether target history can
+identify when the normalized future residual should be attenuated. The local
+artifact is
+`artifacts/benchmarks/patchmixer-shift-space-results/patchmixer_history_gate_d9b7bb6_5090.json`
+with SHA-256
+`8e422721f0ab364ff1d49827076b19ed0295e750bde057f45ac096c272e25e20`.
+It used the same dataset hash, seeds 11/22/33, 100 epochs, patience 15, and
+series-disjoint split as the bounded-candidate run. Each seed supplied 441
+validation windows from seven validation series. All prior training histories
+and rolling/last-origin prediction hashes reproduced exactly.
+
+For the architecture-faithful analysis, `base` was the trained normalized
+model with its future shift disabled and `full` was the same model with its
+shift enabled. A gate produced `base + g * (full - base)`, with either one
+scalar per window or one value per window and horizon. Gate inputs were nine
+forecast-time history summaries: level, scale, last value, trend, recent
+4/12-week deviations, 52-week gap, range, and zero fraction. Ridge and KNN
+gates used nested leave-one-series-out fitting and hyperparameter selection.
+No test target was read. Target-aware oracle rows are unattainable ceilings.
+
+Positive values below mean lower validation rolling error relative to the
+ungated normalized model (`g=1`):
+
+| Gate | Scalar MAE | Scalar MSE | Horizon MAE | Horizon MSE |
+| --- | ---: | ---: | ---: | ---: |
+| Series-OOF constant | -0.119% | -1.040% | -0.258% | -1.474% |
+| Nested series-OOF KNN | -0.261% | -0.413% | -0.514% | -1.106% |
+| Nested series-OOF ridge | -2.569% | -2.039% | -1.315% | -1.579% |
+| Target-aware MSE oracle | +6.596% | +7.851% | +22.855% | +21.779% |
+
+The scalar oracle improved MAE in every seed by 8.913%, 8.068%, and 2.806%,
+so useful target-dependent attenuation exists in principle. The scalar OOF KNN
+gate improved only seed 22; its mean MSE oracle-gain capture was -9.698%.
+Ridge captured -25.083%. Horizon-wise KNN and ridge captured -5.832% and
+-8.067%. They also underperformed the output-space reference on rolling MAE.
+On last-origin validation, scalar KNN regressed 0.954% MAE and 3.000% MSE
+relative to `g=1`; horizon-wise KNN regressed 0.357% and 1.408%. The oracle
+ceilings remained positive, confirming that the failure is predictability, not
+the absence of useful gate values.
+
+A separate blend analysis interpolated between two independently trained
+output-space and normalized-space models. Its series-OOF scalar constant was
+near 0.5 and improved rolling MAE over output in all seeds by 4.471%, 1.713%,
+and 4.553% (3.579% mean); mean MSE improvement was 6.513%. History-conditioned
+KNN was weaker than that constant. Last-origin behavior was not stable: seed 11
+regressed 3.278% MAE and 18.058% MSE. This is an ensemble hypothesis with two
+model executions, not evidence for an internal normalized-residual gate.
+
+Therefore no history-conditioned residual gate is promoted from this feature
+set, and `output` remains the PatchMixer default. The oracle gap does justify
+future research with richer forecast-state representations, but any such gate
+must be trained end to end or with genuine outer-fold model training. The
+approximately 0.5 dual-model blend may be tested separately only after its
+memory/latency cost and held-out test behavior are measured. The present OOF
+analysis applies only to the post-hoc gate; base checkpoints were selected on
+the complete validation split, so these numbers are optimistic capacity
+characterization rather than held-out generalization estimates.
