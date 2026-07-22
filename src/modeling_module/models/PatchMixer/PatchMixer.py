@@ -91,6 +91,14 @@ class _ExoMixin(nn.Module):
         """
         # 1. 미래 외생 변수 (Future Exo) 설정
         self.future_exo_dim = int(getattr(cfg, "future_exo_dim", 0) or 0)
+        self.future_exo_shift_space = str(
+            getattr(cfg, "future_exo_shift_space", "output")
+        )
+        if self.future_exo_shift_space != "output":
+            raise ValueError(
+                "PatchMixer future_exo_shift_space currently supports only "
+                "'output'; normalized-space shift is not implemented yet."
+            )
         # Retained for checkpoint/introspection compatibility; it does not
         # control feature scaling or the target-space shift coordinate.
         self.exo_is_normalized_default = bool(getattr(cfg, "exo_is_normalized_default", False))

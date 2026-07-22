@@ -180,8 +180,9 @@ peak allocation over Endogenous in this rerun. The result file
 The current Point and Quantile implementations inherit `_ExoMixin`. Their
 active construction and forward path is:
 
-1. `_init_exo` registers the future MLP, categorical embeddings, latent
-   projection, and latent gate when the configured widths require them.
+1. `_init_exo` resolves the output-only `future_exo_shift_space` contract and
+   registers the future MLP, categorical embeddings, latent projection, and
+   latent gate when the configured widths require them.
 2. `_validate_future_exo_contract` validates the future `[B,H,E]` tensor at the
    model boundary.
 3. `_inject_past_exo_z_gate` calls `_pool_past_exo` and injects the pooled past

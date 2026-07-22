@@ -59,6 +59,35 @@ def _config(*, exogenous: bool, distribution: bool = False) -> PatchMixerConfig:
     )
 
 
+def _future_only_config(*, distribution: bool = False) -> PatchMixerConfig:
+    return PatchMixerConfig(
+        device="cpu",
+        lookback=8,
+        horizon=2,
+        enc_in=1,
+        patch_len=4,
+        stride=2,
+        mixer_kernel_size=3,
+        d_model=8,
+        e_layers=1,
+        dropout=0.0,
+        head_dropout=0.0,
+        f_out=8,
+        head_hidden=8,
+        use_revin=True,
+        final_nonneg=False,
+        past_exo_mode="none",
+        future_exo_dim=2,
+        patch_cfgs=((4, 2, 3),),
+        per_branch_dim=4,
+        fused_dim=8,
+        quantiles=(0.1, 0.5, 0.9),
+        q_clip_norm=None,
+        out_mul=2 if distribution else 1,
+        param_names=["loc", "scale"] if distribution else None,
+    )
+
+
 def _inputs(*, requires_grad: bool = False):
     x = torch.linspace(-1.0, 1.0, steps=16).reshape(2, 8, 1)
     past_cont = torch.linspace(-0.5, 0.75, steps=32).reshape(2, 8, 2)
@@ -277,6 +306,64 @@ def test_patchmixer_exogenous_output_baseline(
 
     tensor = output["q"] if isinstance(output, dict) else output
     torch.testing.assert_close(tensor, expected, rtol=1e-6, atol=1e-6)
+
+
+@pytest.mark.parametrize(
+    ("model_cls", "distribution"),
+    (
+        (PatchMixerExogenousModel, False),
+        (PatchMixerQuantileExogenousModel, False),
+        (PatchMixerExogenousModel, True),
+    ),
+)
+def test_patchmixer_future_shift_is_in_raw_output_space(
+    model_cls,
+    distribution: bool,
+) -> None:
+    torch.manual_seed(20260807)
+    model = model_cls(_future_only_config(distribution=distribution)).eval()
+    assert model.future_exo_shift_space == "output"
+    assert all("shift_space" not in key for key in model.state_dict())
+    x = torch.linspace(-1.0, 1.0, steps=16).reshape(2, 8, 1)
+    x_large_scale = 1000.0 + 250.0 * x
+    future = torch.linspace(-0.25, 0.5, steps=8).reshape(2, 2, 2)
+    zero_future = torch.zeros_like(future)
+
+    def output_tensor(inputs: torch.Tensor, exogenous: torch.Tensor) -> torch.Tensor:
+        output = model(inputs, future_exo=exogenous)
+        return output["q"] if isinstance(output, dict) else output
+
+    with torch.no_grad():
+        expected = (
+            model.exo_head(future).squeeze(-1)
+            - model.exo_head(zero_future).squeeze(-1)
+        )
+        unit_effect = output_tensor(x, future) - output_tensor(x, zero_future)
+        large_effect = output_tensor(x_large_scale, future) - output_tensor(
+            x_large_scale,
+            zero_future,
+        )
+
+    if model_cls is PatchMixerQuantileExogenousModel:
+        expected = expected.unsqueeze(1).expand_as(unit_effect)
+    elif distribution:
+        torch.testing.assert_close(
+            unit_effect[..., 1],
+            torch.zeros_like(unit_effect[..., 1]),
+            rtol=0.0,
+            atol=0.0,
+        )
+        torch.testing.assert_close(
+            large_effect[..., 1],
+            torch.zeros_like(large_effect[..., 1]),
+            rtol=0.0,
+            atol=0.0,
+        )
+        unit_effect = unit_effect[..., 0]
+        large_effect = large_effect[..., 0]
+
+    torch.testing.assert_close(unit_effect, expected, rtol=1e-5, atol=1e-5)
+    torch.testing.assert_close(large_effect, expected, rtol=1e-4, atol=1e-4)
 
 
 @pytest.mark.parametrize(

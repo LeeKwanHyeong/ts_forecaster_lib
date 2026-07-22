@@ -158,6 +158,8 @@ class PatchMixerConfig(TrainingConfig):
 
     # ---------- 미래 외생 변수 (Future Exogenous) ----------
     future_exo_dim: int = 0  # 미래 외생 변수 차원 (0일 경우 미사용)
+    # Stage-one contract: normalized becomes valid only when its forward path lands.
+    future_exo_shift_space: Literal["output"] = "output"
     # Deprecated PatchMixer compatibility field. Input scaling belongs to the
     # data contract; PatchMixer accepts and serializes this value but ignores it.
     exo_is_normalized_default: bool = False

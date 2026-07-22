@@ -42,8 +42,12 @@ metadata rather than through a boolean model flag.
 
 ### Future shift space
 
-A future implementation may add an explicit `future_exo_shift_space` config
-field with exactly two values:
+The rollout is staged so the config cannot silently select an unimplemented
+forward path. Stage one exposes
+`future_exo_shift_space: Literal["output"] = "output"`. Missing fields in
+legacy checkpoints resolve to `output`, while `normalized` and unknown values
+fail at model construction. Stage two will expand the field to exactly two
+values when the normalized forward path lands:
 
 | Value | Meaning | Compatibility |
 | --- | --- | --- |
@@ -52,9 +56,8 @@ field with exactly two values:
 
 This field describes the output coordinate of the future-exogenous head. It
 does not describe whether the exogenous inputs themselves were standardized.
-Unknown values must fail at model construction. The field must not be exposed
-in public config until both values are implemented and covered by strict
-checkpoint and forward tests.
+An accepted value must always have a complete forward implementation;
+unsupported and unknown values fail at model construction.
 
 ## Application points
 
@@ -81,7 +84,8 @@ remains explicit for checkpoint reproducibility.
 ## Validation sequence
 
 1. Preserve the legacy no-op and missing-config checkpoint contracts in tests.
-2. Keep `output` as the behavior of checkpoints without the future field.
+2. Expose the output-only field while keeping `output` as the behavior of
+   checkpoints without it.
 3. Implement `normalized` as an explicit opt-in without changing parameter
    names or state-dict shapes.
 4. Compare Endogenous, output-shift, and normalized-shift variants with the same

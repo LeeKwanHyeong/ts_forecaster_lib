@@ -172,22 +172,26 @@ def test_patchmixer_quantile_clip_config_and_checkpoint_contract() -> None:
     field_names = {field.name for field in fields(PatchMixerConfig)}
     assert "q_clip_norm" in field_names
     assert "q_clip_train" not in field_names
-    assert "future_exo_shift_space" not in field_names
+    assert "future_exo_shift_space" in field_names
 
     config = _config(use_revin=True, q_clip_norm=2.5)
     model = PatchMixerQuantileEndogenousModel(config)
     payload = build_checkpoint_payload(model, config)
 
     assert asdict(config)["q_clip_norm"] == 2.5
+    assert asdict(config)["future_exo_shift_space"] == "output"
     assert payload["config"]["q_clip_norm"] == 2.5
+    assert payload["config"]["future_exo_shift_space"] == "output"
     assert payload["config"]["exo_is_normalized_default"] is True
     assert payload["config"]["exo_is_normalized"] is True
     assert model.q_clip_eval == 2.5
+    assert model.future_exo_shift_space == "output"
     assert not hasattr(model, "q_clip_train")
     assert all("clip" not in key for key in model.state_dict())
 
     restored_config = PatchMixerConfig(**payload["config"])
     assert restored_config.q_clip_norm == 2.5
+    assert restored_config.future_exo_shift_space == "output"
 
     disabled = PatchMixerQuantileEndogenousModel(
         _config(use_revin=True, q_clip_norm=None)
@@ -222,6 +226,7 @@ def test_legacy_checkpoint_without_q_clip_norm_strict_loads(
     )
     legacy_config = dict(payload["config"])
     legacy_config.pop("q_clip_norm")
+    legacy_config.pop("future_exo_shift_space")
     payload.pop("config")
     payload["cfg_state"] = dict(legacy_config)
     checkpoint_path = tmp_path / f"{config_cls.__name__}_without_q_clip_norm.pt"
@@ -231,8 +236,21 @@ def test_legacy_checkpoint_without_q_clip_norm_strict_loads(
 
     assert predictor.model_key == "patchmixer_quantile"
     assert "q_clip_norm" not in payload["cfg_state"]
+    assert "future_exo_shift_space" not in payload["cfg_state"]
     assert predictor.model.q_clip_eval == 10.0
+    assert predictor.model.future_exo_shift_space == "output"
     assert predictor.model.state_dict().keys() == model.state_dict().keys()
     with torch.no_grad():
         actual = predictor.model(x)["q"]
     torch.testing.assert_close(actual, expected, rtol=0.0, atol=0.0)
+
+
+@pytest.mark.parametrize("shift_space", ("normalized", "invalid"))
+def test_patchmixer_rejects_unimplemented_future_shift_spaces(
+    shift_space: str,
+) -> None:
+    config = _config(use_revin=True, exogenous=True)
+    config.future_exo_shift_space = shift_space  # type: ignore[assignment]
+
+    with pytest.raises(ValueError, match="currently supports only 'output'"):
+        PatchMixerExogenousModel(config)
