@@ -70,9 +70,9 @@ denormalization 전에 적용됩니다.
 
 ## Code map
 
-- [model and exogenous paths](PatchMixer.py)
-- [configuration](common/configs.py)
-- [trainer integration](../../training/model_trainers/patchmixer_train.py)
+- [model and exogenous paths](../PatchMixer.py)
+- [configuration](../common/configs.py)
+- [trainer integration](../../../training/model_trainers/patchmixer_train.py)
 
 지원 경계는 registry, public validation, CPU point smoke, distribution restore, future-exogenous
 sensitivity 회귀 테스트로 고정합니다.

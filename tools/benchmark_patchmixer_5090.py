@@ -32,11 +32,11 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from modeling_module.models.PatchMixer.PatchMixer import PatchMixerModel
-from modeling_module.models.PatchMixer.common.configs import PatchMixerConfig
-from modeling_module.models.PatchMixer.original import (
+from modeling_module.models.PatchMixer import (
     PatchMixerOriginalConfig,
     PatchMixerOriginalModel,
 )
+from modeling_module.models.PatchMixer.common.configs import PatchMixerConfig
 from modeling_module.models.PatchMixer.provenance import (
     PATCHMIXER_ENHANCED_BASELINE_COMMIT,
     PATCHMIXER_REFERENCE_CONFIG,

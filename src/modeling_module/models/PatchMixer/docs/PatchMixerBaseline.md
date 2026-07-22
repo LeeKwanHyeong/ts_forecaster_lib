@@ -75,7 +75,9 @@ The machine-readable inputs and decision checks are in
 
 Commit `acd65c5339acb57664ea7200728aa56769be4b81` moved the canonical Original
 classes into `PatchMixer.py`, moved `PatchMixerOriginalConfig` into
-`common/configs.py`, and retained `original.py` as a compatibility re-export.
+`common/configs.py`, and initially retained `original.py` as a compatibility
+re-export. The compatibility shim was removed when PatchMixer was frozen;
+callers now import Original symbols from the `PatchMixer` package public API.
 The post-move validation used a clean detached checkout of that exact commit on
 the RTX 5090 with Python 3.12.13, PyTorch 2.11.0+cu130, and the same Walmart
 dataset SHA-256 shown above.
