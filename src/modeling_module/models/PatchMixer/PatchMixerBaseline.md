@@ -65,11 +65,34 @@ smaller last-origin slice it improves RMSE by +4.20% while sMAPE regresses by
 2.93%, so this evidence does not establish universal metric dominance.
 
 The separate RTX 5090 BF16 batch-64 benchmark measures 100 training steps after
-20 warm-up steps. Original provides 1.583x throughput, 36.84% lower mean step
-latency, 88.30% lower peak allocated VRAM, and 98.92% fewer parameters.
+20 warm-up steps. Original provides 1.574x throughput, 36.46% lower mean step
+latency, 88.29% lower peak allocated VRAM, and 98.92% fewer parameters.
 
 The machine-readable inputs and decision checks are in
 `artifacts/benchmarks/patchmixer_5090_multiseed_summary.json`.
+
+### Structure-consolidation revalidation
+
+Commit `acd65c5339acb57664ea7200728aa56769be4b81` moved the canonical Original
+classes into `PatchMixer.py`, moved `PatchMixerOriginalConfig` into
+`common/configs.py`, and retained `original.py` as a compatibility re-export.
+The post-move validation used a clean detached checkout of that exact commit on
+the RTX 5090 with Python 3.12.13, PyTorch 2.11.0+cu130, and the same Walmart
+dataset SHA-256 shown above.
+
+- Original parity/public API/registry preflight: 21 tests passed.
+- Rolling MAE improvement across seeds 11/22/33: +8.378%, -0.257%, +10.539%
+  (mean +6.220%; Original wins 2/3 seeds).
+- Last-origin MAE improvement: +4.547%, -4.091%, +3.209%
+  (mean +1.222%; Original wins 2/3 seeds).
+- BF16 mean training step: Original 2.720 ms, Enhanced 4.281 ms.
+- BF16 throughput: Original 23,529 samples/s, Enhanced 14,951 samples/s.
+- Peak allocated VRAM: Original 22.78 MiB, Enhanced 194.53 MiB.
+
+The generated `patchmixer_5090_multiseed_summary.json` has SHA-256
+`fe65486e75c2908ce99e78b27d9e81b338e4ae47bd4027aa1c23bad4d09d3de8`.
+All decision guardrails passed, so the consolidation is behavior-preserving for
+the tested contract and does not change the capability defaults below.
 
 ## Default model strategy
 
