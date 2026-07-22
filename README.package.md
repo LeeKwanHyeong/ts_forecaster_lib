@@ -72,8 +72,10 @@ pip check
 
 | Family request | Canonical artifact | Status | 구현된 학습/checkpoint mode | Continuous exogenous | PatchTST SSL |
 |---|---|---|---|---|---|
-| `patchtst` | `patchtst_base` | 지원 | point, Normal, StudentT | past/future optional | `full`, `ssl_only` |
-| `patchtst` | `patchtst_quantile` | 지원 | q10/q50/q90 | past/future optional | `full`, `ssl_only` |
+| `patchtst` | `patchtst_base` | 지원 | point, Normal, StudentT | endogenous 기본, legacy exogenous 호환 | `full`, `ssl_only` |
+| explicit only | `patchtst_exogenous` | 지원 | point, Normal, StudentT | past/future 중 하나 이상 필수 | `full`, `ssl_only` |
+| `patchtst` | `patchtst_quantile` | 지원 | q10/q50/q90 | endogenous 기본, legacy exogenous 호환 | `full`, `ssl_only` |
+| explicit only | `patchtst_quantile_exogenous` | 지원 | q10/q50/q90 | past/future 중 하나 이상 필수 | `full`, `ssl_only` |
 | `patchmixer` | `patchmixer_base` | 지원 | point, Normal, StudentT | past/future optional | 미지원 |
 | `patchmixer` | `patchmixer_quantile` | 지원 | q10/q50/q90 | past/future optional | 미지원 |
 | explicit only | `patchmixer_original` | 지원 | point only | 미지원 | 미지원 |
@@ -89,6 +91,9 @@ pip check
 - artifact key를 직접 주면 해당 artifact만 학습합니다.
 - `patchmixer_original`은 upstream 비교용 endogenous baseline이므로 `models`에 직접 지정해야 하며,
   `patchmixer` family 요청에는 자동으로 포함되지 않습니다.
+- 신규 PatchTST exogenous 학습은 `patchtst_exogenous` 또는
+  `patchtst_quantile_exogenous`를 직접 지정합니다. Base key의 exogenous config routing은 기존
+  checkpoint와 호출자 호환을 위해서만 유지합니다.
 - `models`를 생략하거나 빈 목록을 주면 `patchtst` family가 기본값이며
   `patchtst_base`, `patchtst_quantile` 순서로 확장됩니다.
 - categorical past exogenous 입력은 현재 모든 public family에서 fail-fast합니다. 먼저 continuous

@@ -262,6 +262,31 @@ TRAINING_FAMILY_DEFAULTS: dict[str, tuple[str, ...]] = {
 }
 
 
+PATCHTST_CAPABILITY_DEFAULTS: dict[str, str] = {
+    "endogenous_point": "patchtst_base",
+    "exogenous_point": "patchtst_exogenous",
+    "endogenous_distribution": "patchtst_base",
+    "exogenous_distribution": "patchtst_exogenous",
+    "endogenous_quantile": "patchtst_quantile",
+    "exogenous_quantile": "patchtst_quantile_exogenous",
+}
+
+
+_PATCHTST_CAPABILITY_ALIASES: dict[str, str] = {
+    _norm_name("point"): "endogenous_point",
+    _norm_name("endogenous_point"): "endogenous_point",
+    _norm_name("exogenous_point"): "exogenous_point",
+    _norm_name("distribution"): "endogenous_distribution",
+    _norm_name("dist"): "endogenous_distribution",
+    _norm_name("endogenous_distribution"): "endogenous_distribution",
+    _norm_name("exogenous_distribution"): "exogenous_distribution",
+    _norm_name("exogenous_dist"): "exogenous_distribution",
+    _norm_name("quantile"): "endogenous_quantile",
+    _norm_name("endogenous_quantile"): "endogenous_quantile",
+    _norm_name("exogenous_quantile"): "exogenous_quantile",
+}
+
+
 PATCHMIXER_CAPABILITY_DEFAULTS: dict[str, str] = {
     "endogenous_point": "patchmixer_original",
     "exogenous_point": "patchmixer_exogenous",
@@ -313,6 +338,18 @@ def list_trainable_model_keys() -> list[str]:
 
 def list_training_families() -> list[str]:
     return list(TRAINING_FAMILY_DEFAULTS.keys())
+
+
+def get_patchtst_default_model_key(capability: str = "endogenous_point") -> str:
+    """Return the PatchTST artifact responsible for a forecasting capability."""
+    normalized = _norm_name(capability)
+    canonical = _PATCHTST_CAPABILITY_ALIASES.get(normalized)
+    if canonical is None:
+        supported = ", ".join(PATCHTST_CAPABILITY_DEFAULTS)
+        raise ValueError(
+            f"Unknown PatchTST capability: {capability!r}. Supported: {supported}."
+        )
+    return PATCHTST_CAPABILITY_DEFAULTS[canonical]
 
 
 def get_patchmixer_default_model_key(capability: str = "endogenous_point") -> str:

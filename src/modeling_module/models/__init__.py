@@ -13,6 +13,7 @@ from .registry import (
     build_model,
     get_model_builders,
     get_patchmixer_default_model_key,
+    get_patchtst_default_model_key,
     list_available_model_keys,
 )
 
@@ -22,6 +23,7 @@ __all__ = [
     "MODEL_BUILDERS",
     "list_available_models",
     "get_patchmixer_default_model_key",
+    "get_patchtst_default_model_key",
 
     # explicit builders (stable public surface)
     "build_patch_mixer",
