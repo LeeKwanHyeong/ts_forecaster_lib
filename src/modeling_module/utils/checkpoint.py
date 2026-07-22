@@ -47,7 +47,7 @@ def _rebuild_patchmixer_weekly(cfgd: dict):
 
 
 def _rebuild_patchmixer_original(cfgd: dict):
-    from modeling_module.models.PatchMixer.original import PatchMixerOriginalConfig
+    from modeling_module.models.PatchMixer.common.configs import PatchMixerOriginalConfig
 
     return PatchMixerOriginalConfig.from_config(cfgd)
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 # Config는 가볍게 eager
-from .common import PatchMixerConfig
+from .common import PatchMixerConfig, PatchMixerOriginalConfig
 
 __all__ = [
     "PatchMixerConfig",
@@ -17,6 +17,8 @@ __all__ = [
     "PatchMixerOriginalLayer",
     "PatchMixerOriginalBackbone",
     "PatchMixerOriginalModel",
+    "PatchMixerEnhancedModel",
+    "PatchMixerModel",
     "PatchMixerEndogenousModel",
     "PatchMixerExogenousModel",
     "PatchMixerQuantileEndogenousModel",
@@ -24,14 +26,17 @@ __all__ = [
 ]
 
 if TYPE_CHECKING:
-    from .PatchMixer import BaseModel, QuantileModel, make_patch_cfgs
-    from .backbone import PatchMixerBackbone, MultiScalePatchMixerBackbone
-    from .original import (
+    from .PatchMixer import (
+        BaseModel,
+        PatchMixerEnhancedModel,
+        PatchMixerModel,
         PatchMixerOriginalBackbone,
-        PatchMixerOriginalConfig,
         PatchMixerOriginalLayer,
         PatchMixerOriginalModel,
+        QuantileModel,
+        make_patch_cfgs,
     )
+    from .backbone import PatchMixerBackbone, MultiScalePatchMixerBackbone
     from .variants import (
         PatchMixerEndogenousModel,
         PatchMixerExogenousModel,
@@ -45,10 +50,11 @@ _LAZY = {
     "make_patch_cfgs": (".PatchMixer", "make_patch_cfgs"),
     "PatchMixerBackbone": (".backbone", "PatchMixerBackbone"),
     "MultiScalePatchMixerBackbone": (".backbone", "MultiScalePatchMixerBackbone"),
-    "PatchMixerOriginalConfig": (".original", "PatchMixerOriginalConfig"),
-    "PatchMixerOriginalLayer": (".original", "PatchMixerOriginalLayer"),
-    "PatchMixerOriginalBackbone": (".original", "PatchMixerOriginalBackbone"),
-    "PatchMixerOriginalModel": (".original", "PatchMixerOriginalModel"),
+    "PatchMixerOriginalLayer": (".PatchMixer", "PatchMixerOriginalLayer"),
+    "PatchMixerOriginalBackbone": (".PatchMixer", "PatchMixerOriginalBackbone"),
+    "PatchMixerOriginalModel": (".PatchMixer", "PatchMixerOriginalModel"),
+    "PatchMixerEnhancedModel": (".PatchMixer", "PatchMixerEnhancedModel"),
+    "PatchMixerModel": (".PatchMixer", "PatchMixerModel"),
     "PatchMixerEndogenousModel": (".variants", "PatchMixerEndogenousModel"),
     "PatchMixerExogenousModel": (".variants", "PatchMixerExogenousModel"),
     "PatchMixerQuantileEndogenousModel": (".variants", "PatchMixerQuantileEndogenousModel"),

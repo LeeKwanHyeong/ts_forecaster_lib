@@ -2,10 +2,10 @@ from dataclasses import fields, is_dataclass, asdict
 from typing import Union, Any, Optional, Mapping
 
 from modeling_module.models.ExoTST.configs import ExoTSTConfig
-from modeling_module.models.PatchMixer.common.configs import PatchMixerConfig
-from modeling_module.models.PatchMixer.original import (
+from modeling_module.models.PatchMixer.PatchMixer import PatchMixerOriginalModel
+from modeling_module.models.PatchMixer.common.configs import (
+    PatchMixerConfig,
     PatchMixerOriginalConfig,
-    PatchMixerOriginalModel,
 )
 from modeling_module.models.PatchTST.common.configs import PatchTSTConfig
 from modeling_module.models.SELLM.configs import SELLMConfig

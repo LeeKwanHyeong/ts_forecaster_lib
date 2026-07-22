@@ -16,6 +16,16 @@ from modeling_module.models.PatchMixer.original import (
     PatchMixerOriginalConfig,
     PatchMixerOriginalModel,
 )
+from modeling_module.models.PatchMixer.PatchMixer import (
+    PatchMixerEnhancedModel,
+    PatchMixerModel,
+    PatchMixerOriginalBackbone as CanonicalOriginalBackbone,
+    PatchMixerOriginalLayer as CanonicalOriginalLayer,
+    PatchMixerOriginalModel as CanonicalOriginalModel,
+)
+from modeling_module.models.PatchMixer.common.configs import (
+    PatchMixerOriginalConfig as CanonicalOriginalConfig,
+)
 from modeling_module.models.PatchMixer.provenance import (
     PATCHMIXER_UPSTREAM_COMMIT,
     PATCHMIXER_UPSTREAM_REPOSITORY,
@@ -50,6 +60,22 @@ def _config() -> PatchMixerOriginalConfig:
         dropout=0.0,
         head_dropout=0.0,
     )
+
+
+def test_patchmixer_original_canonical_locations_and_legacy_exports_match() -> None:
+    from modeling_module.models.PatchMixer.original import (
+        PatchMixerOriginalBackbone as LegacyOriginalBackbone,
+        PatchMixerOriginalLayer as LegacyOriginalLayer,
+    )
+
+    assert PatchMixerOriginalConfig is CanonicalOriginalConfig
+    assert PatchMixerOriginalModel is CanonicalOriginalModel
+    assert LegacyOriginalLayer is CanonicalOriginalLayer
+    assert LegacyOriginalBackbone is CanonicalOriginalBackbone
+    assert PatchMixerOriginalConfig.__module__.endswith("PatchMixer.common.configs")
+    assert PatchMixerOriginalModel.__module__.endswith("PatchMixer.PatchMixer")
+    assert issubclass(PatchMixerModel, PatchMixerEnhancedModel)
+    assert PatchMixerEnhancedModel.architecture_variant == "enhanced"
 
 
 def test_original_builder_and_registry_are_publicly_resolvable() -> None:

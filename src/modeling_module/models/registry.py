@@ -106,6 +106,7 @@ MODEL_SPECS: dict[str, ModelSpec] = {
             "PatchMixerModel",
             "PatchMixerPointModel",
             "PatchMixerDistributionModel",
+            "PatchMixerEnhancedModel",
             "PatchMixerEndogenousModel",
         ),
         checkpoint_aliases=("PatchMixer", "PatchMixerBase", "PatchMixerDist"),

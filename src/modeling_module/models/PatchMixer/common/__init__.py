@@ -4,10 +4,11 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 # Config는 가볍기 때문에 eager import 권장
-from .configs import PatchMixerConfig
+from .configs import PatchMixerConfig, PatchMixerOriginalConfig
 
 __all__ = [
     "PatchMixerConfig",
+    "PatchMixerOriginalConfig",
     "SimpleUnfoldProjector",
     "DynamicPatcherMoS",
     "DynamicOffsetPatcher",
