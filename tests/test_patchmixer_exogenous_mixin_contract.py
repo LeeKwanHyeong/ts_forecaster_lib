@@ -22,7 +22,13 @@ EXO_PARAMETER_PREFIXES = (
 )
 
 
-def _config(*, exogenous: bool, distribution: bool = False) -> PatchMixerConfig:
+def _config(
+    *,
+    exogenous: bool,
+    distribution: bool = False,
+    future_exo_shift_space: str = "output",
+    use_revin: bool = False,
+) -> PatchMixerConfig:
     kwargs = {}
     if exogenous:
         kwargs = {
@@ -48,9 +54,10 @@ def _config(*, exogenous: bool, distribution: bool = False) -> PatchMixerConfig:
         head_dropout=0.0,
         f_out=8,
         head_hidden=8,
-        use_revin=False,
+        use_revin=use_revin,
         final_nonneg=False,
         past_exo_mode="z_gate",
+        future_exo_shift_space=future_exo_shift_space,
         patch_cfgs=((4, 2, 3),),
         per_branch_dim=4,
         fused_dim=8,
@@ -59,7 +66,12 @@ def _config(*, exogenous: bool, distribution: bool = False) -> PatchMixerConfig:
     )
 
 
-def _future_only_config(*, distribution: bool = False) -> PatchMixerConfig:
+def _future_only_config(
+    *,
+    distribution: bool = False,
+    future_exo_shift_space: str = "output",
+    use_revin: bool = True,
+) -> PatchMixerConfig:
     return PatchMixerConfig(
         device="cpu",
         lookback=8,
@@ -74,10 +86,11 @@ def _future_only_config(*, distribution: bool = False) -> PatchMixerConfig:
         head_dropout=0.0,
         f_out=8,
         head_hidden=8,
-        use_revin=True,
+        use_revin=use_revin,
         final_nonneg=False,
         past_exo_mode="none",
         future_exo_dim=2,
+        future_exo_shift_space=future_exo_shift_space,
         patch_cfgs=((4, 2, 3),),
         per_branch_dim=4,
         fused_dim=8,
@@ -86,6 +99,20 @@ def _future_only_config(*, distribution: bool = False) -> PatchMixerConfig:
         out_mul=2 if distribution else 1,
         param_names=["loc", "scale"] if distribution else None,
     )
+
+
+def _future_distribution_config(
+    *,
+    future_exo_shift_space: str,
+    param_names: tuple[str, ...],
+) -> PatchMixerConfig:
+    config = _future_only_config(
+        distribution=True,
+        future_exo_shift_space=future_exo_shift_space,
+    )
+    config.out_mul = len(param_names)
+    config.param_names = list(param_names)
+    return config
 
 
 def _inputs(*, requires_grad: bool = False):
@@ -367,6 +394,227 @@ def test_patchmixer_future_shift_is_in_raw_output_space(
 
 
 @pytest.mark.parametrize(
+    ("param_names", "loc_idx"),
+    (
+        (("-loc", "-scale"), 0),
+        (("-df", "-loc", "-scale"), 1),
+    ),
+)
+def test_patchmixer_distribution_output_shift_changes_only_loc(
+    param_names: tuple[str, ...],
+    loc_idx: int,
+) -> None:
+    torch.manual_seed(20260810)
+    model = PatchMixerExogenousModel(
+        _future_distribution_config(
+            future_exo_shift_space="output",
+            param_names=param_names,
+        )
+    ).eval()
+    x = torch.linspace(-1.0, 1.0, steps=16).reshape(2, 8, 1)
+    future = torch.linspace(-0.25, 0.5, steps=8).reshape(2, 2, 2)
+    zero_future = torch.zeros_like(future)
+
+    with torch.no_grad():
+        expected_loc_effect = (
+            model.exo_head(future).squeeze(-1)
+            - model.exo_head(zero_future).squeeze(-1)
+        )
+        actual_effect = model(x, future_exo=future) - model(
+            x,
+            future_exo=zero_future,
+        )
+
+    assert model.loc_idx == loc_idx
+    torch.testing.assert_close(
+        actual_effect[..., loc_idx],
+        expected_loc_effect,
+        rtol=1e-5,
+        atol=1e-5,
+    )
+    for parameter_idx in set(range(len(param_names))) - {loc_idx}:
+        torch.testing.assert_close(
+            actual_effect[..., parameter_idx],
+            torch.zeros_like(actual_effect[..., parameter_idx]),
+            rtol=0.0,
+            atol=0.0,
+        )
+
+
+@pytest.mark.parametrize(
+    ("param_names", "loc_idx"),
+    (
+        (("-loc", "-scale"), 0),
+        (("-df", "-loc", "-scale"), 1),
+    ),
+)
+def test_patchmixer_distribution_normalized_shift_changes_only_loc(
+    param_names: tuple[str, ...],
+    loc_idx: int,
+) -> None:
+    torch.manual_seed(20260811)
+    model = PatchMixerExogenousModel(
+        _future_distribution_config(
+            future_exo_shift_space="normalized",
+            param_names=param_names,
+        )
+    ).eval()
+    pattern = torch.linspace(-1.0, 1.0, steps=8)
+    x = torch.stack((pattern, 1000.0 + 250.0 * pattern)).unsqueeze(-1)
+    future = torch.linspace(-0.25, 0.5, steps=8).reshape(2, 2, 2)
+    zero_future = torch.zeros_like(future)
+
+    with torch.no_grad():
+        normalized_residual = (
+            model.exo_head(future).squeeze(-1)
+            - model.exo_head(zero_future).squeeze(-1)
+        )
+        actual_effect = model(x, future_exo=future) - model(
+            x,
+            future_exo=zero_future,
+        )
+
+    target_std = torch.sqrt(
+        x.var(dim=1, unbiased=False) + model.revin_layer.eps
+    )
+    expected_loc_effect = normalized_residual * target_std
+    assert model.loc_idx == loc_idx
+    torch.testing.assert_close(
+        actual_effect[..., loc_idx],
+        expected_loc_effect,
+        rtol=1e-4,
+        atol=1e-4,
+    )
+    for parameter_idx in set(range(len(param_names))) - {loc_idx}:
+        torch.testing.assert_close(
+            actual_effect[..., parameter_idx],
+            torch.zeros_like(actual_effect[..., parameter_idx]),
+            rtol=0.0,
+            atol=0.0,
+        )
+
+
+def test_patchmixer_normalized_shift_coordinate_maps_through_target_revin_scale() -> None:
+    model = PatchMixerExogenousModel(_future_only_config()).eval()
+    revin = model.revin_layer
+
+    assert revin.affine is False
+    assert revin.subtract_last is True
+    assert revin.use_std is True
+
+    x = torch.tensor(
+        [
+            [[1.0], [2.0], [3.0], [4.0], [5.0], [6.0], [7.0], [8.0]],
+            [[100.0], [150.0], [200.0], [250.0], [300.0], [350.0], [400.0], [450.0]],
+        ]
+    )
+    normalized_forecast = torch.tensor(
+        [[[0.2], [-0.4]], [[0.2], [-0.4]]]
+    )
+    normalized_shift = torch.tensor(
+        [[[0.5], [-0.25]], [[0.5], [-0.25]]]
+    )
+
+    revin(x, "norm")
+    raw_forecast = revin(normalized_forecast, "denorm")
+    raw_shifted = revin(normalized_forecast + normalized_shift, "denorm")
+    expected_effect = normalized_shift * revin.std
+    scale_only_effect = revin.denorm_scale(normalized_shift)
+
+    torch.testing.assert_close(
+        raw_shifted - raw_forecast,
+        expected_effect,
+        rtol=1e-5,
+        atol=1e-5,
+    )
+    torch.testing.assert_close(
+        scale_only_effect,
+        expected_effect,
+        rtol=0.0,
+        atol=0.0,
+    )
+    assert not torch.allclose(
+        raw_shifted[1] - raw_forecast[1],
+        normalized_shift[1],
+    )
+
+
+@pytest.mark.parametrize(
+    "model_cls",
+    (PatchMixerExogenousModel, PatchMixerQuantileExogenousModel),
+)
+def test_patchmixer_normalized_future_shift_scales_with_target_history_std(
+    model_cls,
+) -> None:
+    torch.manual_seed(20260808)
+    model = model_cls(
+        _future_only_config(future_exo_shift_space="normalized")
+    ).eval()
+    assert model.future_exo_shift_space == "normalized"
+
+    pattern = torch.linspace(-1.0, 1.0, steps=8)
+    x = torch.stack((pattern, 1000.0 + 250.0 * pattern)).unsqueeze(-1)
+    future = torch.linspace(-0.25, 0.5, steps=8).reshape(2, 2, 2)
+    zero_future = torch.zeros_like(future)
+
+    def output_tensor(exogenous: torch.Tensor) -> torch.Tensor:
+        output = model(x, future_exo=exogenous)
+        return output["q"] if isinstance(output, dict) else output
+
+    with torch.no_grad():
+        normalized_residual = model.exo_scale * (
+            model.exo_head(future).squeeze(-1)
+            - model.exo_head(zero_future).squeeze(-1)
+        )
+        actual_effect = output_tensor(future) - output_tensor(zero_future)
+
+    target_std = torch.sqrt(
+        x.var(dim=1, unbiased=False) + model.revin_layer.eps
+    )
+    expected_effect = normalized_residual * target_std
+    if model_cls is PatchMixerQuantileExogenousModel:
+        expected_effect = expected_effect.unsqueeze(1).expand_as(actual_effect)
+
+    torch.testing.assert_close(
+        actual_effect,
+        expected_effect,
+        rtol=1e-4,
+        atol=1e-4,
+    )
+
+
+def test_patchmixer_quantile_normalized_shift_is_applied_before_eval_clip() -> None:
+    model = PatchMixerQuantileExogenousModel(
+        _future_only_config(future_exo_shift_space="normalized")
+    ).eval()
+    model.q_clip_eval = 0.05
+    selector = torch.nn.Linear(2, 1, bias=False)
+    with torch.no_grad():
+        selector.weight.zero_()
+        selector.weight[0, 0] = 1.0
+    model.exo_head = selector
+
+    pattern = torch.linspace(-1.0, 1.0, steps=8)
+    x = torch.stack((pattern, 1000.0 + 250.0 * pattern)).unsqueeze(-1)
+    zero_future = torch.zeros((2, 2, 2))
+    shifted_future = zero_future.clone()
+    shifted_future[..., 0] = 100.0
+
+    with torch.no_grad():
+        baseline = model(x, future_exo=zero_future)["q"]
+        shifted = model(x, future_exo=shifted_future)["q"]
+
+    target_std = torch.sqrt(
+        x.var(dim=1, unbiased=False) + model.revin_layer.eps
+    )
+    max_clipped_effect = (2.0 * model.q_clip_eval * target_std).unsqueeze(1)
+    actual_effect = (shifted - baseline).abs()
+
+    assert torch.count_nonzero(actual_effect) > 0
+    assert torch.all(actual_effect <= max_clipped_effect + 2e-4)
+
+
+@pytest.mark.parametrize(
     ("model_cls", "distribution"),
     (
         (PatchMixerExogenousModel, False),
@@ -374,13 +622,67 @@ def test_patchmixer_future_shift_is_in_raw_output_space(
         (PatchMixerExogenousModel, True),
     ),
 )
+def test_patchmixer_shift_spaces_are_exactly_equal_without_revin(
+    model_cls,
+    distribution: bool,
+) -> None:
+    torch.manual_seed(20260809)
+    output_model = model_cls(
+        _future_only_config(
+            distribution=distribution,
+            future_exo_shift_space="output",
+            use_revin=False,
+        )
+    ).eval()
+    normalized_model = model_cls(
+        _future_only_config(
+            distribution=distribution,
+            future_exo_shift_space="normalized",
+            use_revin=False,
+        )
+    ).eval()
+    normalized_model.load_state_dict(output_model.state_dict(), strict=True)
+    x, _, _, future = _inputs()
+
+    with torch.no_grad():
+        output = output_model(x, future_exo=future)
+        normalized = normalized_model(x, future_exo=future)
+
+    output_tensor = output["q"] if isinstance(output, dict) else output
+    normalized_tensor = normalized["q"] if isinstance(normalized, dict) else normalized
+    torch.testing.assert_close(
+        normalized_tensor,
+        output_tensor,
+        rtol=0.0,
+        atol=0.0,
+    )
+
+
+@pytest.mark.parametrize(
+    ("model_cls", "distribution", "future_exo_shift_space", "use_revin"),
+    (
+        (PatchMixerExogenousModel, False, "output", False),
+        (PatchMixerQuantileExogenousModel, False, "output", False),
+        (PatchMixerExogenousModel, True, "output", False),
+        (PatchMixerExogenousModel, False, "normalized", True),
+        (PatchMixerQuantileExogenousModel, False, "normalized", True),
+        (PatchMixerExogenousModel, True, "normalized", True),
+    ),
+)
 def test_patchmixer_exogenous_parameters_and_inputs_receive_gradients(
     model_cls,
     distribution,
+    future_exo_shift_space,
+    use_revin,
 ) -> None:
     torch.manual_seed(20260729)
     model = model_cls(
-        _config(exogenous=True, distribution=distribution)
+        _config(
+            exogenous=True,
+            distribution=distribution,
+            future_exo_shift_space=future_exo_shift_space,
+            use_revin=use_revin,
+        )
     ).train()
     x, past_cont, past_cat, future = _inputs(requires_grad=True)
 

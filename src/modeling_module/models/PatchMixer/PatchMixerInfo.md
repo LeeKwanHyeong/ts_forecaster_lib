@@ -33,7 +33,9 @@ accuracy promotion 상태가 아닙니다. 상세 수치와 제약은
 
 - target input: `(B, lookback, 1)`
 - past continuous exogenous: 선택 사항; latent gate 경로로 주입
-- future continuous exogenous: 선택 사항; horizon별 output shift로 주입
+- future continuous exogenous: 선택 사항; horizon별 target-space shift로 주입
+  - Point/Quantile: `output` 또는 target RevIN-space `normalized`
+  - Distribution: `loc`에 한해 `output` 또는 `normalized`
 - categorical exogenous: public training과 prediction API에서 fail-fast
 
 Future width가 설정된 checkpoint는 public prediction 시 batch 공용 `(horizon, future_exo_dim)`
@@ -46,10 +48,11 @@ width가 0인 모델은 non-empty future input을 거부합니다.
 2. `PatchMixerBackbone`이 patch 기반 latent vector를 만듭니다.
 3. 구성된 past continuous feature와 optional part embedding을 latent에 결합합니다.
 4. `TemporalExpander`와 MLP head가 horizon별 output을 만듭니다.
-5. point branch는 마지막 관측값을 level anchor로 더하고, target scale 복원 후 optional future
-   shift와 nonnegative transform을 적용합니다.
-6. distribution branch는 location에 level anchor와 depthwise refinement를 적용하고 location/scale을
-   target scale에 맞춘 뒤 parameter tensor를 다시 조립합니다.
+5. point branch는 마지막 관측값을 level anchor로 더하고, `normalized` shift는 target scale 복원
+   전에, `output` shift는 복원 후에 적용한 다음 nonnegative transform을 적용합니다.
+6. distribution branch는 location에 level anchor와 depthwise refinement를 적용합니다. `normalized`
+   shift는 target denormalization 전에, `output` shift는 그 후에 `loc`에만 적용하고 나머지
+   distribution parameter를 그대로 유지한 채 tensor를 다시 조립합니다.
 
 과거 문서의 point dual-head와 point depthwise-refinement 설명은 현재 구현과 다르므로 더 이상
 계약으로 사용하지 않습니다.
@@ -58,6 +61,8 @@ width가 0인 모델은 non-empty future input을 거부합니다.
 
 `PatchMixerQuantileModel`은 q10/q50/q90을 출력하는 별도 artifact입니다. Base distribution mode와
 혼용하지 않으며 public family `patchmixer` 요청은 base 다음 quantile 순서로 확장됩니다.
+Future shift는 모든 quantile에 동일하게 broadcast되며, `normalized`는 eval clip과 per-quantile
+denormalization 전에 적용됩니다.
 
 ## Code map
 

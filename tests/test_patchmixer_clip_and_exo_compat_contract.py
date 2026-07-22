@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, fields
 from pathlib import Path
+from typing import get_args, get_type_hints
 
 import pytest
 import torch
@@ -27,6 +28,7 @@ def _config(
     q_clip_norm: float | None = 10.0,
     exo_is_normalized_default: bool = True,
     exo_is_normalized: bool = True,
+    future_exo_shift_space: str = "output",
     config_cls: type[PatchMixerConfig] = PatchMixerConfig,
 ) -> PatchMixerConfig:
     return config_cls(
@@ -47,6 +49,7 @@ def _config(
         final_nonneg=False,
         past_exo_mode="none",
         future_exo_dim=1 if exogenous else 0,
+        future_exo_shift_space=future_exo_shift_space,
         patch_cfgs=((4, 2, 3),),
         per_branch_dim=4,
         fused_dim=8,
@@ -199,6 +202,22 @@ def test_patchmixer_quantile_clip_config_and_checkpoint_contract() -> None:
     assert disabled.q_clip_eval is None
 
 
+def test_patchmixer_future_shift_space_config_roundtrips_normalized() -> None:
+    shift_space_type = get_type_hints(PatchMixerConfig)["future_exo_shift_space"]
+    assert get_args(shift_space_type) == ("output", "normalized")
+
+    config = _config(
+        use_revin=True,
+        exogenous=True,
+        future_exo_shift_space="normalized",
+    )
+    serialized = asdict(config)
+    restored = PatchMixerConfig(**serialized)
+
+    assert serialized["future_exo_shift_space"] == "normalized"
+    assert restored.future_exo_shift_space == "normalized"
+
+
 @pytest.mark.parametrize(
     "config_cls",
     (PatchMixerConfig, PatchMixerConfigMonthly),
@@ -245,12 +264,24 @@ def test_legacy_checkpoint_without_q_clip_norm_strict_loads(
     torch.testing.assert_close(actual, expected, rtol=0.0, atol=0.0)
 
 
-@pytest.mark.parametrize("shift_space", ("normalized", "invalid"))
-def test_patchmixer_rejects_unimplemented_future_shift_spaces(
-    shift_space: str,
+@pytest.mark.parametrize(
+    ("model_cls", "distribution"),
+    (
+        (PatchMixerExogenousModel, False),
+        (PatchMixerQuantileExogenousModel, False),
+        (PatchMixerExogenousModel, True),
+    ),
+)
+def test_patchmixer_rejects_unknown_future_shift_space(
+    model_cls,
+    distribution: bool,
 ) -> None:
-    config = _config(use_revin=True, exogenous=True)
-    config.future_exo_shift_space = shift_space  # type: ignore[assignment]
+    config = _config(
+        use_revin=True,
+        exogenous=True,
+        distribution=distribution,
+        future_exo_shift_space="invalid",
+    )
 
-    with pytest.raises(ValueError, match="currently supports only 'output'"):
-        PatchMixerExogenousModel(config)
+    with pytest.raises(ValueError, match="must be one of.*normalized.*output"):
+        model_cls(config)
