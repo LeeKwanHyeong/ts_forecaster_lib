@@ -88,15 +88,55 @@ FUTURE_EXOGENOUS_COLUMNS = (
 class ModelCase:
     key: str
     family: str
-    exogenous: bool
+    past_exogenous: bool = False
+    future_exogenous: bool = False
+
+    @property
+    def exogenous(self) -> bool:
+        return self.past_exogenous or self.future_exogenous
 
 
 MODEL_CASES = (
-    ModelCase("patchtst_endogenous", "patchtst", False),
-    ModelCase("patchtst_exogenous", "patchtst", True),
-    ModelCase("patchmixer_endogenous", "patchmixer", False),
-    ModelCase("patchmixer_exogenous", "patchmixer", True),
+    ModelCase("patchtst_endogenous", "patchtst"),
+    ModelCase(
+        "patchtst_exogenous",
+        "patchtst",
+        past_exogenous=True,
+        future_exogenous=True,
+    ),
+    ModelCase("patchmixer_endogenous", "patchmixer"),
+    ModelCase("patchmixer_past_gate", "patchmixer", past_exogenous=True),
+    ModelCase("patchmixer_future_shift", "patchmixer", future_exogenous=True),
+    ModelCase(
+        "patchmixer_exogenous",
+        "patchmixer",
+        past_exogenous=True,
+        future_exogenous=True,
+    ),
 )
+
+PATCHMIXER_ABLATION_PAIRS = {
+    "past_gate_vs_endogenous": (
+        "patchmixer_endogenous",
+        "patchmixer_past_gate",
+    ),
+    "future_shift_vs_endogenous": (
+        "patchmixer_endogenous",
+        "patchmixer_future_shift",
+    ),
+    "full_vs_endogenous": (
+        "patchmixer_endogenous",
+        "patchmixer_exogenous",
+    ),
+    "full_vs_future_shift": (
+        "patchmixer_future_shift",
+        "patchmixer_exogenous",
+    ),
+    "full_vs_past_gate": (
+        "patchmixer_past_gate",
+        "patchmixer_exogenous",
+    ),
+}
 
 
 def _positive_int(value: str) -> int:
@@ -343,7 +383,7 @@ def _make_loader(
     )
 
 
-def _patchtst_config(*, exogenous: bool) -> PatchTSTConfig:
+def _patchtst_config(case: ModelCase) -> PatchTSTConfig:
     return PatchTSTConfig(
         lookback=LOOKBACK,
         horizon=HORIZON,
@@ -351,8 +391,12 @@ def _patchtst_config(*, exogenous: bool) -> PatchTSTConfig:
         patch_len=12,
         stride=8,
         padding_patch="end",
-        past_exo_cont_dim=(len(PAST_EXOGENOUS_COLUMNS) if exogenous else 0),
-        future_exo_dim=(len(FUTURE_EXOGENOUS_COLUMNS) if exogenous else 0),
+        past_exo_cont_dim=(
+            len(PAST_EXOGENOUS_COLUMNS) if case.past_exogenous else 0
+        ),
+        future_exo_dim=(
+            len(FUTURE_EXOGENOUS_COLUMNS) if case.future_exogenous else 0
+        ),
         d_model=128,
         n_layers=3,
         d_ff=256,
@@ -370,7 +414,7 @@ def _patchtst_config(*, exogenous: bool) -> PatchTSTConfig:
     )
 
 
-def _patchmixer_config(*, exogenous: bool) -> PatchMixerConfig:
+def _patchmixer_config(case: ModelCase) -> PatchMixerConfig:
     return PatchMixerConfig(
         lookback=LOOKBACK,
         horizon=HORIZON,
@@ -385,8 +429,12 @@ def _patchmixer_config(*, exogenous: bool) -> PatchMixerConfig:
         f_out=256,
         head_hidden=256,
         past_exo_mode="z_gate",
-        past_exo_cont_dim=(len(PAST_EXOGENOUS_COLUMNS) if exogenous else 0),
-        future_exo_dim=(len(FUTURE_EXOGENOUS_COLUMNS) if exogenous else 0),
+        past_exo_cont_dim=(
+            len(PAST_EXOGENOUS_COLUMNS) if case.past_exogenous else 0
+        ),
+        future_exo_dim=(
+            len(FUTURE_EXOGENOUS_COLUMNS) if case.future_exogenous else 0
+        ),
         use_revin=True,
     )
 
@@ -394,10 +442,10 @@ def _patchmixer_config(*, exogenous: bool) -> PatchMixerConfig:
 def _build_model(case: ModelCase) -> torch.nn.Module:
     with redirect_stdout(StringIO()):
         if case.family == "patchtst":
-            config = _patchtst_config(exogenous=case.exogenous)
+            config = _patchtst_config(case)
             return build_patchTST_exogenous(config) if case.exogenous else build_patchTST(config)
         if case.family == "patchmixer":
-            config = _patchmixer_config(exogenous=case.exogenous)
+            config = _patchmixer_config(case)
             return (
                 build_patch_mixer_exogenous(config)
                 if case.exogenous
@@ -430,6 +478,9 @@ def _forward_batch(
     model: torch.nn.Module,
     case: ModelCase,
     batch: Any,
+    *,
+    zero_past: bool = False,
+    zero_future: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, list[str]]:
     inputs = batch[0].cuda(non_blocking=True)
     targets = batch[1].cuda(non_blocking=True)
@@ -437,13 +488,18 @@ def _forward_batch(
     if not case.exogenous:
         return _point_prediction(model(inputs)), targets, uids
 
-    future_exo = batch[3].cuda(non_blocking=True)
-    past_exo_cont = batch[4].cuda(non_blocking=True)
-    output = model(
-        inputs,
-        future_exo=future_exo,
-        past_exo_cont=past_exo_cont,
-    )
+    kwargs: dict[str, torch.Tensor] = {}
+    if case.future_exogenous:
+        future_exo = batch[3].cuda(non_blocking=True)
+        kwargs["future_exo"] = (
+            torch.zeros_like(future_exo) if zero_future else future_exo
+        )
+    if case.past_exogenous:
+        past_exo_cont = batch[4].cuda(non_blocking=True)
+        kwargs["past_exo_cont"] = (
+            torch.zeros_like(past_exo_cont) if zero_past else past_exo_cont
+        )
+    output = model(inputs, **kwargs)
     return _point_prediction(output), targets, uids
 
 
@@ -622,6 +678,8 @@ def _predict_loader(
     loader: DataLoader,
     *,
     autocast_context: Callable[[], Any],
+    zero_past: bool = False,
+    zero_future: bool = False,
 ) -> dict[str, Any]:
     model.eval()
     targets: list[np.ndarray] = []
@@ -637,6 +695,8 @@ def _predict_loader(
                 model,
                 case,
                 batch,
+                zero_past=zero_past,
+                zero_future=zero_future,
             )
         targets.append(batch_targets.float().cpu().numpy())
         predictions.append(batch_predictions.float().cpu().numpy())
@@ -755,6 +815,149 @@ def _paired_summary(
     }
 
 
+def _candidate_summary(
+    baseline: dict[str, Any],
+    candidate: dict[str, Any],
+    *,
+    baseline_name: str,
+    candidate_name: str,
+) -> dict[str, Any]:
+    if not np.array_equal(baseline["targets"], candidate["targets"]):
+        raise RuntimeError("Ablation evaluations do not share identical targets.")
+    if not np.array_equal(baseline["uids"], candidate["uids"]):
+        raise RuntimeError("Ablation evaluations do not share identical series ordering.")
+
+    targets = baseline["targets"]
+    baseline_predictions = baseline["predictions"]
+    candidate_predictions = candidate["predictions"]
+    baseline_absolute_error = np.abs(baseline_predictions - targets)
+    candidate_absolute_error = np.abs(candidate_predictions - targets)
+    baseline_metrics = _metrics(targets, baseline_predictions)
+    candidate_metrics = _metrics(targets, candidate_predictions)
+    lower_is_better = ("mae", "mse", "rmse", "smape", "wape")
+    return {
+        "baseline": baseline_name,
+        "candidate": candidate_name,
+        "candidate_relative_improvement_pct": {
+            name: float(
+                100.0
+                * (baseline_metrics[name] - candidate_metrics[name])
+                / max(abs(baseline_metrics[name]), 1e-12)
+            )
+            for name in lower_is_better
+        },
+        "pointwise_absolute_error_win_rate": {
+            baseline_name: float(
+                np.mean(baseline_absolute_error < candidate_absolute_error)
+            ),
+            candidate_name: float(
+                np.mean(candidate_absolute_error < baseline_absolute_error)
+            ),
+            "tie": float(
+                np.mean(candidate_absolute_error == baseline_absolute_error)
+            ),
+        },
+        "overall_mae_winner": (
+            candidate_name
+            if candidate_metrics["mae"] < baseline_metrics["mae"]
+            else baseline_name
+            if baseline_metrics["mae"] < candidate_metrics["mae"]
+            else "tie"
+        ),
+    }
+
+
+def _input_ablation_summary(
+    full: dict[str, Any],
+    ablated: dict[str, Any],
+) -> dict[str, Any]:
+    if not np.array_equal(full["targets"], ablated["targets"]):
+        raise RuntimeError("Input ablation does not share identical targets.")
+    if not np.array_equal(full["uids"], ablated["uids"]):
+        raise RuntimeError("Input ablation does not share identical series ordering.")
+
+    targets = full["targets"]
+    full_predictions = full["predictions"]
+    ablated_predictions = ablated["predictions"]
+    full_metrics = _metrics(targets, full_predictions)
+    ablated_metrics = _metrics(targets, ablated_predictions)
+    lower_is_better = ("mae", "mse", "rmse", "smape", "wape")
+    return {
+        "ablated_metrics": ablated_metrics,
+        "relative_error_degradation_pct": {
+            name: float(
+                100.0
+                * (ablated_metrics[name] - full_metrics[name])
+                / max(abs(full_metrics[name]), 1e-12)
+            )
+            for name in lower_is_better
+        },
+        "prediction_mean_absolute_delta": float(
+            np.mean(np.abs(full_predictions - ablated_predictions))
+        ),
+    }
+
+
+@torch.no_grad()
+def _gate_statistics(
+    model: torch.nn.Module,
+    case: ModelCase,
+    loader: DataLoader,
+    *,
+    autocast_context: Callable[[], Any],
+) -> dict[str, float | int]:
+    gate_module = getattr(model, "_z_gate", None)
+    if not isinstance(gate_module, torch.nn.Module):
+        raise RuntimeError(f"{case.key} does not expose a trainable _z_gate module.")
+
+    count = 0
+    value_sum = 0.0
+    square_sum = 0.0
+    minimum = float("inf")
+    maximum = float("-inf")
+    below_005 = 0
+    above_095 = 0
+
+    def collect_gate(
+        _module: torch.nn.Module,
+        _inputs: tuple[torch.Tensor, ...],
+        output: torch.Tensor,
+    ) -> None:
+        nonlocal count, value_sum, square_sum, minimum, maximum
+        nonlocal below_005, above_095
+        values = torch.sigmoid(output.detach().float())
+        count += values.numel()
+        value_sum += float(values.sum())
+        square_sum += float(values.square().sum())
+        minimum = min(minimum, float(values.min()))
+        maximum = max(maximum, float(values.max()))
+        below_005 += int(torch.count_nonzero(values < 0.05))
+        above_095 += int(torch.count_nonzero(values > 0.95))
+
+    handle = gate_module.register_forward_hook(collect_gate)
+    try:
+        model.eval()
+        for batch in loader:
+            with autocast_context():
+                _forward_batch(model, case, batch)
+    finally:
+        handle.remove()
+
+    if count == 0:
+        raise RuntimeError(f"{case.key} gate statistics collected no activations.")
+    mean = value_sum / count
+    variance = max(0.0, square_sum / count - mean * mean)
+    return {
+        "count": count,
+        "mean": mean,
+        "population_stddev": math.sqrt(variance),
+        "min": minimum,
+        "max": maximum,
+        "fraction_below_0_05": below_005 / count,
+        "fraction_above_0_95": above_095 / count,
+    }
+
+
 def _run_accuracy_seed(
     frame: pl.DataFrame,
     *,
@@ -845,6 +1048,54 @@ def _run_accuracy_seed(
             "test_all_rolling_windows": _prediction_summary(all_payload),
             "test_last_origin_per_series": _prediction_summary(last_payload),
         }
+        if case.key == "patchmixer_exogenous":
+            input_ablations: dict[str, Any] = {}
+            for ablation_name, zero_past, zero_future in (
+                ("zero_past", True, False),
+                ("zero_future", False, True),
+                ("zero_all", True, True),
+            ):
+                ablated_all = _predict_loader(
+                    model,
+                    case,
+                    all_loader,
+                    autocast_context=autocast_context,
+                    zero_past=zero_past,
+                    zero_future=zero_future,
+                )
+                ablated_last = _predict_loader(
+                    model,
+                    case,
+                    last_loader,
+                    autocast_context=autocast_context,
+                    zero_past=zero_past,
+                    zero_future=zero_future,
+                )
+                input_ablations[ablation_name] = {
+                    "test_all_rolling_windows": {
+                        "prediction": _prediction_summary(ablated_all),
+                        "comparison_to_full": _input_ablation_summary(
+                            all_payload,
+                            ablated_all,
+                        ),
+                    },
+                    "test_last_origin_per_series": {
+                        "prediction": _prediction_summary(ablated_last),
+                        "comparison_to_full": _input_ablation_summary(
+                            last_payload,
+                            ablated_last,
+                        ),
+                    },
+                }
+            model_results[case.key]["input_ablations"] = input_ablations
+            model_results[case.key]["gate_statistics"] = {
+                "test_all_rolling_windows": _gate_statistics(
+                    model,
+                    case,
+                    all_loader,
+                    autocast_context=autocast_context,
+                )
+            }
         predictions[case.key] = {"all": all_payload, "last": last_payload}
         del model, all_loader, last_loader
         gc.collect()
@@ -862,6 +1113,26 @@ def _run_accuracy_seed(
             "test_last_origin_per_series": _paired_summary(
                 predictions[endogenous_key]["last"],
                 predictions[exogenous_key]["last"],
+            ),
+        }
+    paired["patchmixer_ablation"] = {}
+    for comparison_name, (baseline_key, candidate_key) in (
+        PATCHMIXER_ABLATION_PAIRS.items()
+    ):
+        baseline_name = baseline_key.removeprefix("patchmixer_")
+        candidate_name = candidate_key.removeprefix("patchmixer_")
+        paired["patchmixer_ablation"][comparison_name] = {
+            "test_all_rolling_windows": _candidate_summary(
+                predictions[baseline_key]["all"],
+                predictions[candidate_key]["all"],
+                baseline_name=baseline_name,
+                candidate_name=candidate_name,
+            ),
+            "test_last_origin_per_series": _candidate_summary(
+                predictions[baseline_key]["last"],
+                predictions[candidate_key]["last"],
+                baseline_name=baseline_name,
+                candidate_name=candidate_name,
             ),
         }
 
@@ -925,6 +1196,105 @@ def _aggregate_accuracy(seed_results: list[dict[str, Any]]) -> dict[str, Any]:
                     "max": max(improvements),
                 },
             }
+
+    output["patchmixer_ablation"] = {}
+    for comparison_name in PATCHMIXER_ABLATION_PAIRS:
+        output["patchmixer_ablation"][comparison_name] = {}
+        for evaluation in (
+            "test_all_rolling_windows",
+            "test_last_origin_per_series",
+        ):
+            records = []
+            for result in seed_results:
+                comparison = result["paired_comparison"]["patchmixer_ablation"][
+                    comparison_name
+                ][evaluation]
+                records.append(
+                    {
+                        "seed": result["seed"],
+                        "baseline": comparison["baseline"],
+                        "candidate": comparison["candidate"],
+                        "winner": comparison["overall_mae_winner"],
+                        "mae_improvement_pct": comparison[
+                            "candidate_relative_improvement_pct"
+                        ]["mae"],
+                    }
+                )
+            improvements = [record["mae_improvement_pct"] for record in records]
+            winner_names = {
+                records[0]["baseline"],
+                records[0]["candidate"],
+                "tie",
+            }
+            output["patchmixer_ablation"][comparison_name][evaluation] = {
+                "records": records,
+                "seed_wins": {
+                    name: sum(record["winner"] == name for record in records)
+                    for name in sorted(winner_names)
+                },
+                "mae_improvement_pct": {
+                    "mean": statistics.fmean(improvements),
+                    "population_stddev": statistics.pstdev(improvements),
+                    "min": min(improvements),
+                    "max": max(improvements),
+                },
+            }
+
+    output["patchmixer_input_ablation"] = {}
+    for ablation_name in ("zero_past", "zero_future", "zero_all"):
+        output["patchmixer_input_ablation"][ablation_name] = {}
+        for evaluation in (
+            "test_all_rolling_windows",
+            "test_last_origin_per_series",
+        ):
+            records = [
+                {
+                    "seed": result["seed"],
+                    "mae_degradation_pct": result["models"][
+                        "patchmixer_exogenous"
+                    ]["input_ablations"][ablation_name][evaluation][
+                        "comparison_to_full"
+                    ]["relative_error_degradation_pct"]["mae"],
+                    "prediction_mean_absolute_delta": result["models"][
+                        "patchmixer_exogenous"
+                    ]["input_ablations"][ablation_name][evaluation][
+                        "comparison_to_full"
+                    ]["prediction_mean_absolute_delta"],
+                }
+                for result in seed_results
+            ]
+            degradations = [record["mae_degradation_pct"] for record in records]
+            output["patchmixer_input_ablation"][ablation_name][evaluation] = {
+                "records": records,
+                "mae_degradation_pct": {
+                    "mean": statistics.fmean(degradations),
+                    "population_stddev": statistics.pstdev(degradations),
+                    "min": min(degradations),
+                    "max": max(degradations),
+                },
+            }
+
+    gate_records = [
+        {
+            "seed": result["seed"],
+            **result["models"]["patchmixer_exogenous"]["gate_statistics"][
+                "test_all_rolling_windows"
+            ],
+        }
+        for result in seed_results
+    ]
+    output["patchmixer_gate_statistics"] = {
+        "records": gate_records,
+        "mean_activation": statistics.fmean(
+            float(record["mean"]) for record in gate_records
+        ),
+        "mean_fraction_below_0_05": statistics.fmean(
+            float(record["fraction_below_0_05"]) for record in gate_records
+        ),
+        "mean_fraction_above_0_95": statistics.fmean(
+            float(record["fraction_above_0_95"]) for record in gate_records
+        ),
+    }
     return output
 
 
@@ -935,29 +1305,21 @@ def _percentile(values: list[float], percentile: float) -> float:
 
 
 def _make_cuda_batch(
+    case: ModelCase,
     *,
     batch_size: int,
     seed: int,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor | None,
+    torch.Tensor | None,
+]:
     generator = torch.Generator(device="cuda").manual_seed(seed)
     inputs = torch.randn(
         batch_size,
         LOOKBACK,
         1,
-        device="cuda",
-        generator=generator,
-    )
-    past = torch.randn(
-        batch_size,
-        LOOKBACK,
-        len(PAST_EXOGENOUS_COLUMNS),
-        device="cuda",
-        generator=generator,
-    )
-    future = torch.randn(
-        batch_size,
-        HORIZON,
-        len(FUTURE_EXOGENOUS_COLUMNS),
         device="cuda",
         generator=generator,
     )
@@ -967,8 +1329,73 @@ def _make_cuda_batch(
         device="cuda",
         generator=generator,
     )
-    targets = inputs[:, -1, 0].unsqueeze(1) + 0.2 * future[..., 0] + noise
+    targets = inputs[:, -1, 0].unsqueeze(1) + noise
+    past = (
+        torch.randn(
+            batch_size,
+            LOOKBACK,
+            len(PAST_EXOGENOUS_COLUMNS),
+            device="cuda",
+            generator=generator,
+        )
+        if case.past_exogenous
+        else None
+    )
+    future = (
+        torch.randn(
+            batch_size,
+            HORIZON,
+            len(FUTURE_EXOGENOUS_COLUMNS),
+            device="cuda",
+            generator=generator,
+        )
+        if case.future_exogenous
+        else None
+    )
     return inputs, targets, past, future
+
+
+def _forward_cuda_batch(
+    model: torch.nn.Module,
+    case: ModelCase,
+    inputs: torch.Tensor,
+    past: torch.Tensor | None,
+    future: torch.Tensor | None,
+) -> torch.Tensor:
+    kwargs: dict[str, torch.Tensor] = {}
+    if case.past_exogenous:
+        assert past is not None
+        kwargs["past_exo_cont"] = past
+    if case.future_exogenous:
+        assert future is not None
+        kwargs["future_exo"] = future
+    return _point_prediction(model(inputs, **kwargs))
+
+
+def _timing_payload(
+    starts: list[torch.cuda.Event],
+    ends: list[torch.cuda.Event],
+    *,
+    batch_size: int,
+) -> tuple[dict[str, float], dict[str, float]]:
+    times = [start.elapsed_time(end) for start, end in zip(starts, ends)]
+    total = sum(times)
+    mean = statistics.fmean(times)
+    return (
+        {
+            "total": total,
+            "mean": mean,
+            "median": statistics.median(times),
+            "p95": _percentile(times, 0.95),
+            "min": min(times),
+            "max": max(times),
+            "population_stddev": statistics.pstdev(times),
+        },
+        {
+            "steps_per_second": 1000.0 / mean,
+            "samples_per_second": batch_size * len(times) * 1000.0 / total,
+        },
+    )
 
 
 def _benchmark_case(
@@ -989,6 +1416,7 @@ def _benchmark_case(
     model = _build_model(case).cuda().train()
     parameter_count = sum(parameter.numel() for parameter in model.parameters())
     inputs, targets, past, future = _make_cuda_batch(
+        case,
         batch_size=batch_size,
         seed=seed + 1,
     )
@@ -1002,16 +1430,13 @@ def _benchmark_case(
     def training_step() -> torch.Tensor:
         optimizer.zero_grad(set_to_none=True)
         with autocast_context():
-            if case.exogenous:
-                prediction = _point_prediction(
-                    model(
-                        inputs,
-                        future_exo=future,
-                        past_exo_cont=past,
-                    )
-                )
-            else:
-                prediction = _point_prediction(model(inputs))
+            prediction = _forward_cuda_batch(
+                model,
+                case,
+                inputs,
+                past,
+                future,
+            )
             loss = F.mse_loss(prediction, targets)
         loss.backward()
         optimizer.step()
@@ -1034,60 +1459,140 @@ def _benchmark_case(
         last_loss = loss
     torch.cuda.synchronize()
     assert first_loss is not None and last_loss is not None
-    times = [start.elapsed_time(end) for start, end in zip(starts, ends)]
-    total = sum(times)
-    mean = statistics.fmean(times)
+    training_timing, training_throughput = _timing_payload(
+        starts,
+        ends,
+        batch_size=batch_size,
+    )
     result = {
         "model": case.key,
         "parameters": parameter_count,
-        "timing_ms": {
-            "total": total,
-            "mean": mean,
-            "median": statistics.median(times),
-            "p95": _percentile(times, 0.95),
-            "min": min(times),
-            "max": max(times),
-            "population_stddev": statistics.pstdev(times),
-        },
-        "throughput": {
-            "steps_per_second": 1000.0 / mean,
-            "samples_per_second": batch_size * steps * 1000.0 / total,
-        },
+        "timing_ms": training_timing,
+        "throughput": training_throughput,
         "memory_mib": {
             "peak_allocated": torch.cuda.max_memory_allocated() / (1024**2),
             "peak_reserved": torch.cuda.max_memory_reserved() / (1024**2),
         },
         "loss": {"first_measured": float(first_loss), "last_measured": float(last_loss)},
     }
-    del model, optimizer, inputs, targets, past, future, starts, ends
+
+    del optimizer, starts, ends, first_loss, last_loss
+    gc.collect()
+    torch.cuda.empty_cache()
+    torch.cuda.synchronize()
+    model.eval()
+
+    def inference_step() -> torch.Tensor:
+        with autocast_context():
+            return _forward_cuda_batch(model, case, inputs, past, future)
+
+    with torch.inference_mode():
+        for _ in range(warmup_steps):
+            inference_step()
+        torch.cuda.synchronize()
+        torch.cuda.reset_peak_memory_stats()
+        inference_starts = [
+            torch.cuda.Event(enable_timing=True) for _ in range(steps)
+        ]
+        inference_ends = [
+            torch.cuda.Event(enable_timing=True) for _ in range(steps)
+        ]
+        for start, end in zip(inference_starts, inference_ends):
+            start.record()
+            inference_step()
+            end.record()
+        torch.cuda.synchronize()
+
+    inference_timing, inference_throughput = _timing_payload(
+        inference_starts,
+        inference_ends,
+        batch_size=batch_size,
+    )
+    result["inference"] = {
+        "timing_ms": inference_timing,
+        "throughput": inference_throughput,
+        "memory_mib": {
+            "peak_allocated": torch.cuda.max_memory_allocated() / (1024**2),
+            "peak_reserved": torch.cuda.max_memory_reserved() / (1024**2),
+        },
+    }
+
+    del model, inputs, targets, past, future, inference_starts, inference_ends
     gc.collect()
     torch.cuda.empty_cache()
     torch.cuda.synchronize()
     return result
 
 
+def _performance_delta(
+    baseline: dict[str, Any],
+    candidate: dict[str, Any],
+) -> dict[str, Any]:
+    baseline_training_time = float(baseline["timing_ms"]["mean"])
+    candidate_training_time = float(candidate["timing_ms"]["mean"])
+    baseline_inference_time = float(baseline["inference"]["timing_ms"]["mean"])
+    candidate_inference_time = float(candidate["inference"]["timing_ms"]["mean"])
+    return {
+        "baseline": baseline["model"],
+        "candidate": candidate["model"],
+        "training_step_time_overhead_pct": (
+            100.0
+            * (candidate_training_time - baseline_training_time)
+            / baseline_training_time
+        ),
+        "training_throughput_ratio": (
+            candidate["throughput"]["samples_per_second"]
+            / baseline["throughput"]["samples_per_second"]
+        ),
+        "inference_step_time_overhead_pct": (
+            100.0
+            * (candidate_inference_time - baseline_inference_time)
+            / baseline_inference_time
+        ),
+        "inference_throughput_ratio": (
+            candidate["inference"]["throughput"]["samples_per_second"]
+            / baseline["inference"]["throughput"]["samples_per_second"]
+        ),
+        "parameter_overhead": candidate["parameters"] - baseline["parameters"],
+        "training_peak_allocated_overhead_mib": (
+            candidate["memory_mib"]["peak_allocated"]
+            - baseline["memory_mib"]["peak_allocated"]
+        ),
+        "inference_peak_allocated_overhead_mib": (
+            candidate["inference"]["memory_mib"]["peak_allocated"]
+            - baseline["inference"]["memory_mib"]["peak_allocated"]
+        ),
+    }
+
+
 def _performance_summary(results: list[dict[str, Any]]) -> dict[str, Any]:
     by_key = {result["model"]: result for result in results}
     output: dict[str, Any] = {}
     for family in ("patchtst", "patchmixer"):
-        endogenous = by_key[f"{family}_endogenous"]
-        exogenous = by_key[f"{family}_exogenous"]
-        endogenous_time = endogenous["timing_ms"]["mean"]
-        exogenous_time = exogenous["timing_ms"]["mean"]
+        delta = _performance_delta(
+            by_key[f"{family}_endogenous"],
+            by_key[f"{family}_exogenous"],
+        )
         output[family] = {
-            "exogenous_step_time_overhead_pct": (
-                100.0 * (exogenous_time - endogenous_time) / endogenous_time
-            ),
-            "exogenous_throughput_ratio": (
-                exogenous["throughput"]["samples_per_second"]
-                / endogenous["throughput"]["samples_per_second"]
-            ),
-            "parameter_overhead": exogenous["parameters"] - endogenous["parameters"],
-            "peak_allocated_overhead_mib": (
-                exogenous["memory_mib"]["peak_allocated"]
-                - endogenous["memory_mib"]["peak_allocated"]
-            ),
+            **delta,
+            "exogenous_step_time_overhead_pct": delta[
+                "training_step_time_overhead_pct"
+            ],
+            "exogenous_throughput_ratio": delta["training_throughput_ratio"],
+            "peak_allocated_overhead_mib": delta[
+                "training_peak_allocated_overhead_mib"
+            ],
         }
+
+    output["patchmixer_ablation"] = {
+        comparison_name: _performance_delta(
+            by_key[baseline_key],
+            by_key[candidate_key],
+        )
+        for comparison_name, (baseline_key, candidate_key) in (
+            PATCHMIXER_ABLATION_PAIRS.items()
+        )
+    }
     return output
 
 
@@ -1148,7 +1653,7 @@ def main(argv: list[str] | None = None) -> int:
     ]
     properties = torch.cuda.get_device_properties(0)
     result = {
-        "schema_version": 1,
+        "schema_version": 2,
         "started_at_utc": started_at.isoformat(),
         "finished_at_utc": datetime.now(timezone.utc).isoformat(),
         "elapsed_seconds": time.perf_counter() - started,
@@ -1172,6 +1677,10 @@ def main(argv: list[str] | None = None) -> int:
             "past_exogenous_columns": list(PAST_EXOGENOUS_COLUMNS),
             "future_exogenous_columns": list(FUTURE_EXOGENOUS_COLUMNS),
             "scaler_fit_scope": "train-series rows only",
+            "future_availability_assumption": (
+                "Every future exogenous value is assumed available or forecast at origin; "
+                "the benchmark does not measure upstream feature-forecast error."
+            ),
         },
         "accuracy_protocol": {
             "seeds": args.seeds,
@@ -1193,6 +1702,21 @@ def main(argv: list[str] | None = None) -> int:
             "deterministic_algorithms": True,
             "model_selection": "lowest validation MSE",
             "test_evaluations": ["all_rolling_windows", "last_origin_per_series"],
+            "model_cases": [
+                {
+                    "key": case.key,
+                    "family": case.family,
+                    "past_exogenous": case.past_exogenous,
+                    "future_exogenous": case.future_exogenous,
+                }
+                for case in MODEL_CASES
+            ],
+            "patchmixer_ablation_pairs": PATCHMIXER_ABLATION_PAIRS,
+            "full_model_input_ablations": [
+                "zero_past",
+                "zero_future",
+                "zero_all",
+            ],
         },
         "accuracy_seeds": seed_results,
         "accuracy_aggregate": _aggregate_accuracy(seed_results),
@@ -1202,7 +1726,9 @@ def main(argv: list[str] | None = None) -> int:
             "batch_size": args.batch_size,
             "warmup_steps": args.warmup_steps,
             "measured_steps": args.performance_steps,
+            "modes": ["training_step", "inference"],
             "cuda_resident_batch": True,
+            "only_configured_exogenous_tensors_allocated": True,
             "data_loader_included": False,
             "host_to_device_transfer_included": False,
         },
