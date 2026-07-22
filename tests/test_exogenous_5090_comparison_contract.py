@@ -110,6 +110,20 @@ def test_focused_shift_space_configs_share_architecture_and_change_only_space():
     assert bounded.future_exo_normalized_residual_limit == 0.15
 
 
+def test_focused_case_metadata_records_bounded_residual_limit():
+    metadata = [
+        MODULE._case_metadata(case)
+        for case in MODULE.PATCHMIXER_SHIFT_SPACE_CASES
+    ]
+
+    assert metadata[-1]["key"] == "patchmixer_future_shift_normalized_bounded"
+    assert metadata[-1]["future_normalized_residual_limit"] == 0.15
+    assert all(
+        row["future_normalized_residual_limit"] is None
+        for row in metadata[:-1]
+    )
+
+
 def test_case_set_cli_defaults_to_historical_comparison_and_accepts_focused_set():
     parser = MODULE._build_parser()
     common = ["--data", "input.parquet", "--output", "result.json"]

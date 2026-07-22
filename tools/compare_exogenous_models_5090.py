@@ -197,6 +197,19 @@ PATCHMIXER_SHIFT_SPACE_PAIRS = {
 }
 
 
+def _case_metadata(case: ModelCase) -> dict[str, Any]:
+    return {
+        "key": case.key,
+        "family": case.family,
+        "past_exogenous": case.past_exogenous,
+        "future_exogenous": case.future_exogenous,
+        "future_shift_space": case.future_shift_space,
+        "future_normalized_residual_limit": (
+            case.future_normalized_residual_limit
+        ),
+    }
+
+
 def _positive_int(value: str) -> int:
     parsed = int(value)
     if parsed <= 0:
@@ -2178,16 +2191,7 @@ def main(argv: list[str] | None = None) -> int:
             "deterministic_algorithms": True,
             "model_selection": "lowest validation MSE",
             "test_evaluations": ["all_rolling_windows", "last_origin_per_series"],
-            "model_cases": [
-                {
-                    "key": case.key,
-                    "family": case.family,
-                    "past_exogenous": case.past_exogenous,
-                    "future_exogenous": case.future_exogenous,
-                    "future_shift_space": case.future_shift_space,
-                }
-                for case in cases
-            ],
+            "model_cases": [_case_metadata(case) for case in cases],
             "comparison_pairs": comparison_pairs,
             "diagnostics": (
                 [
