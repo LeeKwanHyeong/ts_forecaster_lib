@@ -16,7 +16,11 @@ from modeling_module.training.model_losses.loss_module import DistributionLoss
 from modeling_module.utils.checkpoint import build_checkpoint_payload
 
 
-def _normalized_config(mode: str) -> PatchMixerConfig:
+def _normalized_config(
+    mode: str,
+    *,
+    residual_limit: float | None,
+) -> PatchMixerConfig:
     kwargs = {}
     if mode == "distribution":
         loss = DistributionLoss(distribution="StudentT", validate_args=False)
@@ -45,6 +49,7 @@ def _normalized_config(mode: str) -> PatchMixerConfig:
         past_exo_mode="none",
         future_exo_dim=2,
         future_exo_shift_space="normalized",
+        future_exo_normalized_residual_limit=residual_limit,
         patch_cfgs=((4, 2, 3),),
         per_branch_dim=4,
         fused_dim=8,
@@ -65,12 +70,14 @@ def _output_tensor(output):
 
 
 @pytest.mark.parametrize("mode", ("point", "quantile", "distribution"))
+@pytest.mark.parametrize("residual_limit", (None, 0.15), ids=("unbounded", "bounded"))
 def test_patchmixer_normalized_checkpoint_strict_load_and_public_predict(
     tmp_path: Path,
     mode: str,
+    residual_limit: float | None,
 ) -> None:
     torch.manual_seed(20260812)
-    config = _normalized_config(mode)
+    config = _normalized_config(mode, residual_limit=residual_limit)
     model, model_key = _model_and_key(mode, config)
     model.eval()
     x = torch.linspace(-2.0, 3.0, steps=16).reshape(2, 8, 1)
@@ -84,13 +91,20 @@ def test_patchmixer_normalized_checkpoint_strict_load_and_public_predict(
         config,
         extra_meta={"model_key": model_key, "family_key": "patchmixer"},
     )
-    checkpoint_path = tmp_path / f"patchmixer_{mode}_normalized.pt"
+    checkpoint_path = tmp_path / (
+        f"patchmixer_{mode}_normalized_{residual_limit}.pt"
+    )
     torch.save(payload, checkpoint_path)
 
     predictor = load_predictor(str(checkpoint_path), device="cpu", strict=True)
     assert predictor.model_key == model_key
     assert predictor.config["future_exo_shift_space"] == "normalized"
+    assert (
+        predictor.config["future_exo_normalized_residual_limit"]
+        == residual_limit
+    )
     assert predictor.model.future_exo_shift_space == "normalized"
+    assert predictor.model.future_exo_normalized_residual_limit == residual_limit
     assert predictor.model.state_dict().keys() == model.state_dict().keys()
 
     with torch.no_grad():

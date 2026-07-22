@@ -161,6 +161,9 @@ class PatchMixerConfig(TrainingConfig):
     # Target-shift coordinate, unrelated to exogenous input scaling. The model
     # remains fail-closed for a mode until its complete forward path is present.
     future_exo_shift_space: Literal["output", "normalized"] = "output"
+    # Optional tanh bound in target RevIN standard-deviation units. This is
+    # valid only for normalized-space shifts with RevIN enabled.
+    future_exo_normalized_residual_limit: Optional[float] = None
     # Deprecated PatchMixer compatibility field. Input scaling belongs to the
     # data contract; PatchMixer accepts and serializes this value but ignores it.
     exo_is_normalized_default: bool = False

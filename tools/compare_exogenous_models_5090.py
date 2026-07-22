@@ -91,6 +91,7 @@ class ModelCase:
     past_exogenous: bool = False
     future_exogenous: bool = False
     future_shift_space: str | None = None
+    future_normalized_residual_limit: float | None = None
 
     @property
     def exogenous(self) -> bool:
@@ -136,6 +137,13 @@ PATCHMIXER_SHIFT_SPACE_CASES = (
         future_exogenous=True,
         future_shift_space="normalized",
     ),
+    ModelCase(
+        "patchmixer_future_shift_normalized_bounded",
+        "patchmixer",
+        future_exogenous=True,
+        future_shift_space="normalized",
+        future_normalized_residual_limit=0.15,
+    ),
 )
 
 PATCHMIXER_ABLATION_PAIRS = {
@@ -173,6 +181,18 @@ PATCHMIXER_SHIFT_SPACE_PAIRS = {
     "normalized_vs_output": (
         "patchmixer_future_shift",
         "patchmixer_future_shift_normalized",
+    ),
+    "bounded_vs_endogenous": (
+        "patchmixer_endogenous",
+        "patchmixer_future_shift_normalized_bounded",
+    ),
+    "bounded_vs_output": (
+        "patchmixer_future_shift",
+        "patchmixer_future_shift_normalized_bounded",
+    ),
+    "bounded_vs_normalized": (
+        "patchmixer_future_shift_normalized",
+        "patchmixer_future_shift_normalized_bounded",
     ),
 }
 
@@ -480,6 +500,9 @@ def _patchmixer_config(case: ModelCase) -> PatchMixerConfig:
             len(FUTURE_EXOGENOUS_COLUMNS) if case.future_exogenous else 0
         ),
         future_exo_shift_space=case.future_shift_space or "output",
+        future_exo_normalized_residual_limit=(
+            case.future_normalized_residual_limit
+        ),
         use_revin=True,
     )
 
@@ -2105,7 +2128,7 @@ def main(argv: list[str] | None = None) -> int:
     ]
     properties = torch.cuda.get_device_properties(0)
     result = {
-        "schema_version": 4,
+        "schema_version": 5,
         "started_at_utc": started_at.isoformat(),
         "finished_at_utc": datetime.now(timezone.utc).isoformat(),
         "elapsed_seconds": time.perf_counter() - started,
