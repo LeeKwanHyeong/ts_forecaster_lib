@@ -38,7 +38,7 @@ from modeling_module.data_loader.multi_part_exo_dataset import (
 )
 from modeling_module.models.PatchMixer.PatchMixer import PatchMixerModel
 from modeling_module.models.PatchMixer.common.configs import PatchMixerConfig
-from modeling_module.models.PatchMixer.original import (
+from modeling_module.models.PatchMixer import (
     PatchMixerOriginalConfig,
     PatchMixerOriginalModel,
 )

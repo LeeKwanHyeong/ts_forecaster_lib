@@ -12,8 +12,10 @@ from modeling_module.api.train import (
     PatchMixerArchitectureConfig,
     _normalize_model_architecture,
 )
-from modeling_module.models.PatchMixer.original import (
+from modeling_module.models.PatchMixer import (
+    PatchMixerOriginalBackbone,
     PatchMixerOriginalConfig,
+    PatchMixerOriginalLayer,
     PatchMixerOriginalModel,
 )
 from modeling_module.models.PatchMixer.PatchMixer import (
@@ -62,16 +64,11 @@ def _config() -> PatchMixerOriginalConfig:
     )
 
 
-def test_patchmixer_original_canonical_locations_and_legacy_exports_match() -> None:
-    from modeling_module.models.PatchMixer.original import (
-        PatchMixerOriginalBackbone as LegacyOriginalBackbone,
-        PatchMixerOriginalLayer as LegacyOriginalLayer,
-    )
-
+def test_patchmixer_original_canonical_locations_and_public_exports_match() -> None:
     assert PatchMixerOriginalConfig is CanonicalOriginalConfig
     assert PatchMixerOriginalModel is CanonicalOriginalModel
-    assert LegacyOriginalLayer is CanonicalOriginalLayer
-    assert LegacyOriginalBackbone is CanonicalOriginalBackbone
+    assert PatchMixerOriginalLayer is CanonicalOriginalLayer
+    assert PatchMixerOriginalBackbone is CanonicalOriginalBackbone
     assert PatchMixerOriginalConfig.__module__.endswith("PatchMixer.common.configs")
     assert PatchMixerOriginalModel.__module__.endswith("PatchMixer.PatchMixer")
     assert issubclass(PatchMixerModel, PatchMixerEnhancedModel)
