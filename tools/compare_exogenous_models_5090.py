@@ -978,7 +978,7 @@ def _validate_diagnostic_payloads(
         raise RuntimeError("Diagnostic prediction shapes do not match.")
 
 
-def _mse_optimal_gate_targets(
+def _mse_gate_regression_targets(
     base_predictions: np.ndarray,
     full_predictions: np.ndarray,
     targets: np.ndarray,
@@ -991,13 +991,29 @@ def _mse_optimal_gate_targets(
     if horizon_shared:
         numerator = np.sum(numerator, axis=1, keepdims=True)
         denominator = np.sum(denominator, axis=1, keepdims=True)
-    gate = np.divide(
+    gate_targets = np.divide(
         numerator,
         denominator,
         out=np.zeros_like(numerator, dtype=np.float64),
         where=denominator > 1e-12,
     )
-    return np.clip(gate, 0.0, 1.0), denominator
+    return gate_targets, denominator
+
+
+def _mse_optimal_gate_targets(
+    base_predictions: np.ndarray,
+    full_predictions: np.ndarray,
+    targets: np.ndarray,
+    *,
+    horizon_shared: bool,
+) -> tuple[np.ndarray, np.ndarray]:
+    gate_targets, denominator = _mse_gate_regression_targets(
+        base_predictions,
+        full_predictions,
+        targets,
+        horizon_shared=horizon_shared,
+    )
+    return np.clip(gate_targets, 0.0, 1.0), denominator
 
 
 def _mae_optimal_gate_targets(
@@ -1453,17 +1469,18 @@ def _gate_capacity_analysis(
         ("window_scalar", True),
         ("window_horizon", False),
     ):
-        gate_targets, gate_weights = _mse_optimal_gate_targets(
+        gate_regression_targets, gate_weights = _mse_gate_regression_targets(
             base_predictions,
             full_predictions,
             targets,
             horizon_shared=horizon_shared,
         )
+        oracle_mse_gate = np.clip(gate_regression_targets, 0.0, 1.0)
         ridge_gate, ridge_selected = _nested_group_oof_history_gate(
             "ridge",
             HISTORY_GATE_RIDGE_ALPHAS,
             features,
-            gate_targets,
+            gate_regression_targets,
             gate_weights,
             uids,
             base_predictions,
@@ -1474,7 +1491,7 @@ def _gate_capacity_analysis(
             "knn",
             HISTORY_GATE_KNN_NEIGHBORS,
             features,
-            gate_targets,
+            gate_regression_targets,
             gate_weights,
             uids,
             base_predictions,
@@ -1486,12 +1503,12 @@ def _gate_capacity_analysis(
             "always_off": np.zeros((targets.shape[0], gate_width)),
             "always_on": np.ones((targets.shape[0], gate_width)),
             "validation_fit_constant": np.repeat(
-                _fit_constant_gate(gate_targets, gate_weights),
+                _fit_constant_gate(gate_regression_targets, gate_weights),
                 targets.shape[0],
                 axis=0,
             ),
             "series_oof_constant": _group_oof_constant_gate(
-                gate_targets,
+                gate_regression_targets,
                 gate_weights,
                 uids,
             ),
@@ -1503,7 +1520,7 @@ def _gate_capacity_analysis(
                 targets,
                 horizon_shared=horizon_shared,
             ),
-            "oracle_mse": gate_targets,
+            "oracle_mse": oracle_mse_gate,
             "oracle_mae": _mae_optimal_gate_targets(
                 base_predictions,
                 full_predictions,
