@@ -90,6 +90,7 @@ class ModelCase:
     family: str
     past_exogenous: bool = False
     future_exogenous: bool = False
+    future_shift_space: str | None = None
 
     @property
     def exogenous(self) -> bool:
@@ -106,12 +107,34 @@ MODEL_CASES = (
     ),
     ModelCase("patchmixer_endogenous", "patchmixer"),
     ModelCase("patchmixer_past_gate", "patchmixer", past_exogenous=True),
-    ModelCase("patchmixer_future_shift", "patchmixer", future_exogenous=True),
+    ModelCase(
+        "patchmixer_future_shift",
+        "patchmixer",
+        future_exogenous=True,
+        future_shift_space="output",
+    ),
     ModelCase(
         "patchmixer_exogenous",
         "patchmixer",
         past_exogenous=True,
         future_exogenous=True,
+        future_shift_space="output",
+    ),
+)
+
+PATCHMIXER_SHIFT_SPACE_CASES = (
+    ModelCase("patchmixer_endogenous", "patchmixer"),
+    ModelCase(
+        "patchmixer_future_shift",
+        "patchmixer",
+        future_exogenous=True,
+        future_shift_space="output",
+    ),
+    ModelCase(
+        "patchmixer_future_shift_normalized",
+        "patchmixer",
+        future_exogenous=True,
+        future_shift_space="normalized",
     ),
 )
 
@@ -135,6 +158,21 @@ PATCHMIXER_ABLATION_PAIRS = {
     "full_vs_past_gate": (
         "patchmixer_past_gate",
         "patchmixer_exogenous",
+    ),
+}
+
+PATCHMIXER_SHIFT_SPACE_PAIRS = {
+    "output_vs_endogenous": (
+        "patchmixer_endogenous",
+        "patchmixer_future_shift",
+    ),
+    "normalized_vs_endogenous": (
+        "patchmixer_endogenous",
+        "patchmixer_future_shift_normalized",
+    ),
+    "normalized_vs_output": (
+        "patchmixer_future_shift",
+        "patchmixer_future_shift_normalized",
     ),
 }
 
@@ -164,6 +202,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument(
+        "--case-set",
+        choices=("all", "patchmixer-shift-space"),
+        default="all",
+        help="Select the historical full comparison or the focused shift-space comparison.",
+    )
     parser.add_argument("--seeds", nargs="+", type=int, default=[11, 22, 33])
     parser.add_argument("--epochs", type=_positive_int, default=30)
     parser.add_argument("--patience", type=_positive_int, default=8)
@@ -435,6 +479,7 @@ def _patchmixer_config(case: ModelCase) -> PatchMixerConfig:
         future_exo_dim=(
             len(FUTURE_EXOGENOUS_COLUMNS) if case.future_exogenous else 0
         ),
+        future_exo_shift_space=case.future_shift_space or "output",
         use_revin=True,
     )
 
@@ -867,6 +912,31 @@ def _candidate_summary(
     }
 
 
+def _candidate_comparison_group(
+    predictions: dict[str, dict[str, dict[str, Any]]],
+    comparison_pairs: dict[str, tuple[str, str]],
+) -> dict[str, Any]:
+    output: dict[str, Any] = {}
+    for comparison_name, (baseline_key, candidate_key) in comparison_pairs.items():
+        baseline_name = baseline_key.removeprefix("patchmixer_")
+        candidate_name = candidate_key.removeprefix("patchmixer_")
+        output[comparison_name] = {
+            "test_all_rolling_windows": _candidate_summary(
+                predictions[baseline_key]["all"],
+                predictions[candidate_key]["all"],
+                baseline_name=baseline_name,
+                candidate_name=candidate_name,
+            ),
+            "test_last_origin_per_series": _candidate_summary(
+                predictions[baseline_key]["last"],
+                predictions[candidate_key]["last"],
+                baseline_name=baseline_name,
+                candidate_name=candidate_name,
+            ),
+        }
+    return output
+
+
 def _input_ablation_summary(
     full: dict[str, Any],
     ablated: dict[str, Any],
@@ -961,6 +1031,9 @@ def _gate_statistics(
 def _run_accuracy_seed(
     frame: pl.DataFrame,
     *,
+    cases: tuple[ModelCase, ...],
+    case_set: str,
+    comparison_pairs: dict[str, tuple[str, str]],
     seed: int,
     val_ratio: float,
     test_ratio: float,
@@ -1002,7 +1075,7 @@ def _run_accuracy_seed(
 
     model_results: dict[str, Any] = {}
     predictions: dict[str, dict[str, dict[str, Any]]] = {}
-    for case in MODEL_CASES:
+    for case in cases:
         model, training = _train_model(
             case,
             dataset=dataset,
@@ -1102,39 +1175,29 @@ def _run_accuracy_seed(
         torch.cuda.empty_cache()
 
     paired: dict[str, Any] = {}
-    for family in ("patchtst", "patchmixer"):
-        endogenous_key = f"{family}_endogenous"
-        exogenous_key = f"{family}_exogenous"
-        paired[family] = {
-            "test_all_rolling_windows": _paired_summary(
-                predictions[endogenous_key]["all"],
-                predictions[exogenous_key]["all"],
-            ),
-            "test_last_origin_per_series": _paired_summary(
-                predictions[endogenous_key]["last"],
-                predictions[exogenous_key]["last"],
-            ),
-        }
-    paired["patchmixer_ablation"] = {}
-    for comparison_name, (baseline_key, candidate_key) in (
-        PATCHMIXER_ABLATION_PAIRS.items()
-    ):
-        baseline_name = baseline_key.removeprefix("patchmixer_")
-        candidate_name = candidate_key.removeprefix("patchmixer_")
-        paired["patchmixer_ablation"][comparison_name] = {
-            "test_all_rolling_windows": _candidate_summary(
-                predictions[baseline_key]["all"],
-                predictions[candidate_key]["all"],
-                baseline_name=baseline_name,
-                candidate_name=candidate_name,
-            ),
-            "test_last_origin_per_series": _candidate_summary(
-                predictions[baseline_key]["last"],
-                predictions[candidate_key]["last"],
-                baseline_name=baseline_name,
-                candidate_name=candidate_name,
-            ),
-        }
+    if case_set == "all":
+        for family in ("patchtst", "patchmixer"):
+            endogenous_key = f"{family}_endogenous"
+            exogenous_key = f"{family}_exogenous"
+            paired[family] = {
+                "test_all_rolling_windows": _paired_summary(
+                    predictions[endogenous_key]["all"],
+                    predictions[exogenous_key]["all"],
+                ),
+                "test_last_origin_per_series": _paired_summary(
+                    predictions[endogenous_key]["last"],
+                    predictions[exogenous_key]["last"],
+                ),
+            }
+        paired["patchmixer_ablation"] = _candidate_comparison_group(
+            predictions,
+            comparison_pairs,
+        )
+    else:
+        paired["patchmixer_shift_space"] = _candidate_comparison_group(
+            predictions,
+            comparison_pairs,
+        )
 
     split_fingerprint = hashlib.sha256(
         json.dumps(splits, sort_keys=True).encode("utf-8")
@@ -1156,7 +1219,72 @@ def _run_accuracy_seed(
     }
 
 
-def _aggregate_accuracy(seed_results: list[dict[str, Any]]) -> dict[str, Any]:
+def _aggregate_candidate_comparisons(
+    seed_results: list[dict[str, Any]],
+    *,
+    group_name: str,
+    comparison_pairs: dict[str, tuple[str, str]],
+) -> dict[str, Any]:
+    output: dict[str, Any] = {}
+    for comparison_name in comparison_pairs:
+        output[comparison_name] = {}
+        for evaluation in (
+            "test_all_rolling_windows",
+            "test_last_origin_per_series",
+        ):
+            records = []
+            for result in seed_results:
+                comparison = result["paired_comparison"][group_name][
+                    comparison_name
+                ][evaluation]
+                records.append(
+                    {
+                        "seed": result["seed"],
+                        "baseline": comparison["baseline"],
+                        "candidate": comparison["candidate"],
+                        "winner": comparison["overall_mae_winner"],
+                        "mae_improvement_pct": comparison[
+                            "candidate_relative_improvement_pct"
+                        ]["mae"],
+                    }
+                )
+            improvements = [record["mae_improvement_pct"] for record in records]
+            winner_names = {
+                records[0]["baseline"],
+                records[0]["candidate"],
+                "tie",
+            }
+            output[comparison_name][evaluation] = {
+                "records": records,
+                "seed_wins": {
+                    name: sum(record["winner"] == name for record in records)
+                    for name in sorted(winner_names)
+                },
+                "mae_improvement_pct": {
+                    "mean": statistics.fmean(improvements),
+                    "population_stddev": statistics.pstdev(improvements),
+                    "min": min(improvements),
+                    "max": max(improvements),
+                },
+            }
+    return output
+
+
+def _aggregate_accuracy(
+    seed_results: list[dict[str, Any]],
+    *,
+    case_set: str,
+    comparison_pairs: dict[str, tuple[str, str]],
+) -> dict[str, Any]:
+    if case_set == "patchmixer-shift-space":
+        return {
+            "patchmixer_shift_space": _aggregate_candidate_comparisons(
+                seed_results,
+                group_name="patchmixer_shift_space",
+                comparison_pairs=comparison_pairs,
+            )
+        }
+
     output: dict[str, Any] = {}
     for family in ("patchtst", "patchmixer"):
         output[family] = {}
@@ -1197,48 +1325,11 @@ def _aggregate_accuracy(seed_results: list[dict[str, Any]]) -> dict[str, Any]:
                 },
             }
 
-    output["patchmixer_ablation"] = {}
-    for comparison_name in PATCHMIXER_ABLATION_PAIRS:
-        output["patchmixer_ablation"][comparison_name] = {}
-        for evaluation in (
-            "test_all_rolling_windows",
-            "test_last_origin_per_series",
-        ):
-            records = []
-            for result in seed_results:
-                comparison = result["paired_comparison"]["patchmixer_ablation"][
-                    comparison_name
-                ][evaluation]
-                records.append(
-                    {
-                        "seed": result["seed"],
-                        "baseline": comparison["baseline"],
-                        "candidate": comparison["candidate"],
-                        "winner": comparison["overall_mae_winner"],
-                        "mae_improvement_pct": comparison[
-                            "candidate_relative_improvement_pct"
-                        ]["mae"],
-                    }
-                )
-            improvements = [record["mae_improvement_pct"] for record in records]
-            winner_names = {
-                records[0]["baseline"],
-                records[0]["candidate"],
-                "tie",
-            }
-            output["patchmixer_ablation"][comparison_name][evaluation] = {
-                "records": records,
-                "seed_wins": {
-                    name: sum(record["winner"] == name for record in records)
-                    for name in sorted(winner_names)
-                },
-                "mae_improvement_pct": {
-                    "mean": statistics.fmean(improvements),
-                    "population_stddev": statistics.pstdev(improvements),
-                    "min": min(improvements),
-                    "max": max(improvements),
-                },
-            }
+    output["patchmixer_ablation"] = _aggregate_candidate_comparisons(
+        seed_results,
+        group_name="patchmixer_ablation",
+        comparison_pairs=comparison_pairs,
+    )
 
     output["patchmixer_input_ablation"] = {}
     for ablation_name in ("zero_past", "zero_future", "zero_all"):
@@ -1565,8 +1656,26 @@ def _performance_delta(
     }
 
 
-def _performance_summary(results: list[dict[str, Any]]) -> dict[str, Any]:
+def _performance_summary(
+    results: list[dict[str, Any]],
+    *,
+    case_set: str,
+    comparison_pairs: dict[str, tuple[str, str]],
+) -> dict[str, Any]:
     by_key = {result["model"]: result for result in results}
+    if case_set == "patchmixer-shift-space":
+        return {
+            "patchmixer_shift_space": {
+                comparison_name: _performance_delta(
+                    by_key[baseline_key],
+                    by_key[candidate_key],
+                )
+                for comparison_name, (baseline_key, candidate_key) in (
+                    comparison_pairs.items()
+                )
+            }
+        }
+
     output: dict[str, Any] = {}
     for family in ("patchtst", "patchmixer"):
         delta = _performance_delta(
@@ -1590,7 +1699,7 @@ def _performance_summary(results: list[dict[str, Any]]) -> dict[str, Any]:
             by_key[candidate_key],
         )
         for comparison_name, (baseline_key, candidate_key) in (
-            PATCHMIXER_ABLATION_PAIRS.items()
+            comparison_pairs.items()
         )
     }
     return output
@@ -1598,6 +1707,12 @@ def _performance_summary(results: list[dict[str, Any]]) -> dict[str, Any]:
 
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
+    if args.case_set == "patchmixer-shift-space":
+        cases = PATCHMIXER_SHIFT_SPACE_CASES
+        comparison_pairs = PATCHMIXER_SHIFT_SPACE_PAIRS
+    else:
+        cases = MODEL_CASES
+        comparison_pairs = PATCHMIXER_ABLATION_PAIRS
     data_path = args.data.expanduser().resolve()
     output_path = args.output.expanduser().resolve()
     if not data_path.is_file():
@@ -1622,6 +1737,9 @@ def main(argv: list[str] | None = None) -> int:
     seed_results = [
         _run_accuracy_seed(
             frame,
+            cases=cases,
+            case_set=args.case_set,
+            comparison_pairs=comparison_pairs,
             seed=seed,
             val_ratio=args.val_ratio,
             test_ratio=args.test_ratio,
@@ -1649,11 +1767,11 @@ def main(argv: list[str] | None = None) -> int:
             lr=args.lr,
             weight_decay=args.weight_decay,
         )
-        for case in MODEL_CASES
+        for case in cases
     ]
     properties = torch.cuda.get_device_properties(0)
     result = {
-        "schema_version": 2,
+        "schema_version": 3,
         "started_at_utc": started_at.isoformat(),
         "finished_at_utc": datetime.now(timezone.utc).isoformat(),
         "elapsed_seconds": time.perf_counter() - started,
@@ -1683,6 +1801,7 @@ def main(argv: list[str] | None = None) -> int:
             ),
         },
         "accuracy_protocol": {
+            "case_set": args.case_set,
             "seeds": args.seeds,
             "split": "series_id_disjoint",
             "lookback": LOOKBACK,
@@ -1708,18 +1827,23 @@ def main(argv: list[str] | None = None) -> int:
                     "family": case.family,
                     "past_exogenous": case.past_exogenous,
                     "future_exogenous": case.future_exogenous,
+                    "future_shift_space": case.future_shift_space,
                 }
-                for case in MODEL_CASES
+                for case in cases
             ],
-            "patchmixer_ablation_pairs": PATCHMIXER_ABLATION_PAIRS,
-            "full_model_input_ablations": [
-                "zero_past",
-                "zero_future",
-                "zero_all",
-            ],
+            "comparison_pairs": comparison_pairs,
+            "full_model_input_ablations": (
+                ["zero_past", "zero_future", "zero_all"]
+                if args.case_set == "all"
+                else []
+            ),
         },
         "accuracy_seeds": seed_results,
-        "accuracy_aggregate": _aggregate_accuracy(seed_results),
+        "accuracy_aggregate": _aggregate_accuracy(
+            seed_results,
+            case_set=args.case_set,
+            comparison_pairs=comparison_pairs,
+        ),
         "performance_protocol": {
             "seed": performance_seed,
             "precision": args.performance_precision,
@@ -1733,7 +1857,11 @@ def main(argv: list[str] | None = None) -> int:
             "host_to_device_transfer_included": False,
         },
         "performance_models": performance_results,
-        "performance_summary": _performance_summary(performance_results),
+        "performance_summary": _performance_summary(
+            performance_results,
+            case_set=args.case_set,
+            comparison_pairs=comparison_pairs,
+        ),
     }
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(

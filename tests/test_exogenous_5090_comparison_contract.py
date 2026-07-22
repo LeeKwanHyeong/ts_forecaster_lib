@@ -37,6 +37,62 @@ def test_comparison_has_paired_endogenous_and_exogenous_cases():
     ]
 
 
+def test_focused_patchmixer_shift_space_cases_isolate_the_shift_coordinate():
+    assert [
+        (
+            case.key,
+            case.past_exogenous,
+            case.future_exogenous,
+            case.future_shift_space,
+        )
+        for case in MODULE.PATCHMIXER_SHIFT_SPACE_CASES
+    ] == [
+        ("patchmixer_endogenous", False, False, None),
+        ("patchmixer_future_shift", False, True, "output"),
+        ("patchmixer_future_shift_normalized", False, True, "normalized"),
+    ]
+    assert MODULE.PATCHMIXER_SHIFT_SPACE_PAIRS == {
+        "output_vs_endogenous": (
+            "patchmixer_endogenous",
+            "patchmixer_future_shift",
+        ),
+        "normalized_vs_endogenous": (
+            "patchmixer_endogenous",
+            "patchmixer_future_shift_normalized",
+        ),
+        "normalized_vs_output": (
+            "patchmixer_future_shift",
+            "patchmixer_future_shift_normalized",
+        ),
+    }
+
+
+def test_focused_shift_space_configs_share_architecture_and_change_only_space():
+    cases = {case.key: case for case in MODULE.PATCHMIXER_SHIFT_SPACE_CASES}
+    output = MODULE._patchmixer_config(cases["patchmixer_future_shift"])
+    normalized = MODULE._patchmixer_config(
+        cases["patchmixer_future_shift_normalized"]
+    )
+
+    assert output.future_exo_dim == normalized.future_exo_dim == len(
+        MODULE.FUTURE_EXOGENOUS_COLUMNS
+    )
+    assert output.past_exo_cont_dim == normalized.past_exo_cont_dim == 0
+    assert output.future_exo_shift_space == "output"
+    assert normalized.future_exo_shift_space == "normalized"
+
+
+def test_case_set_cli_defaults_to_historical_comparison_and_accepts_focused_set():
+    parser = MODULE._build_parser()
+    common = ["--data", "input.parquet", "--output", "result.json"]
+
+    assert parser.parse_args(common).case_set == "all"
+    assert (
+        parser.parse_args([*common, "--case-set", "patchmixer-shift-space"]).case_set
+        == "patchmixer-shift-space"
+    )
+
+
 def test_patchmixer_ablation_pairs_isolate_gate_and_future_shift():
     assert MODULE.PATCHMIXER_ABLATION_PAIRS == {
         "past_gate_vs_endogenous": (
@@ -77,6 +133,7 @@ def test_patchmixer_ablation_configs_enable_only_requested_inputs():
         config = MODULE._patchmixer_config(cases[key])
         assert (config.past_exo_cont_dim, config.future_exo_dim) == widths
         assert config.past_exo_mode == "z_gate"
+        assert config.future_exo_shift_space == "output"
 
 
 def test_comparison_uses_nonempty_past_and_future_feature_contracts():
@@ -176,6 +233,41 @@ def test_candidate_summary_reports_positive_improvement_for_lower_error():
     assert result["pointwise_absolute_error_win_rate"]["past_gate"] == 1.0
 
 
+def test_focused_accuracy_aggregate_reports_each_shift_space_pair():
+    predictions = {
+        "patchmixer_endogenous": {
+            "all": _prediction_payload([[2.0, 2.0]]),
+            "last": _prediction_payload([[2.0, 2.0]]),
+        },
+        "patchmixer_future_shift": {
+            "all": _prediction_payload([[1.5, 1.5]]),
+            "last": _prediction_payload([[1.5, 1.5]]),
+        },
+        "patchmixer_future_shift_normalized": {
+            "all": _prediction_payload([[1.25, 1.25]]),
+            "last": _prediction_payload([[1.25, 1.25]]),
+        },
+    }
+    paired = MODULE._candidate_comparison_group(
+        predictions,
+        MODULE.PATCHMIXER_SHIFT_SPACE_PAIRS,
+    )
+
+    result = MODULE._aggregate_accuracy(
+        [{"seed": 11, "paired_comparison": {"patchmixer_shift_space": paired}}],
+        case_set="patchmixer-shift-space",
+        comparison_pairs=MODULE.PATCHMIXER_SHIFT_SPACE_PAIRS,
+    )
+
+    comparisons = result["patchmixer_shift_space"]
+    assert set(comparisons) == set(MODULE.PATCHMIXER_SHIFT_SPACE_PAIRS)
+    normalized = comparisons["normalized_vs_output"][
+        "test_all_rolling_windows"
+    ]
+    assert normalized["seed_wins"]["future_shift_normalized"] == 1
+    assert normalized["mae_improvement_pct"]["mean"] == pytest.approx(50.0)
+
+
 def test_input_ablation_reports_positive_degradation_when_inputs_help():
     full = _prediction_payload([[1.25, 1.25]])
     ablated = _prediction_payload([[1.5, 1.5]])
@@ -234,3 +326,45 @@ def test_performance_delta_separates_training_and_inference_overhead():
     assert result["parameter_overhead"] == 25
     assert result["training_peak_allocated_overhead_mib"] == pytest.approx(4.0)
     assert result["inference_peak_allocated_overhead_mib"] == pytest.approx(1.0)
+
+
+def test_focused_performance_summary_reports_each_shift_space_pair():
+    results = [
+        _performance_record(
+            "patchmixer_endogenous",
+            parameters=100,
+            training_ms=2.0,
+            inference_ms=1.0,
+            training_memory=20.0,
+            inference_memory=10.0,
+        ),
+        _performance_record(
+            "patchmixer_future_shift",
+            parameters=110,
+            training_ms=2.2,
+            inference_ms=1.1,
+            training_memory=21.0,
+            inference_memory=10.5,
+        ),
+        _performance_record(
+            "patchmixer_future_shift_normalized",
+            parameters=110,
+            training_ms=2.3,
+            inference_ms=1.2,
+            training_memory=21.0,
+            inference_memory=10.5,
+        ),
+    ]
+
+    result = MODULE._performance_summary(
+        results,
+        case_set="patchmixer-shift-space",
+        comparison_pairs=MODULE.PATCHMIXER_SHIFT_SPACE_PAIRS,
+    )
+
+    comparisons = result["patchmixer_shift_space"]
+    assert set(comparisons) == set(MODULE.PATCHMIXER_SHIFT_SPACE_PAIRS)
+    assert comparisons["normalized_vs_output"]["parameter_overhead"] == 0
+    assert comparisons["normalized_vs_output"][
+        "training_peak_allocated_overhead_mib"
+    ] == pytest.approx(0.0)

@@ -23,7 +23,6 @@ from modeling_module.models.PatchMixer.provenance import (
 )
 from modeling_module.models.common_layers.RevIN import RevIN
 from modeling_module.models.common_layers.heads.quantile_heads.decomposition_quantile_head import DecompositionQuantileHead
-from modeling_module.utils.exogenous_utils import apply_exo_shift_linear
 from modeling_module.utils.temporal_expander import TemporalExpander
 import torch.nn.functional as F
 # -------------------------
@@ -85,7 +84,13 @@ class _ExoMixin(nn.Module):
     - Past Exo: 연속형/범주형 변수를 임베딩 및 풀링(Pooling)하여 잠재 벡터(Latent z)에 주입(Z-Gate).
     """
 
-    def _init_exo(self, cfg: PatchMixerConfig, *, z_dim: int):
+    def _init_exo(
+        self,
+        cfg: PatchMixerConfig,
+        *,
+        z_dim: int,
+        supported_future_shift_spaces: tuple[str, ...],
+    ) -> None:
         """
         외생 변수 처리를 위한 모듈 및 차원 초기화.
         """
@@ -94,10 +99,17 @@ class _ExoMixin(nn.Module):
         self.future_exo_shift_space = str(
             getattr(cfg, "future_exo_shift_space", "output")
         )
-        if self.future_exo_shift_space != "output":
+        known_shift_spaces = ("normalized", "output")
+        if self.future_exo_shift_space not in known_shift_spaces:
             raise ValueError(
-                "PatchMixer future_exo_shift_space currently supports only "
-                "'output'; normalized-space shift is not implemented yet."
+                "PatchMixer future_exo_shift_space must be one of "
+                f"{known_shift_spaces}, got {self.future_exo_shift_space!r}."
+            )
+        if self.future_exo_shift_space not in supported_future_shift_spaces:
+            raise ValueError(
+                f"{type(self).__name__} does not support future_exo_shift_space="
+                f"{self.future_exo_shift_space!r}; supported values are "
+                f"{supported_future_shift_spaces}."
             )
         # Retained for checkpoint/introspection compatibility; it does not
         # control feature scaling or the target-space shift coordinate.
@@ -200,6 +212,46 @@ class _ExoMixin(nn.Module):
                 f"[PatchMixer] future_exo last dimension mismatch: got {actual_dim}, expected {expected_dim}."
             )
 
+    def _uses_normalized_future_shift(self, *, use_revin: bool) -> bool:
+        """Use pre-denorm placement only when target RevIN is active."""
+        return bool(use_revin) and self.future_exo_shift_space == "normalized"
+
+    def _compute_future_exo_residual(
+        self,
+        future_exo: Optional[torch.Tensor],
+        *,
+        reference: torch.Tensor,
+        multiplier: float,
+    ) -> Optional[torch.Tensor]:
+        """Return the trainable [B,H] residual in the configured target space."""
+        if future_exo is None or self.exo_head is None or self.future_exo_dim <= 0:
+            return None
+
+        ex = _pad_or_slice_last_dim(
+            future_exo.float(),
+            self.future_exo_dim,
+            pad_value=0.0,
+        )
+        ex = ex.to(
+            device=reference.device,
+            dtype=reference.dtype,
+            non_blocking=True,
+        )
+        if ex.dim() == 2:
+            ex = ex.unsqueeze(0)
+
+        residual = self.exo_head(ex).squeeze(-1)
+        batch_size, actual_horizon = residual.shape
+        if actual_horizon < self.horizon:
+            padding = residual.new_zeros(
+                (batch_size, self.horizon - actual_horizon)
+            )
+            residual = torch.cat((residual, padding), dim=1)
+        elif actual_horizon > self.horizon:
+            residual = residual[:, :self.horizon]
+
+        return float(multiplier) * residual
+
     def _pool_past_exo(self, past_exo_cont: Optional[torch.Tensor], past_exo_cat: Optional[torch.Tensor]) -> Optional[
         torch.Tensor]:
         """
@@ -260,44 +312,6 @@ class _ExoMixin(nn.Module):
         gate = torch.sigmoid(self._z_gate(z))  # z 상태에 따른 게이트 값(0~1) 계산
         return z + gate * exo_z  # 잔차 연결 방식으로 정보 합산
 
-def apply_exo_shift_linear_trainable(
-    head: nn.Module,
-    future_exo: torch.Tensor,   # (B,H,E) or (H,E)
-    *,
-    horizon: int,
-    out_dtype=None,
-    out_device=None
-) -> torch.Tensor:
-    """
-    Returns:
-        ex: (B, H)
-    """
-    ex = future_exo
-    if ex.dim() == 2:  # (H,E) -> (1,H,E)
-        ex = ex.unsqueeze(0)
-
-    if out_device is None:
-        out_device = ex.device
-    if out_dtype is None:
-        out_dtype = ex.dtype
-
-    ex = ex.to(device=out_device, dtype=out_dtype, non_blocking=True)
-
-    # IMPORTANT:
-    # - do NOT call head.to(device) here (forward 내에서 .to는 지양)
-    # - model/head는 외부에서 이미 device로 올려져 있어야 합니다.
-    ex = head(ex).squeeze(-1)  # (B,H)
-
-    # pad/trim to horizon
-    B, Hx = ex.shape
-    if Hx < horizon:
-        pad = torch.zeros((B, horizon - Hx), device=ex.device, dtype=ex.dtype)
-        ex = torch.cat([ex, pad], dim=1)
-    elif Hx > horizon:
-        ex = ex[:, :horizon]
-
-    return ex
-
 
 class PatchMixerQuantileModel(_ExoMixin):
     """
@@ -306,9 +320,8 @@ class PatchMixerQuantileModel(_ExoMixin):
     - (past exo gate) -> z
     - expander -> f (B,H,F)
     - head -> q_pre (B,Q,H) or (B,H,Q)
-    - (optional clip policy)
-    - RevIN denorm (per-quantile)
-    - (future exo shift) -> out-space add (B,Q,H)
+    - normalized shift -> optional clip -> RevIN denorm, or
+    - RevIN denorm -> output shift
     """
 
     def __init__(self, cfg: PatchMixerConfig):
@@ -387,7 +400,11 @@ class PatchMixerQuantileModel(_ExoMixin):
         self.exo_scale = float(getattr(cfg, "exo_scale", 1.0))
 
         # exo init
-        self._init_exo(cfg, z_dim=self.z_dim)
+        self._init_exo(
+            cfg,
+            z_dim=self.z_dim,
+            supported_future_shift_spaces=("output", "normalized"),
+        )
 
     def _to_bqh(self, q: torch.Tensor) -> torch.Tensor:
         """
@@ -414,9 +431,8 @@ class PatchMixerQuantileModel(_ExoMixin):
         exo_is_normalized: Optional[bool] = None,
         **kwargs,
     ):
-        # The current future shift is always added after target denormalization.
         # exo_is_normalized is a deprecated accepted-and-ignored API argument;
-        # input feature scaling belongs to the data-preparation contract.
+        # shift placement is controlled only by future_exo_shift_space.
 
         self._validate_future_exo_contract(future_exo, batch_size=x.size(0))
 
@@ -440,6 +456,18 @@ class PatchMixerQuantileModel(_ExoMixin):
         base_last = x_in[:, -1, 0]  # (B,)
         q = q + base_last[:, None, None]
 
+        use_normalized_shift = self._uses_normalized_future_shift(
+            use_revin=self.use_revin
+        )
+        if use_normalized_shift:
+            residual = self._compute_future_exo_residual(
+                future_exo,
+                reference=q,
+                multiplier=self.exo_scale,
+            )
+            if residual is not None:
+                q = q + residual.unsqueeze(1)
+
         # 4) eval-only clip in RevIN normalized space
         if (not self.training) and self.use_revin:
             c = self.q_clip_eval
@@ -457,18 +485,15 @@ class PatchMixerQuantileModel(_ExoMixin):
         else:
             q_raw = q
 
-        # 6) future exo shift (out-space add)
-        #   - apply_exo_shift_linear_trainable를 사용 (grad flow OK)
-        if (future_exo is not None) and (self.exo_head is not None) and (self.future_exo_dim > 0):
-            fe = _pad_or_slice_last_dim(future_exo.float(), self.future_exo_dim, pad_value=0.0)
-            ex = apply_exo_shift_linear_trainable(
-                self.exo_head,
-                fe,
-                horizon=self.horizon,
-                out_dtype=q_raw.dtype,
-                out_device=q_raw.device,
-            )  # (B,H)
-            q_raw = q_raw + (self.exo_scale * ex).unsqueeze(1)  # (B,Q,H)
+        # 6) output-space mode, or identity-space fallback when RevIN is off
+        if not use_normalized_shift:
+            residual = self._compute_future_exo_residual(
+                future_exo,
+                reference=q_raw,
+                multiplier=self.exo_scale,
+            )
+            if residual is not None:
+                q_raw = q_raw + residual.unsqueeze(1)
 
         return {"q": q_raw}
 
@@ -584,7 +609,11 @@ class PatchMixerEnhancedModel(_ExoMixin):
             self.register_buffer("dw_gain", torch.tensor(1.0))
 
         # 7) exogenous mixin init
-        self._init_exo(cfg, z_dim=z_dim)
+        self._init_exo(
+            cfg,
+            z_dim=z_dim,
+            supported_future_shift_spaces=("output", "normalized"),
+        )
 
         # ---- 안정화(권장): z/f LayerNorm ----
         self.use_z_ln = bool(getattr(cfg, "use_z_ln", True))
@@ -673,6 +702,18 @@ class PatchMixerEnhancedModel(_ExoMixin):
             base_last = x_in[:, -1, 0]          # (B,)
             y = y_pre + base_last[:, None]      # (B,H)
 
+            use_normalized_shift = self._uses_normalized_future_shift(
+                use_revin=self.use_revin
+            )
+            if use_normalized_shift:
+                residual = self._compute_future_exo_residual(
+                    future_exo,
+                    reference=y,
+                    multiplier=self.exo_scale,
+                )
+                if residual is not None:
+                    y = y + residual
+
             # eval clip (optional)
             if not self.training:
                 c = getattr(self, "y_clip_eval", None)
@@ -685,17 +726,15 @@ class PatchMixerEnhancedModel(_ExoMixin):
             else:
                 y_raw = y
 
-            # future exo shift (out-space add)
-            if (future_exo is not None) and (self.exo_head is not None) and (self.future_exo_dim > 0):
-                fe = _pad_or_slice_last_dim(future_exo.float(), self.future_exo_dim, pad_value=0.0)
-                ex = apply_exo_shift_linear_trainable(
-                    self.exo_head,
-                    fe,
-                    horizon=self.horizon,
-                    out_dtype=y_raw.dtype,
-                    out_device=y_raw.device,
-                )  # (B,H)
-                y_raw = y_raw + (self.exo_scale * ex)
+            # output-space mode, or identity-space fallback when RevIN is off
+            if not use_normalized_shift:
+                residual = self._compute_future_exo_residual(
+                    future_exo,
+                    reference=y_raw,
+                    multiplier=self.exo_scale,
+                )
+                if residual is not None:
+                    y_raw = y_raw + residual
 
             # nonneg policy (optional)
             if self.final_nonneg:
@@ -711,16 +750,29 @@ class PatchMixerEnhancedModel(_ExoMixin):
         loc = loc * self.out_scale + self.out_bias
         loc = loc + self.dw_gain * self.dw_head(loc.transpose(1, 2)).transpose(1, 2)
 
+        use_normalized_shift = self._uses_normalized_future_shift(
+            use_revin=self.use_revin
+        )
+        if use_normalized_shift:
+            residual = self._compute_future_exo_residual(
+                future_exo,
+                reference=loc,
+                multiplier=1.0,
+            )
+            if residual is not None:
+                loc = loc + residual.unsqueeze(-1)
+
         if self.use_revin:
             loc = self.revin_layer(loc, "denorm")  # (B,H,1)
 
-        if (future_exo is not None) and (self.exo_head is not None) and (self.future_exo_dim > 0):
-            fe = _pad_or_slice_last_dim(future_exo.float(), self.future_exo_dim, pad_value=0.0)
-            ex = apply_exo_shift_linear(
-                self.exo_head, fe, horizon=self.horizon,
-                out_dtype=loc.dtype, out_device=loc.device,
-            )  # (B,H)
-            loc = loc + ex.unsqueeze(-1)
+        if not use_normalized_shift:
+            residual = self._compute_future_exo_residual(
+                future_exo,
+                reference=loc,
+                multiplier=1.0,
+            )
+            if residual is not None:
+                loc = loc + residual.unsqueeze(-1)
 
         if self.final_nonneg:
             loc = torch.clamp_min(loc, 0.0)

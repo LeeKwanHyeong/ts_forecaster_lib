@@ -180,16 +180,17 @@ peak allocation over Endogenous in this rerun. The result file
 The current Point and Quantile implementations inherit `_ExoMixin`. Their
 active construction and forward path is:
 
-1. `_init_exo` resolves the output-only `future_exo_shift_space` contract and
-   registers the future MLP, categorical embeddings, latent projection, and
-   latent gate when the configured widths require them.
+1. `_init_exo` resolves `future_exo_shift_space`, validates each model's
+   supported values, and registers the future MLP, categorical embeddings,
+   latent projection, and latent gate when the configured widths require them.
 2. `_validate_future_exo_contract` validates the future `[B,H,E]` tensor at the
    model boundary.
 3. `_inject_past_exo_z_gate` calls `_pool_past_exo` and injects the pooled past
    features after the backbone.
-4. Point and Quantile forward methods call `apply_exo_shift_linear_trainable`
-   directly to add the future shift in output space. The packed Distribution
-   path calls `apply_exo_shift_linear` directly for its location parameter.
+4. Point and Quantile call `_compute_future_exo_residual` and place the result
+   before target denormalization for `normalized` or after it for `output`.
+   The packed Distribution path uses the same boundary for `loc` only, after
+   location refinement and on the selected side of denormalization.
 
 `_apply_future_exo_shift` had no call site and was removed after this baseline
 was established. It is not part of the behavioral contract.
@@ -213,6 +214,24 @@ tensors, two categorical embedding tables, two latent-projection tensors, and
 two latent-gate tensors. Their exact shapes, full state-schema hashes, output
 values, and gradient reachability are pinned in
 `tests/test_patchmixer_exogenous_mixin_contract.py`.
+
+### Normalized future-shift boundary
+
+ADR 0003 fixes `normalized` as a target RevIN-space additive residual, not an
+exogenous-input preprocessing flag. With the current un-affined,
+last-subtracted RevIN, adding residual `r` before denormalization produces a raw
+pre-transform effect of `r * target_history_std`.
+
+The insertion point is after the target anchor for Point and Quantile, and after
+all location refinements for Distribution. It is before target denormalization;
+Quantile eval clipping and all final non-negative transforms remain downstream.
+Quantile broadcasts one shift across all quantiles, while Distribution changes
+only `loc`. `use_revin=False` makes normalized and output spaces exactly equal.
+
+Point and Quantile now execute both values in the serialized
+`Literal["output", "normalized"]` schema, and Distribution applies both values
+to `loc` only. There is no silent fallback to `output`; when RevIN is disabled,
+normalized intentionally uses the identity/output insertion path.
 
 ## Default model strategy
 
