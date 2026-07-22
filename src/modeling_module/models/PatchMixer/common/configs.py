@@ -173,7 +173,8 @@ class PatchMixerConfig(TrainingConfig):
     learn_dw_gain: bool = True  # Depthwise Conv 이득(Gain) 학습 여부
 
     use_revin: bool = True
-    q_clip_norm = 10.0
+    # RevIN normalized-space eval clip; None or <=0 disables it.
+    q_clip_norm: Optional[float] = 10.0
 
 
 

@@ -369,14 +369,9 @@ class PatchMixerQuantileModel(_ExoMixin):
         self.z_ln = nn.LayerNorm(self.z_dim) if self.use_z_ln else nn.Identity()
         self.f_ln = nn.LayerNorm(self.f_out) if self.use_f_ln else nn.Identity()
 
-        # ---- clip policy ----
-        # eval 시에만 tanh clip (학습 중 포화로 gradient 0 방지)
-        self.q_clip_eval = float(getattr(cfg, "q_clip_norm", 10.0))
-        # 학습 중에는 필요하면 "hard clamp"로만 안전장치(포화 tanh보다 덜 치명적)
-        # None이면 clamp 없음
-        self.q_clip_train = getattr(cfg, "q_clip_train", None)
-        if self.q_clip_train is not None:
-            self.q_clip_train = float(self.q_clip_train)
+        # Eval-only clipping is expressed in RevIN normalized-space units.
+        q_clip_norm = getattr(cfg, "q_clip_norm", 10.0)
+        self.q_clip_eval = None if q_clip_norm is None else float(q_clip_norm)
 
         # ---- future exo shift scaling (exo가 backbone을 압도하는 것 방지용) ----
         self.exo_scale = float(getattr(cfg, "exo_scale", 1.0))
@@ -435,11 +430,8 @@ class PatchMixerQuantileModel(_ExoMixin):
         base_last = x_in[:, -1, 0]  # (B,)
         q = q + base_last[:, None, None]
 
-        # 4) clip policy
-        if self.training:
-            # 추천: 학습 중엔 clip 하지 않기
-            pass
-        else:
+        # 4) eval-only clip in RevIN normalized space
+        if (not self.training) and self.use_revin:
             c = self.q_clip_eval
             if (c is not None) and (c > 0):
                 q = c * torch.tanh(q / c)
