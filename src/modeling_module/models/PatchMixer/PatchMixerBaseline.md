@@ -289,6 +289,81 @@ The compatibility and evidence decision is therefore:
   requirement. Neither shift mode improves both rolling and last-origin MAE
   consistently enough to replace it globally.
 
+## Seed-33 regression diagnosis and bounded residual candidate
+
+Commit `f175ca1c4fb357e5982470afd58985b0ba62b8ff` added inference-only
+diagnostics without changing the three frozen training or prediction paths.
+The seed-33 histories, metrics, and prediction hashes remained exactly equal to
+the `4d1ce99` baseline. The diagnostic file
+`patchmixer_shift_seed33_f175ca1_5090.json` has SHA-256
+`7d6133b09c895f086b18b50fe222a733bceb2d9394627e7612f9e6c935f5d90d`.
+
+The regression is not explained by the future head's zero-input bias or by
+history scale alone:
+
+- Relative to output, unbounded normalized regressed 7.949% in rolling MAE.
+  Every one of the 27 horizons and all seven test series regressed.
+- The rolling error-delta correlation with history standard deviation was only
+  0.151. All four history-scale quartiles regressed.
+- The normalized shift's mean absolute effect was 20,551 raw target units, or
+  0.1173 history-standard-deviation units; its p95 was 0.2481 units.
+- The feature-conditioned component averaged 0.1204 units, while the
+  zero-input bias component averaged only 0.0069 units.
+- Series 12 received the largest standardized effect, 0.2219 units on average,
+  and regressed 20.453%, despite having a mid-range history standard deviation.
+- Removing the shift from the already-trained normalized model made rolling
+  MAE 11.170% worse. The backbone and future head had therefore co-adapted;
+  this was not an isolated inference-time outlier problem.
+
+A parameter-free soft bound was selected instead of a free scalar gate. A
+trainable scalar can be cancelled by rescaling the future head and would add a
+checkpoint parameter without guaranteeing a limit. The opt-in config
+`future_exo_normalized_residual_limit=0.15` applies:
+
+```text
+r_bounded = 0.15 * tanh(r / 0.15)
+```
+
+The limit is expressed in target RevIN standard-deviation units and is valid
+only with `future_exo_shift_space="normalized"` and `use_revin=True`. `None`
+preserves the prior equation. It adds no parameter or state-dict key, and the
+output path remains outside the bound branch.
+
+The clean RTX 5090 run at commit
+`213dd0782102c9f50c10f7295999a437eed5e4e8` repeated the same FP32 accuracy
+and BF16 100-step performance protocol. The legacy three strategies again
+matched the frozen baseline exactly.
+
+| Strategy | Rolling mean MAE | Last-origin mean MAE | Rolling vs output | Last-origin vs output | Rolling seed wins vs output | Last-origin seed wins vs output |
+|---|---:|---:|---:|---:|---:|---:|
+| Future output shift | 46,332.03 | 49,344.53 | baseline | baseline | - | - |
+| Future normalized shift | 46,530.15 | 50,684.36 | -0.805% | -3.629% | 2/3 | 1/3 |
+| Normalized soft bound 0.15 | 47,032.77 | 52,194.73 | -2.063% | -6.598% | 2/3 | 0/3 |
+
+The bounded candidate improved rolling MAE over output by 1.596% and 5.419%
+for seeds 11 and 22, then regressed 13.203% on seed 33. It lost all three
+last-origin comparisons. On seed 33 it reduced series 12's rolling regression
+from 20.453% to 10.821%, but moved the failure to series 10, whose regression
+grew from 8.858% to 24.827%. A single global residual cap therefore redistributes
+the series error instead of fixing generalization.
+
+| Strategy | Parameters | Training step | Inference | Training peak VRAM | Inference peak VRAM |
+|---|---:|---:|---:|---:|---:|
+| Endogenous | 7,077,643 | 5.061 ms | 1.571 ms | 243.22 MiB | 157.75 MiB |
+| Future output shift | 7,078,156 | 5.397 ms | 1.669 ms | 241.63 MiB | 158.34 MiB |
+| Future normalized shift | 7,078,156 | 5.420 ms | 1.635 ms | 241.63 MiB | 158.34 MiB |
+| Normalized soft bound 0.15 | 7,078,156 | 5.489 ms | 1.709 ms | 241.63 MiB | 158.34 MiB |
+
+The bound adds 1.705% training latency and 2.372% inference latency over output
+in the final run, with identical parameters and measured peak VRAM. The result
+file `patchmixer_shift_bounded_213dd07_5090.json` has SHA-256
+`9d3b3837ee879667fc9a58912112109d4ed7275cbbd10fcc5758be7625c98baf`.
+
+The 0.15 bound is retained only as an explicit safety/diagnostic option. It is
+rejected as an accuracy strategy and must not be enabled by a default preset.
+`future_exo_shift_space="output"` remains the compatibility default; Endogenous
+remains the preferred route when future covariates are not required.
+
 ## Default model strategy
 
 - Endogenous point forecasting: `patchmixer_original`
