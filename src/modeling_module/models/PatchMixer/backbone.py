@@ -220,30 +220,6 @@ class PatchMixerOriginalBackbone(nn.Module):
         return x
 
 
-class FeatureAlign(nn.Module):
-    """
-    입력 텐서의 차원을 동적으로 감지하여 목표 차원(out_dim)으로 투영하는 유틸리티 모듈.
-
-    기능:
-    - 선형 레이어(Linear)를 이용한 차원 맞춤.
-    - 입력 차원이 변경될 경우 자동으로 내부 가중치를 재생성(Lazy Initialization).
-    """
-
-    def __init__(self, out_dim: int):
-        super().__init__()
-        self.out_dim = out_dim
-        self.fc: nn.Linear | None = None
-        self.in_dim: int | None = None
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        d = x.size(-1)
-        # 초기화 상태이거나 입력 차원이 달라진 경우 레이어 재생성
-        if (self.fc is None) or (self.in_dim != d):
-            self.fc = nn.Linear(d, self.out_dim, bias=True).to(x.device)
-            self.in_dim = d
-        return self.fc(x)
-
-
 class PatchMixerLayer(nn.Module):
     """
     PatchMixer의 핵심 연산 블록. Depthwise Conv와 Pointwise Conv를 사용해 시간/채널 정보를 혼합.
@@ -323,7 +299,7 @@ class PatchMixerBackbone(nn.Module):
     Output: (B, Out_Dim)
     """
 
-    def __init__(self, configs, revin: bool = True, affine: bool = True, subtract_last: bool = False):
+    def __init__(self, configs):
         super().__init__()
         self.configs = configs
 
@@ -450,8 +426,6 @@ class MultiScalePatchMixerBackbone(nn.Module):
             per_branch_dim: int = 128,
             fused_dim: int = 256,
             fusion: str = "concat",  # ['concat', 'gated']
-            affine: bool = True,
-            subtract_last: bool = False,
     ):
         super().__init__()
         self.fusion = fusion
@@ -465,8 +439,8 @@ class MultiScalePatchMixerBackbone(nn.Module):
             cfg.stride = int(st)
             cfg.mixer_kernel_size = int(ks)
 
-            # 개별 스케일 백본 (RevIN은 외부에서 처리 가정하에 False)
-            branch = PatchMixerBackbone(cfg, revin=False)
+            # RevIN is applied once by the parent quantile model.
+            branch = PatchMixerBackbone(cfg)
             self.branches.append(branch)
             # 차원 통일용 투영 레이어
             self.projs.append(nn.Linear(branch.out_dim, per_branch_dim))
@@ -502,61 +476,4 @@ class MultiScalePatchMixerBackbone(nn.Module):
             S = torch.stack(reps, dim=1)  # (B, n_branch, per_branch_dim)
             z = (G.unsqueeze(-1) * S).sum(dim=1)  # 가중 합
             z = self.fuse(z)  # (B, fused_dim)
-        return z
-
-
-class PatchMixerBackboneWithPatcher(nn.Module):
-    """
-    외부 패처(External Patcher) 모듈을 사용하는 확장형 백본.
-
-    특징:
-    - 기본 Unfold 방식 대신 DynamicPatcher 등 복잡한 패치 생성기 사용 가능.
-    - 패처가 생성한 임베딩을 그대로 Mixer 블록에 전달.
-
-    입력: (B, L, N)
-    출력: (B, Out_Dim)
-    """
-
-    def __init__(self, configs, patcher: nn.Module, e_layers: int | None = None, dropout_rate: float | None = None):
-        super().__init__()
-        self.cfg = configs
-        self.patcher = patcher
-
-        # 패처에서 차원 정보 추출
-        self.a: int = int(getattr(patcher, "patch_num"))
-        self.d_model: int = int(getattr(patcher, "d_model"))
-        self.patch_repr_dim: int = self.a * self.d_model
-        self.out_dim: int = self.patch_repr_dim
-
-        self.depth = int(e_layers if e_layers is not None else configs.e_layers)
-        self.dropout_rate = float(dropout_rate if dropout_rate is not None else configs.head_dropout)
-
-        # Mixer 블록 스택
-        self.blocks = nn.ModuleList([
-            PatchMixerLayer(d_model=self.d_model, kernel_size=int(configs.mixer_kernel_size), dropout=self.dropout_rate)
-            for _ in range(self.depth)
-        ])
-        self.flatten = nn.Flatten(start_dim=-2)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        B, L, N = x.shape
-        # 1. 외부 패처 호출 (패치 생성 및 투영)
-        z = self.patcher(x)  # (B*N, A, D)
-
-        # 2. Mixer 블록 통과
-        # 주의: PatchMixerLayer는 (D, A) 순서를 기대하므로
-        # 구현에 따라 여기서 permute(0, 2, 1)이 필요할 수 있음.
-        # 현재 코드에서는 patcher 출력이 (B*N, A, D)이고
-        # PatchMixerLayer 내부 Conv1d가 (D, D, k)이므로 차원 확인 필요.
-        # 일반적인 Conv1d 입력은 (Batch, Channel, Length) -> (B*N, D, A)
-
-        # 만약 patcher가 (B*N, A, D)를 뱉는다면 아래 루프 전에 permute 필요 가능성 높음
-        z = z.permute(0, 2, 1)  # (B*N, D, A)로 변환 가정
-
-        for blk in self.blocks:
-            z = blk(z)  # (B*N, D, A)
-
-        # 3. 결과 평탄화 및 집약
-        z = self.flatten(z)  # (B*N, D*A)
-        z = z.view(B, N, -1).mean(1)  # (B, D*A) - 변수 축 평균
         return z
