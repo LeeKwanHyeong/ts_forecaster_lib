@@ -145,6 +145,44 @@ than Endogenous until a redesigned gate passes the same three-seed contract.
 Future-feature results also assume every horizon value is available or forecast
 at the prediction origin; upstream feature-forecast error is outside this test.
 
+## Exogenous implementation contract
+
+The current Point and Quantile implementations inherit `_ExoMixin`. Their
+active construction and forward path is:
+
+1. `_init_exo` registers the future MLP, categorical embeddings, latent
+   projection, and latent gate when the configured widths require them.
+2. `_validate_future_exo_contract` validates the future `[B,H,E]` tensor at the
+   model boundary.
+3. `_inject_past_exo_z_gate` calls `_pool_past_exo` and injects the pooled past
+   features after the backbone.
+4. Point and Quantile forward methods call `apply_exo_shift_linear_trainable`
+   directly to add the future shift in output space. The packed Distribution
+   path calls `apply_exo_shift_linear` directly for its location parameter.
+
+`_apply_future_exo_shift` has no call site and is not part of the behavioral
+contract. It is retained only until the subsequent dead-helper cleanup.
+
+The machine-enforced fixture uses lookback/horizon 8/2, `d_model=8`, one
+Quantile branch with `fused_dim=8`, two past continuous features, two past
+categorical features with embedding dimensions 3/4, and two future continuous
+features.
+
+| Variant | Total parameters | Exogenous parameters | State-dict keys |
+|---|---:|---:|---:|
+| Point Endogenous | 12,323 | 0 | 45 |
+| Point Exogenous | 13,999 | 1,676 | 55 |
+| Quantile Endogenous | 2,372 | 0 | 53 |
+| Quantile Exogenous | 2,824 | 452 | 63 |
+| Distribution Endogenous | 12,332 | 0 | 45 |
+| Distribution Exogenous | 14,008 | 1,676 | 55 |
+
+Both Exogenous variants register the same ten parameter names: four future-head
+tensors, two categorical embedding tables, two latent-projection tensors, and
+two latent-gate tensors. Their exact shapes, full state-schema hashes, output
+values, and gradient reachability are pinned in
+`tests/test_patchmixer_exogenous_mixin_contract.py`.
+
 ## Default model strategy
 
 - Endogenous point forecasting: `patchmixer_original`
