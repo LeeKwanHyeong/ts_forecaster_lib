@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import math
 from typing import Any, List, Optional
 
 import torch
@@ -250,84 +249,6 @@ class _ExoMixin(nn.Module):
         exo_z = self._z_exo_proj(v)  # 외생 정보를 잠재 공간으로 변환
         gate = torch.sigmoid(self._z_gate(z))  # z 상태에 따른 게이트 값(0~1) 계산
         return z + gate * exo_z  # 잔차 연결 방식으로 정보 합산
-
-# =====================================================================
-# Quantile model
-# =====================================================================
-def _to_BQH(q: torch.Tensor, *, horizon: int, Q: int) -> torch.Tensor:
-    """
-    head 출력이 (B,Q,H) 또는 (B,H,Q)로 올 수 있으므로 (B,Q,H)로 통일.
-    """
-    if q.dim() != 3:
-        raise RuntimeError(f"Unexpected q rank: {q.dim()}")
-
-    if q.shape[1] == Q and q.shape[2] == horizon:          # (B,Q,H)
-        return q.contiguous()
-    if q.shape[1] == horizon and q.shape[2] == Q:          # (B,H,Q)
-        return q.transpose(1, 2).contiguous()              # -> (B,Q,H)
-
-    raise RuntimeError(f"Unexpected q shape: {tuple(q.shape)} (expect (B,Q,H) or (B,H,Q))")
-
-
-def _pad_or_trim_H(ex: torch.Tensor, *, horizon: int) -> torch.Tensor:
-    """
-    ex: (B,H) 형태, H를 horizon에 맞춤.
-    """
-    if ex.dim() != 2:
-        raise RuntimeError(f"ex must be (B,H). got {tuple(ex.shape)}")
-
-    B, Hx = ex.shape
-    if Hx == horizon:
-        return ex
-    if Hx < horizon:
-        pad = ex.new_zeros((B, horizon - Hx))
-        return torch.cat([ex, pad], dim=1)
-    return ex[:, :horizon]
-
-
-def _init_softplus_inv(x: float) -> float:
-    """
-    softplus(a)=x 가 되도록 하는 a의 초기값 (x>0)
-    """
-    # softplus(a)=log(1+exp(a))=x => exp(a)=exp(x)-1 => a=log(exp(x)-1)
-    return float(math.log(math.exp(float(x)) - 1.0))
-
-
-def _zero_init_linear(m: nn.Module) -> None:
-    if isinstance(m, nn.Linear):
-        nn.init.zeros_(m.weight)
-        if m.bias is not None:
-            nn.init.zeros_(m.bias)
-
-
-def _try_zero_init_decomp_head(head: nn.Module) -> None:
-    """
-    DecompositionQuantileHead 내부 구조를 모르므로,
-    실무에서 흔히 쓰는 이름들을 '있으면' 0-init 하는 방어적 초기화.
-    (없으면 조용히 스킵)
-    """
-    # 1) head.core.* 계열
-    core = getattr(head, "core", None)
-    if core is not None:
-        for name in ["trend_head", "irreg_head", "delta_head"]:
-            m = getattr(core, name, None)
-            if isinstance(m, nn.Linear):
-                _zero_init_linear(m)
-
-        # season_time_head가 Sequential인 케이스: 마지막 Linear만 0-init
-        sth = getattr(core, "season_time_head", None)
-        if isinstance(sth, nn.Sequential) and len(sth) > 0:
-            for layer in reversed(sth):
-                if isinstance(layer, nn.Linear):
-                    _zero_init_linear(layer)
-                    break
-
-    # 2) 혹시 head에 직접 붙어있는 Linear가 있으면 전부 0-init(과격할 수 있어 옵션으로만 사용 권장)
-    # 필요 시 주석 해제
-    # for m in head.modules():
-    #     if isinstance(m, nn.Linear):
-    #         _zero_init_linear(m)
-
 
 def apply_exo_shift_linear_trainable(
     head: nn.Module,
@@ -670,37 +591,6 @@ class PatchMixerEnhancedModel(_ExoMixin):
         self.f_ln = nn.LayerNorm(self.f_out) if self.use_f_ln else nn.Identity()
 
         self.exo_scale = float(getattr(cfg, "exo_scale", 1.0))
-
-
-
-    def _loc_index(self) -> int:
-        if self.param_names is not None and "loc" in self.param_names:
-            return int(self.param_names.index("loc"))
-        # default convention
-        if self.out_mul == 3:
-            return 1  # [df_raw, loc, scale_raw]
-        return 0      # [loc, scale_raw] or others
-
-    def _clip_nonloc_params_(self, out: torch.Tensor) -> torch.Tensor:
-        """
-        out: (B,H,out_mult)
-        loc 제외 나머지 raw 파라미터를 clip 하여 overflow/NaN 위험을 줄입니다.
-        """
-        if self.out_mul <= 1:
-            return out
-        loc_i = self._loc_index()
-        if self.dist_param_clip is None or self.dist_param_clip <= 0:
-            return out
-
-        # clone to avoid in-place on autograd graph unexpectedly
-        o = out
-        # non-loc indices
-        for j in range(self.out_mul):
-            if j == loc_i:
-                continue
-            o[..., j] = o[..., j].clamp(min=-self.dist_param_clip, max=self.dist_param_clip)
-        return o
-
     # -----------------------------
     # stable inverse transforms
     # -----------------------------
