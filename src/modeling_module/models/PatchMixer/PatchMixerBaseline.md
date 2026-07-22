@@ -160,8 +160,8 @@ active construction and forward path is:
    directly to add the future shift in output space. The packed Distribution
    path calls `apply_exo_shift_linear` directly for its location parameter.
 
-`_apply_future_exo_shift` has no call site and is not part of the behavioral
-contract. It is retained only until the subsequent dead-helper cleanup.
+`_apply_future_exo_shift` had no call site and was removed after this baseline
+was established. It is not part of the behavioral contract.
 
 The machine-enforced fixture uses lookback/horizon 8/2, `d_model=8`, one
 Quantile branch with `fused_dim=8`, two past continuous features, two past

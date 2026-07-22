@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from typing import Any, List, Optional, Tuple
+from typing import Any, List, Optional
 
 import torch
 import torch.nn as nn
@@ -250,36 +250,6 @@ class _ExoMixin(nn.Module):
         exo_z = self._z_exo_proj(v)  # 외생 정보를 잠재 공간으로 변환
         gate = torch.sigmoid(self._z_gate(z))  # z 상태에 따른 게이트 값(0~1) 계산
         return z + gate * exo_z  # 잔차 연결 방식으로 정보 합산
-
-    def _apply_future_exo_shift(self, y: torch.Tensor, future_exo: Optional[torch.Tensor], *,
-                                exo_is_normalized: bool) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        """
-        미래 외생 변수(Future Exo)를 사용하여 예측값(y)을 보정(Shift).
-
-        반환:
-            (보정된 y, 계산된 Shift값)
-        """
-        if future_exo is None or self.exo_head is None or self.future_exo_dim <= 0:
-            return y, None
-
-        # 차원 조정
-        fe = _pad_or_slice_last_dim(future_exo.float(), self.future_exo_dim, pad_value=0.0)
-
-        # 보정값(Shift) 계산
-        # apply_exo_shift_linear 함수가 외부에 정의되어 있다고 가정
-        ex = apply_exo_shift_linear(
-            self.exo_head,
-            fe,
-            horizon=int(getattr(self, "horizon")),
-            out_dtype=y.dtype,
-            out_device=y.device,
-        )
-
-        # 정규화된 공간에서의 연산이 허용된 경우 보정 적용
-        if exo_is_normalized:
-            y = y + ex
-
-        return y, ex
 
 # =====================================================================
 # Quantile model
