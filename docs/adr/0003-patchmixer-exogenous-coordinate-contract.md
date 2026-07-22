@@ -185,3 +185,20 @@ The normalized implementation is complete only when all of these hold:
    data, split, loss, seeds, and RTX 5090 performance protocol.
 5. Promote a new default only when both rolling and last-origin evidence justify
    the compatibility cost.
+
+## Validation result
+
+The clean RTX 5090 run at commit
+`4d1ce99dfa1a53ee9a232b87c56f5b72a6d3c5d4` completed step 4 with seeds
+11/22/33. The output path exactly reproduced the previous baseline's training
+histories and prediction hashes. Relative to output, normalized had -0.805%
+mean rolling MAE improvement and -3.629% mean last-origin MAE improvement. It
+won 2/3 rolling seeds but only 1/3 last-origin seeds, with a 7.949% rolling
+regression on seed 33.
+
+The two shift modes have identical parameters and measured peak VRAM.
+Normalized added 0.392% fixed-step training latency and 3.140% inference
+latency over output in this run. The evidence therefore does not satisfy step
+5: `output` remains the compatibility default, while `normalized` remains an
+explicit opt-in. Endogenous remains preferred when future covariates are not a
+required model input.

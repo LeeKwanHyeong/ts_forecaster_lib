@@ -29,6 +29,10 @@ prediction 결과는 현재 location을 `{"point": ...}`로 노출합니다.
 accuracy promotion 상태가 아닙니다. 상세 수치와 제약은
 [PatchMixerBaseline.md](PatchMixerBaseline.md)에 고정합니다.
 
+Future shift 좌표의 기본값은 checkpoint 호환성을 포함해 `output`을 유지합니다. `normalized`는
+명시적으로 선택할 수 있지만, RTX 5090 3-seed 비교에서 output보다 rolling MAE가 평균 0.805%,
+last-origin MAE가 평균 3.629% 나빠 일반 기본값으로 승격하지 않습니다.
+
 ## Data contract
 
 - target input: `(B, lookback, 1)`
