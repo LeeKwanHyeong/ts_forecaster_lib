@@ -94,12 +94,65 @@ The generated `patchmixer_5090_multiseed_summary.json` has SHA-256
 All decision guardrails passed, so the consolidation is behavior-preserving for
 the tested contract and does not change the capability defaults below.
 
+## RTX 5090 gated-fusion validation
+
+Commit `cf6cb5c99535e7716bc8f8e24edc58546624a5b0` separates the current
+PatchMixer exogenous path into four controlled cases: target-only Endogenous,
+past `z_gate` only, future output-shift only, and Full (`z_gate` plus future
+shift). The run used a clean detached checkout, the same Walmart dataset, FP32
+MSE training with seeds 11/22/33, at most 100 epochs with patience 15, and BF16
+batch-64 performance measurements after 20 warm-up steps.
+
+Positive accuracy values mean that the candidate has lower MAE than its
+baseline.
+
+| Candidate vs baseline | Rolling MAE mean | Last-origin MAE mean | Rolling seed wins | Last-origin seed wins |
+|---|---:|---:|---:|---:|
+| Past gate vs Endogenous | -0.817% | -3.456% | 1/3 | 0/3 |
+| Future shift vs Endogenous | +0.520% | -2.040% | 2/3 | 1/3 |
+| Full vs Endogenous | -1.814% | -3.904% | 1/3 | 0/3 |
+| Full vs Future shift | -2.387% | -1.830% | 1/3 | 0/3 |
+
+The trained Full model is sensitive to the past path, but that sensitivity is
+not consistently beneficial. Replacing standardized past inputs with zero
+changes forecast values by 12,484-15,144 units on average depending on the
+seed, while mean rolling MAE improves by 0.492% and mean last-origin MAE
+regresses by 1.466%. Removing future inputs changes predictions by only 11-21
+units and changes MAE by less than 0.01%, so the future shift is effectively
+ignored at the current target scale.
+
+The latent gate is also strongly saturated. Across the three seeds its mean
+activation is 0.510, but 38.36% of activations are below 0.05 and 40.25% are
+above 0.95. This 78.62% saturation supports redesigning the pooling and gate
+stabilization rather than promoting the current formulation.
+
+| PatchMixer case | Parameters | BF16 training step | BF16 inference | Training peak VRAM | Inference peak VRAM |
+|---|---:|---:|---:|---:|---:|
+| Endogenous | 7,077,643 | 4.978 ms | 1.504 ms | 243.22 MiB | 157.75 MiB |
+| Past gate | 7,892,107 | 5.455 ms | 1.718 ms | 252.96 MiB | 164.66 MiB |
+| Future shift | 7,078,156 | 5.249 ms | 1.602 ms | 241.63 MiB | 158.00 MiB |
+| Full | 7,892,620 | 5.555 ms | 1.764 ms | 253.01 MiB | 164.70 MiB |
+
+Full fusion adds 814,977 parameters, 11.58% training-step latency, 17.24%
+inference latency, 9.79 MiB training peak allocation, and 6.95 MiB inference
+peak allocation over Endogenous. The comparison result JSON has SHA-256
+`e3dea5475aa8bb6d94da0dbd3059e75b905ed48dfcf219db3314d4d5f3f9c507`.
+
+This evidence does not promote the current gated fusion as an accuracy default.
+`patchmixer_exogenous` remains the explicit PatchMixer capability route when a
+caller requires exogenous inputs, but it must not be presented as more accurate
+than Endogenous until a redesigned gate passes the same three-seed contract.
+Future-feature results also assume every horizon value is available or forecast
+at the prediction origin; upstream feature-forecast error is outside this test.
+
 ## Default model strategy
 
 - Endogenous point forecasting: `patchmixer_original`
-- Point forecasting with exogenous inputs: `patchmixer_base`
+- Point forecasting with exogenous inputs: `patchmixer_exogenous` (explicit
+  capability route; current gated fusion is not accuracy-promoted)
 - Distribution forecasting: `patchmixer_base`
 - Quantile forecasting: `patchmixer_quantile`
+- Quantile forecasting with exogenous inputs: `patchmixer_quantile_exogenous`
 
 Callers can resolve this policy with `get_patchmixer_default_model_key`. The
 public `patchmixer` family still expands to `patchmixer_base` followed by
