@@ -4,7 +4,7 @@ from typing import Any, Optional
 
 import torch
 
-from .PatchMixer import PatchMixerModel, PatchMixerQuantileModel
+from .PatchMixer import PatchMixerEnhancedModel, PatchMixerQuantileModel
 
 
 def patchmixer_exogenous_widths(cfg: Any) -> tuple[int, int, int]:
@@ -60,7 +60,7 @@ def _validate_required_inputs(
         raise RuntimeError(f"{model_name} is missing required inputs: {', '.join(missing)}.")
 
 
-class PatchMixerEndogenousModel(PatchMixerModel):
+class PatchMixerEndogenousModel(PatchMixerEnhancedModel):
     """Enhanced PatchMixer with a strict target-only input contract."""
 
     architecture_variant = "endogenous"
@@ -80,7 +80,7 @@ class PatchMixerEndogenousModel(PatchMixerModel):
         return super().forward(x, part_ids=part_ids)
 
 
-class PatchMixerExogenousModel(PatchMixerModel):
+class PatchMixerExogenousModel(PatchMixerEnhancedModel):
     """Enhanced PatchMixer with gated latent fusion and a future output shift."""
 
     architecture_variant = "exogenous"

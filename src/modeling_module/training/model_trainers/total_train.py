@@ -16,7 +16,7 @@ from modeling_module.models.registry import (
     resolve_artifact_model_key,
 )
 from modeling_module.models.PatchMixer.common.configs import PatchMixerConfig
-from modeling_module.models.PatchMixer.original import PatchMixerOriginalConfig
+from modeling_module.models.PatchMixer.common.configs import PatchMixerOriginalConfig
 from modeling_module.models.PatchTST.common.configs import PatchTSTConfig
 from modeling_module.models.PatchTST.self_supervised.PatchTST import PatchTSTPretrainModel
 from modeling_module.models.SELLM.configs import SELLMConfig
