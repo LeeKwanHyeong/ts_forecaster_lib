@@ -336,6 +336,12 @@ metadata, strict restore 결과와 Demand Engine 비음수 후처리 경계는
 [`docs/DSIO202545PatchTSTProductionRefit.md`](docs/DSIO202545PatchTSTProductionRefit.md)에
 고정합니다.
 
+PatchTST Quantile·PatchMixer·N-HiTS·TimeMixer까지 포함한 다섯 endogenous
+production-refit artifact의 고정 epoch, checkpoint SHA-256, parameter count와 RTX 5090
+strict forecast 결과는
+[`docs/DSIO202545EndogenousProductionRefit.md`](docs/DSIO202545EndogenousProductionRefit.md)에
+고정합니다.
+
 ## Promotion order
 
 1. local `pytest`와 전체 canonical source `PREFLIGHT_ONLY=1`
