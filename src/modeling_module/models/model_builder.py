@@ -2,6 +2,7 @@ from dataclasses import fields, is_dataclass, asdict
 from typing import Union, Any, Optional, Mapping
 
 from modeling_module.models.ExoTST.configs import ExoTSTConfig
+from modeling_module.models.NHITS.configs import NHITSConfig
 from modeling_module.models.PatchMixer.PatchMixer import PatchMixerOriginalModel
 from modeling_module.models.PatchMixer.common.configs import (
     PatchMixerConfig,
@@ -369,6 +370,25 @@ def build_exotst(cfg):
     cfg = _ensure_exotst_config(cfg)
     from modeling_module.models.ExoTST.ExoTST import ExoTST
     return ExoTST.from_config(cfg)
+
+
+def _ensure_nhits_config(cfg: Union[NHITSConfig, dict, Any]) -> NHITSConfig:
+    if isinstance(cfg, NHITSConfig):
+        return cfg
+    if isinstance(cfg, Mapping):
+        return NHITSConfig(**dict(cfg))
+    if is_dataclass(cfg):
+        return NHITSConfig(**asdict(cfg))
+    if hasattr(cfg, "__dict__"):
+        return NHITSConfig(**dict(vars(cfg)))
+    raise TypeError(f"Unsupported config type for NHITS: {type(cfg)}")
+
+
+def build_nhits(cfg):
+    """Build the public endogenous N-HiTS point model."""
+    from modeling_module.models.NHITS.NHITS import NHITSModel
+
+    return NHITSModel.from_config(_ensure_nhits_config(cfg))
 
 
 def _ensure_timexer_config(cfg: Union[TimeXerConfig, dict, Any]) -> TimeXerConfig:

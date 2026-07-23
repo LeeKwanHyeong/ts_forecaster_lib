@@ -39,6 +39,7 @@ __all__ = [
     "build_patchTST_quantile",
     "build_patchTST_quantile_exogenous",
     "build_exotst",
+    "build_nhits",
     "build_timexer",
     "build_sellm",
     "PatchMixerOriginalConfig",
@@ -47,6 +48,7 @@ __all__ = [
 if TYPE_CHECKING:
     from .model_builder import (
         build_exotst,
+        build_nhits,
         build_sellm,
         build_patch_mixer,
         build_patch_mixer_exogenous,
@@ -79,6 +81,7 @@ _LAZY = {
     "build_patchTST_quantile": (".model_builder", "build_patchTST_quantile"),
     "build_patchTST_quantile_exogenous": (".model_builder", "build_patchTST_quantile_exogenous"),
     "build_exotst": (".model_builder", "build_exotst"),
+    "build_nhits": (".model_builder", "build_nhits"),
     "build_timexer": (".model_builder", "build_timexer"),
     "build_sellm": (".model_builder", "build_sellm"),
     "PatchMixerOriginalConfig": (

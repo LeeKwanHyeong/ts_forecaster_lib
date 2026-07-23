@@ -15,6 +15,7 @@ from modeling_module import (
     ExogenousConfig,
     ExoTSTArchitectureConfig,
     LoaderConfig,
+    NHITSArchitectureConfig,
     PatchMixerArchitectureConfig,
     PatchTSTArchitectureConfig,
     RuntimeConfig,
@@ -175,6 +176,26 @@ def _tiny_exotst_architecture() -> ArchitectureConfig:
     )
 
 
+def _tiny_nhits_architecture() -> ArchitectureConfig:
+    return ArchitectureConfig(
+        nhits=NHITSArchitectureConfig(
+            stack_types=("identity",),
+            n_blocks=(1,),
+            n_layers=(2,),
+            n_theta_hidden=((8, 8),),
+            n_pool_kernel_size=(1,),
+            n_freq_downsample=(1,),
+            pooling_mode="max",
+            interpolation_mode="linear",
+            activation="Softplus",
+            initialization="glorot_uniform",
+            batch_normalization=False,
+            dropout_prob_theta=0.0,
+            shared_weights=False,
+        )
+    )
+
+
 def _tiny_sellm_architecture() -> ArchitectureConfig:
     return ArchitectureConfig(
         sellm=SELLMArchitectureConfig(
@@ -274,6 +295,12 @@ POINT_SMOKE_CASES = [
         id="exotst",
     ),
     pytest.param(
+        "nhits_base",
+        _tiny_nhits_architecture(),
+        None,
+        id="nhits",
+    ),
+    pytest.param(
         "timexer_base",
         ArchitectureConfig(
             timexer=TimexerArchitectureConfig(
@@ -342,6 +369,23 @@ def test_public_point_train_checkpoint_load_predict_smoke(
     assert result.manifest_path is not None
     assert Path(result.manifest_path).is_file()
 
+    if model_key == "nhits_base":
+        checkpoint = torch.load(
+            result.primary_ckpt_path,
+            map_location="cpu",
+            weights_only=False,
+        )
+        assert checkpoint["cfg_cls"] == "NHITSConfig"
+        assert checkpoint["model_class"] == "NHITSModel"
+        assert checkpoint["output_spec"] == {
+            "mode": "point",
+            "distribution": None,
+            "out_mult": 1,
+            "param_names": None,
+        }
+        assert checkpoint["meta"]["model_key"] == "nhits_base"
+        assert checkpoint["meta"]["family_key"] == "nhits"
+
     predictor = load_predictor(result.primary_ckpt_path, device="cpu", strict=True)
     payload = _prediction_payload(model_key)
     first = predictor.predict(payload)
@@ -354,6 +398,12 @@ def test_public_point_train_checkpoint_load_predict_smoke(
     assert points.shape == (2,)
     assert np.isfinite(points).all()
     np.testing.assert_array_equal(points, np.asarray(second["point"]))
+
+    if model_key == "nhits_base":
+        restored_state = predictor.model.state_dict()
+        assert restored_state.keys() == checkpoint["state_dict"].keys()
+        for key, saved_value in checkpoint["state_dict"].items():
+            torch.testing.assert_close(restored_state[key].cpu(), saved_value.cpu())
 
 
 REMAINING_ARTIFACT_SMOKE_CASES = [

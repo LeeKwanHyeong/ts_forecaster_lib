@@ -1,8 +1,9 @@
 # PatchTST implementation notes
 
 이 문서는 현재 repository의 PatchTST 구현과 public API 책임을 설명합니다. 수치 및 state
-schema 기준선은 [PatchTSTBaseline.md](PatchTSTBaseline.md), 사용자에게 노출되는 최종 지원
-범위는 repository root의 `README.md`와 `README.package.md`를 기준으로 합니다.
+schema 기준선은 [PatchTSTBaseline.md](PatchTSTBaseline.md), 보류된 개선 내역과 재개 조건은
+[PatchTSTImprovementNeeds.md](PatchTSTImprovementNeeds.md), 사용자에게 노출되는 최종 지원 범위는
+repository root의 `README.md`와 `README.package.md`를 기준으로 합니다.
 
 ## Registered artifacts
 

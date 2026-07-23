@@ -61,7 +61,8 @@ from modeling_module import DistributionLoss, forecast, load_predictor, train
   `TrainerConfig`, `SSLConfig`, `RuntimeConfig`, `ArtifactConfig`,
   `DataWindowConfig`, `DataColumnConfig`, `ExogenousConfig`, `LoaderConfig`,
   `ArchitectureConfig`, `PatchTSTArchitectureConfig`, `PatchMixerArchitectureConfig`,
-  `TitanArchitectureConfig`, `ExoTSTArchitectureConfig`, `TimexerArchitectureConfig`
+  `TitanArchitectureConfig`, `ExoTSTArchitectureConfig`, `NHITSArchitectureConfig`,
+  `TimexerArchitectureConfig`
 - loss selector: `DistributionLoss` (`Normal`, `StudentT`)
 
 권장 사용 방식은 dataclass 기반입니다.
@@ -102,6 +103,7 @@ public API 시그니처는 그대로 유지할 수 있습니다.
 - `titan_lmm`
 - `titan_seq2seq`
 - `exotst_base`
+- `nhits_base`
 - `timexer_base`
 
 `titan_base`, `titan_lmm`, `titan_seq2seq`는 deprecation 기간의 학습/checkpoint 호환을 위해
@@ -113,6 +115,7 @@ family 이름으로도 요청할 수 있습니다.
 - `patchmixer`
 - `titan`
 - `exotst`
+- `nhits`
 - `timexer`
 
 예를 들어:
@@ -138,6 +141,7 @@ family 이름으로도 요청할 수 있습니다.
 | Titan | `titan_lmm` | Deprecated | point, Normal, StudentT | past/future optional | 미지원 |
 | Titan | `titan_seq2seq` | Deprecated | point, Normal, StudentT | past/future optional | 미지원 |
 | ExoTST | `exotst_base` | 지원 | point, Normal, StudentT | past/future 모두 필수 | 미지원 |
+| N-HiTS | `nhits_base` | 지원 | point only | 미지원 | 미지원 |
 | TimeXer | `timexer_base` | 지원 | point only | past 필수, future 금지 | 미지원 |
 
 추가 메모:
@@ -149,6 +153,8 @@ family 이름으로도 요청할 수 있습니다.
 - mixed request에서는 SSL이 PatchTST stage에만 적용되고 다른 family는 supervised로 실행됩니다.
   `ssl_only`는 PatchTST supervised checkpoint 없이 pretraining checkpoint만 만듭니다.
 - `ExoTST`는 `use_exogenous_mode=True`와 past/future continuous exogenous가 모두 필요합니다.
+- `N-HiTS` public artifact는 single-target endogenous point 전용이며 exogenous,
+  distribution, quantile output을 거부합니다.
 - `TimeXer` v1은 past continuous exogenous만 사용하며 future/categorical exogenous와
   quantile/distribution output을 거부합니다.
 - categorical past exogenous는 현재 모든 public family에서 fail-fast합니다.
@@ -164,7 +170,7 @@ family 이름으로도 요청할 수 있습니다.
 - `models=["titan"]`은 호환상 세 Titan artifact로 계속 확장되지만 `FutureWarning`을 냅니다.
 - artifact key를 직접 주면 family 전체가 아니라 그 모델만 학습됩니다.
   예: `models=["titan_lmm"]`, `models=["titan_seq2seq"]`, `models=["titan_base"]`, `models=["patchmixer_quantile"]`, `models=["patchtst_quantile"]`
-- repo 안에는 `NHITS`, `Transformer` 디렉토리도 있지만, 현재 README의 이 섹션은 "public training/inference registry에 연결된 모델" 기준입니다.
+- repo 안의 `Transformer` 디렉토리는 아직 public training/inference registry에 연결되지 않았습니다.
 
 ## Installation
 
