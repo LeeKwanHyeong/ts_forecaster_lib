@@ -51,6 +51,16 @@ Apache-2.0 소스를 이식하는 commit에는 upstream license 사본과 출처
 파일에 library wrapper 및 validation 변경 사실을 표시합니다. upstream에는 별도 `NOTICE`
 파일이 없음을 확인했습니다.
 
+### Fixture status
+
+출처 고정 단계는 완료했습니다. [`upstream_manifest.json`](../upstream_manifest.json)에 repository
+commit, tree, model 마지막 변경 commit, 검토 대상 파일의 SHA-256/Git blob/크기를 기록했고,
+[`LICENSE.upstream`](../LICENSE.upstream)은 upstream `LICENSE`를 byte-for-byte로 보존합니다.
+두 파일은 wheel package data에 포함되며 테스트가 manifest와 license의 정합성을 검증합니다.
+
+이 단계에서는 TimeMixer 계산 코드, config, registry key 또는 trainer를 노출하지 않습니다.
+PatchMixer 구현과 동결 기준선도 변경하지 않습니다.
+
 ## Paper and upstream boundary
 
 논문 본체는 다음 계산을 정의합니다.
@@ -158,7 +168,9 @@ serialized as independent config values.
 | `TimeMixer/configs.py` | public config and strict scale validation |
 | `TimeMixer/backbone.py` | Normalize, decomposition, scale mixing, PDM and FMM numerical core |
 | `TimeMixer/TimeMixer.py` | library tensor wrapper and endogenous boundary |
-| `TimeMixer/__init__.py` | stable public model/config exports |
+| `TimeMixer/__init__.py` | 현재 provenance exports, 이식 후 stable model/config exports |
+| `TimeMixer/provenance.py` | pinned upstream source identity constants |
+| `TimeMixer/upstream_manifest.json` | machine-readable commit, blob and checksum fixture |
 | `TimeMixer/LICENSE.upstream` | Apache-2.0 source license copy |
 | `models/model_builder.py` | config normalization and construction |
 | `models/registry.py` | key, aliases and capability metadata |
