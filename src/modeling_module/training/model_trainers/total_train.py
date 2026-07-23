@@ -10,6 +10,7 @@ import torch
 import torch.nn as nn
 
 from modeling_module.models.registry import (
+    PRODUCTION_REFIT_ARTIFACT_KEYS,
     expand_training_targets,
     filter_targets_for_family,
     ordered_training_families_for_targets,
@@ -631,7 +632,15 @@ def _run_nhits(
             nhits_model,
             nhits_cfg,
             ckpt_path,
-            extra_meta={"model_key": "nhits_base", "family_key": "nhits"},
+            extra_meta={
+                "model_key": "nhits_base",
+                "family_key": "nhits",
+                **_training_checkpoint_meta(
+                    nhits_train_cfg,
+                    stages,
+                    best,
+                ),
+            },
         )
         best["ckpt_path"] = str(ckpt_path)
 
@@ -728,7 +737,15 @@ def _run_timemixer(
             timemixer_model,
             timemixer_cfg,
             ckpt_path,
-            extra_meta={"model_key": "timemixer", "family_key": "timemixer"},
+            extra_meta={
+                "model_key": "timemixer",
+                "family_key": "timemixer",
+                **_training_checkpoint_meta(
+                    timemixer_train_cfg,
+                    stages,
+                    best,
+                ),
+            },
         )
         best["ckpt_path"] = str(ckpt_path)
 
@@ -1722,7 +1739,15 @@ def _run_patchmixer(
                 pm_model,
                 pm_cfg,
                 ckpt_path,
-                extra_meta={"model_key": "patchmixer", "family_key": "patchmixer"},
+                extra_meta={
+                    "model_key": "patchmixer",
+                    "family_key": "patchmixer",
+                    **_training_checkpoint_meta(
+                        endogenous_train_cfg,
+                        stages,
+                        best_pm,
+                    ),
+                },
             )
             best_pm["ckpt_path"] = str(ckpt_path)
         _store_result(
@@ -1892,10 +1917,14 @@ def run_total_train(
     if training_mode == "production_refit":
         if val_loader is not None:
             raise ValueError("production_refit requires val_loader=None.")
-        if selected_artifact_keys != ["patchtst_base"]:
+        if (
+            len(selected_artifact_keys) != 1
+            or selected_artifact_keys[0] not in PRODUCTION_REFIT_ARTIFACT_KEYS
+        ):
+            supported = ", ".join(PRODUCTION_REFIT_ARTIFACT_KEYS)
             raise ValueError(
-                "production_refit currently supports exactly one artifact: "
-                "patchtst_base."
+                "production_refit supports exactly one endogenous artifact: "
+                f"{supported}."
             )
 
     use_ssl_mode = _validate_ssl_mode(use_ssl_mode)

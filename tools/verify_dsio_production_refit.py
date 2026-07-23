@@ -44,6 +44,38 @@ def _synchronize_cuda(device: str) -> None:
         torch.cuda.synchronize()
 
 
+def _parse_expected_config(items: list[str] | None) -> dict[str, Any]:
+    expected: dict[str, Any] = {}
+    for item in items or []:
+        key, separator, raw_value = item.partition("=")
+        key = key.strip()
+        if not separator or not key:
+            raise ValueError(
+                "--expected-config values must use KEY=JSON_VALUE syntax, "
+                f"got {item!r}."
+            )
+        try:
+            expected[key] = json.loads(raw_value)
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"Invalid JSON value in --expected-config {item!r}."
+            ) from exc
+    return expected
+
+
+def _normalize_contract_value(value: Any) -> Any:
+    if isinstance(value, tuple):
+        return [_normalize_contract_value(item) for item in value]
+    if isinstance(value, list):
+        return [_normalize_contract_value(item) for item in value]
+    if isinstance(value, Mapping):
+        return {
+            str(key): _normalize_contract_value(item)
+            for key, item in value.items()
+        }
+    return value
+
+
 def _load_inference_history(
     source: Path,
     *,
@@ -130,6 +162,8 @@ def _load_inference_history(
 def _validate_checkpoint_contract(
     checkpoint: Mapping[str, Any],
     *,
+    expected_model_key: str,
+    expected_config: Mapping[str, Any],
     lookback: int,
     horizon: int,
     expected_seed: int,
@@ -138,7 +172,7 @@ def _validate_checkpoint_contract(
     meta = checkpoint.get("meta") or {}
     config = checkpoint.get("config") or checkpoint.get("cfg_state") or {}
     expected_meta = {
-        "model_key": "patchtst_base",
+        "model_key": expected_model_key,
         "training_mode": "production_refit",
         "validation_enabled": False,
         "state_selection": "final_epoch",
@@ -153,16 +187,14 @@ def _validate_checkpoint_contract(
                 f"Checkpoint metadata mismatch for {key!r}: "
                 f"expected {expected!r}, got {actual!r}."
             )
-    expected_config = {
+    config_contract = {
         "lookback": lookback,
         "horizon": horizon,
-        "d_model": 128,
-        "n_layers": 2,
-        "d_ff": 512,
+        **dict(expected_config),
     }
-    for key, expected in expected_config.items():
+    for key, expected in config_contract.items():
         actual = config.get(key)
-        if actual != expected:
+        if _normalize_contract_value(actual) != _normalize_contract_value(expected):
             raise ValueError(
                 f"Checkpoint config mismatch for {key!r}: "
                 f"expected {expected!r}, got {actual!r}."
@@ -187,8 +219,18 @@ def verify(args: argparse.Namespace) -> dict[str, Any]:
         map_location="cpu",
         weights_only=False,
     )
+    expected_config = _parse_expected_config(args.expected_config)
+    if not expected_config and args.expected_model_key == "patchtst_base":
+        # Preserve the original PatchTST Small verifier invocation.
+        expected_config = {
+            "d_model": 128,
+            "n_layers": 2,
+            "d_ff": 512,
+        }
     _validate_checkpoint_contract(
         raw_checkpoint,
+        expected_model_key=args.expected_model_key,
+        expected_config=expected_config,
         lookback=args.lookback,
         horizon=args.horizon,
         expected_seed=args.expected_seed,
@@ -207,10 +249,10 @@ def verify(args: argparse.Namespace) -> dict[str, Any]:
         strict=True,
     )
     load_seconds = time.perf_counter() - load_started
-    if predictor.model_key != "patchtst_base":
+    if predictor.model_key != args.expected_model_key:
         raise ValueError(
             f"Strict restore resolved {predictor.model_key!r}, "
-            "expected 'patchtst_base'."
+            f"expected {args.expected_model_key!r}."
         )
 
     predictions: list[np.ndarray] = []
@@ -282,6 +324,17 @@ def verify(args: argparse.Namespace) -> dict[str, Any]:
             "parameter_count": sum(
                 parameter.numel() for parameter in predictor.model.parameters()
             ),
+            "cfg_cls": raw_checkpoint.get("cfg_cls"),
+            "model_class": raw_checkpoint.get("model_class"),
+            "output_spec": raw_checkpoint.get("output_spec"),
+            "verified_config": {
+                key: (
+                    raw_checkpoint.get("config")
+                    or raw_checkpoint.get("cfg_state")
+                    or {}
+                ).get(key)
+                for key in ("lookback", "horizon", *expected_config)
+            },
             "meta": raw_checkpoint["meta"],
         },
         "source": {
@@ -323,7 +376,7 @@ def verify(args: argparse.Namespace) -> dict[str, Any]:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Strictly verify a DSIO PatchTST production-refit checkpoint and "
+            "Strictly verify a DSIO production-refit checkpoint and "
             "materialize the 202545 forecast."
         )
     )
@@ -334,6 +387,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--horizon", type=int, default=27)
     parser.add_argument("--train-end-week", type=int, default=202544)
     parser.add_argument("--forecast-origin", type=int, default=202545)
+    parser.add_argument("--expected-model-key", default="patchtst_base")
+    parser.add_argument(
+        "--expected-config",
+        action="append",
+        default=[],
+        metavar="KEY=JSON_VALUE",
+        help=(
+            "Repeatable checkpoint architecture assertion. Values are parsed "
+            "as JSON, for example d_model=384 or n_blocks=[1,1,1]."
+        ),
+    )
     parser.add_argument("--expected-seed", type=int, default=42)
     parser.add_argument("--expected-epochs", type=int, default=8)
     parser.add_argument("--batch-size", type=int, default=1024)

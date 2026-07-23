@@ -17,6 +17,7 @@ from modeling_module._internal.checkpoint_runtime import (
 from modeling_module._internal.device_runtime import default_device, resolve_device
 from modeling_module._internal.loss_runtime import CHECKPOINT_SAFE_DISTRIBUTIONS
 from modeling_module._internal.model_registry import (
+    PRODUCTION_REFIT_ARTIFACT_KEYS,
     expand_training_targets,
     get_training_deprecation_messages,
     resolve_artifact_model_key,
@@ -1193,10 +1194,14 @@ def _validate_training_request(
     if training_mode not in {"qualification", "production_refit"}:
         raise ValueError(f"Unsupported training_mode: {training_mode!r}.")
     if training_mode == "production_refit":
-        if list(requested_models) != ["patchtst_base"]:
+        if (
+            len(requested_models) != 1
+            or requested_models[0] not in PRODUCTION_REFIT_ARTIFACT_KEYS
+        ):
+            supported = ", ".join(PRODUCTION_REFIT_ARTIFACT_KEYS)
             raise ValueError(
-                "production_refit currently supports exactly one artifact: "
-                "patchtst_base."
+                "production_refit supports exactly one endogenous artifact: "
+                f"{supported}."
             )
         if int(payload.get("spike_epochs") or 0) > 0:
             raise ValueError(
@@ -1208,7 +1213,7 @@ def _validate_training_request(
             "full",
         }:
             raise ValueError(
-                "production_refit supports supervised-only PatchTST training; "
+                "production_refit supports supervised-only training; "
                 "use ssl.mode='sl_only' or 'off'."
             )
 
