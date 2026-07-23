@@ -320,6 +320,57 @@ class PatchMixerEndogenousAdapter(DefaultAdapter):
         return output
 
 
+class TimeMixerAdapter(DefaultAdapter):
+    """Enforce the endogenous single-target TimeMixer training contract."""
+
+    def forward(
+            self,
+            model: nn.Module,
+            x_batch: Any,
+            *,
+            future_exo: Optional[torch.Tensor] = None,
+            past_exo_cont: Optional[torch.Tensor] = None,
+            past_exo_cat: Optional[torch.Tensor] = None,
+            part_ids: Optional[List[str]] = None,
+            mode: Optional[str] = None,
+    ) -> torch.Tensor:
+        feature_inputs = {
+            "future_exo": future_exo,
+            "past_exo_cont": past_exo_cont,
+            "past_exo_cat": past_exo_cat,
+        }
+        provided = [
+            name for name, value in feature_inputs.items() if _has_nonempty_features(value)
+        ]
+        if provided:
+            raise RuntimeError(
+                "TimeMixer is endogenous-only; unsupported inputs: "
+                + ", ".join(provided)
+            )
+
+        output = super().forward(
+            model,
+            x_batch,
+            part_ids=part_ids,
+            mode=mode,
+        )
+        if not torch.is_tensor(output) or output.ndim != 3:
+            shape = tuple(output.shape) if torch.is_tensor(output) else type(output)
+            raise RuntimeError(
+                "TimeMixer must return [B,H,1], "
+                f"got {shape}."
+            )
+
+        expected_horizon = int(getattr(model, "horizon", output.shape[1]))
+        expected_shape = (int(output.shape[0]), expected_horizon, 1)
+        if tuple(output.shape) != expected_shape:
+            raise RuntimeError(
+                "TimeMixer must return [B,H,1], "
+                f"got {tuple(output.shape)}, expected {expected_shape}."
+            )
+        return output
+
+
 class TitanAdapter(DefaultAdapter):
     def __init__(self, tta_manager_factory=None):
         self._tta = None
