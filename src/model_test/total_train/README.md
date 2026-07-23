@@ -247,10 +247,17 @@ python tools/evaluate_dsio_qualification.py \
   --artifact-dir "$PWD/artifacts/<qualification-run>/endo_only" \
   --training-log "$PWD/logs/<qualification-run>.log" \
   --target-source "$PWD/raw_data/master/tb_master_target.parquet" \
+  --baseline-max-epoch 30 \
   --device cuda \
   --batch-size 1024 \
   --num-workers 4
 ```
+
+Epoch 상한이나 학습 길이를 비교하는 qualification은 canonical artifact 하나당 새 Python
+process를 사용합니다. 여러 artifact를 한 process에서 순차 학습하면 앞선 모델이 소비한
+dropout·shuffle RNG 횟수가 후속 모델의 초기화와 batch 순서에 영향을 주므로, 앞 모델의 epoch
+수를 바꾸는 실험이 후속 모델의 seed 궤적까지 바꾸게 됩니다. 동일 `--seed` 값만으로는 이
+순서 결합이 제거되지 않습니다.
 
 평가 metric은 모든 `(series, horizon)` 관측치를 합친 micro 기준입니다.
 
@@ -271,6 +278,7 @@ Quantile validation loss와 point loss의 숫자는 서로 직접 비교하지 �
 - `qualification_metrics_by_series.parquet`: 모델·부품별 metric
 - `qualification_metrics_by_horizon.parquet`: 모델·horizon별 metric
 - `production_refit_epochs.json`: 모델별 고정 refit epoch와 선택 근거
+- `epoch_extension_analysis.json`: `--baseline-max-epoch` 전후의 best loss와 갱신 여부
 - `qualification_summary.json`: metric/epoch 계약, 전체 학습 history와 산출물 manifest
 
 Production refit은 선정 epoch만큼 새로 학습하되 target `202544`까지 모두 학습에 편입합니다.
