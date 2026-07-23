@@ -2,8 +2,7 @@
 
 이 문서는 NHITS와 ExoTST 실행 기준선을 닫은 다음 진행할 TimeMixer 원본 계보 이식의
 출처, 수식 경계, public 계약, 파일 책임과 검증 순서를 고정합니다. 현재 단계에서는
-wrapper, builder, registry와 checkpoint 복원까지 연결했으며 public trainer는 아직 노출하지
-않습니다.
+wrapper, builder, registry, point-only trainer와 checkpoint/predict 복원까지 연결했습니다.
 
 ## Decision
 
@@ -62,8 +61,7 @@ commit, tree, model 마지막 변경 commit, 검토 대상 파일의 SHA-256/Git
 현재 forecasting-only 계산 코드는 [`backbone.py`](../backbone.py)에 격리되어 있습니다.
 [`TimeMixer.py`](../TimeMixer.py)의 public wrapper는 계산 모듈을 추가하지 않고 finite
 `[B,L,1]` 입력과 endogenous-only 경계를 강제합니다. `timemixer` registry key는 build/load
-용으로 등록했지만 runner 연결 전까지 `trainable=False`이며, PatchMixer 구현과 동결 기준선은
-변경하지 않습니다.
+및 public training 대상으로 등록했으며, PatchMixer 구현과 동결 기준선은 변경하지 않습니다.
 
 ### Backbone port status
 
@@ -120,7 +118,9 @@ odd `d_model`에서도 생성 가능하도록 마지막 cosine 열만 안전하�
 - `TimeMixerArchitectureConfig`는 지원되는 multiscale/model-width override만 노출합니다.
 - checkpoint는 model/config class, upstream commit과 endogenous capability를 기록하고 strict
   restore를 지원합니다.
-- public trainer가 추가되기 전 `train(models=["timemixer"])`는 preflight에서 즉시 거부됩니다.
+- `TimeMixerAdapter`와 `CommonTrainer` runner는 point loss와 endogenous batch만 허용합니다.
+- `train()`이 저장한 artifact는 strict `load_predictor()`와 반복 가능한 `predict()` 경로를
+  통과합니다.
 
 ## Paper and upstream boundary
 
@@ -259,7 +259,7 @@ DB, Engine Run, tenant, writer 또는 service 책임은 이 모델 family에 추
 - finite forward/backward와 optimizer step
 - endogenous dataloader를 통한 1-epoch/100-step smoke
 - checkpoint save/load 후 exact prediction parity
-- `load_predictor(...).predict(...)` DataFrame schema 검증
+- `load_predictor(...).predict(...)` point output schema 검증
 - legacy checkpoint path에 영향이 없는지 전체 회귀 테스트
 
 ### Gate 3. Runtime
@@ -273,17 +273,10 @@ DB, Engine Run, tenant, writer 또는 service 책임은 이 모델 family에 추
 공식 논문 benchmark 수치를 library 이식의 정확도 근거로 직접 사용하지 않습니다. 데이터,
 split, target schema와 training protocol이 같은 실험만 promotion 근거로 사용합니다.
 
-## Implementation order
+## Remaining validation order
 
-1. upstream license와 source checksum fixture를 repository에 고정합니다.
-2. upstream forecasting backbone을 wrapper 없이 이식하고 output/gradient parity를 닫습니다.
-3. `TimeMixerConfig`와 invalid-scale characterization test를 추가합니다.
-4. `[B,L,1] -> [B,H,1]` endogenous wrapper와 unsupported exogenous guard를 추가합니다.
-5. builder, registry, public architecture config, checkpoint 계약을 연결합니다.
-6. trainer, save/load, `load_predictor().predict()` 통합 smoke를 추가합니다.
-7. 전체 CPU regression을 실행합니다.
-8. RTX 5090 CUDA smoke와 100-step benchmark를 실행합니다.
-9. 동일 데이터, loss, seed 11/22/33 비교 후 기본 family 전략을 결정합니다.
+1. RTX 5090 CUDA smoke와 100-step benchmark를 실행합니다.
+2. 동일 데이터, loss, seed 11/22/33 비교 후 기본 family 전략을 결정합니다.
 
 각 단계는 바로 앞 단계의 기준선이 통과한 뒤 진행합니다. parity가 깨진 상태에서 public API나
 정확도 실험으로 넘어가지 않습니다.

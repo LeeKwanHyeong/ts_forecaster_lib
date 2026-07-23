@@ -26,6 +26,7 @@ from modeling_module.models.registry import (
     list_available_model_keys,
     resolve_artifact_model_key,
 )
+from modeling_module.training.adapters import TimeMixerAdapter
 from modeling_module.utils.checkpoint import (
     CHECKPOINT_FORMAT_VERSION,
     _extract_cfg_obj,
@@ -143,6 +144,22 @@ def test_timemixer_wrapper_accepts_structurally_empty_exogenous_inputs() -> None
     torch.testing.assert_close(actual, expected, rtol=0.0, atol=0.0)
 
 
+def test_timemixer_adapter_is_shape_strict_and_rejects_exogenous_features() -> None:
+    model = TimeMixerModel(_tiny_config())
+    adapter = TimeMixerAdapter()
+    x = torch.randn(2, model.lookback, 1)
+
+    output = adapter.forward(model, x, mode="train")
+
+    assert output.shape == (2, model.horizon, 1)
+    with pytest.raises(RuntimeError, match="endogenous-only.*future_exo"):
+        adapter.forward(
+            model,
+            x,
+            future_exo=torch.ones(2, model.horizon, 1),
+        )
+
+
 def test_timemixer_builder_registry_and_public_config_are_connected() -> None:
     config = _tiny_config()
     direct = public_models.build_timemixer(config)
@@ -174,9 +191,9 @@ def test_timemixer_builder_registry_and_public_config_are_connected() -> None:
     assert spec.family == "timemixer"
     assert spec.exogenous_policy == "none"
     assert spec.load_only is False
-    assert spec.trainable is False
-    with pytest.raises(ValueError, match="not trainable"):
-        expand_training_targets(["timemixer"])
+    assert spec.trainable is True
+    assert expand_training_targets(["timemixer"]) == ["timemixer"]
+    assert expand_training_targets(["timemixercanonical"]) == ["timemixer"]
 
     normalized = _normalize_model_architecture(
         ArchitectureConfig(

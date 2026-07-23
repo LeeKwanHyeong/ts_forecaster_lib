@@ -246,6 +246,44 @@ def test_train_rejects_nhits_exogenous_mode_before_model_construction(
     assert reached_training is False
 
 
+def test_train_rejects_timemixer_exogenous_mode_before_model_construction(
+    monkeypatch,
+    tmp_path,
+):
+    train_module = importlib.import_module("modeling_module.api.train")
+    reached_training = False
+
+    def unexpected_training(*args, **kwargs):
+        nonlocal reached_training
+        reached_training = True
+        raise AssertionError("model construction and training must not run")
+
+    monkeypatch.setattr(train_module, "run_total_train", unexpected_training)
+
+    with pytest.raises(ValueError, match="timemixer.*endogenous inputs only"):
+        train(
+            {
+                "data": {
+                    "df": _make_daily_df_with_future_exo(),
+                    "lookback": 14,
+                    "horizon": 2,
+                    "freq": "daily",
+                    "batch_size": 2,
+                    "past_exo_cont_cols": ["exo_hist"],
+                    "future_exo_cont_cols": ["promo_flag"],
+                },
+                "models": ["timemixer"],
+                "use_exogenous_mode": True,
+                "trainer": {"epochs": 1, "lr": 1e-3},
+                "device": "cpu",
+                "save_dir": str(tmp_path),
+                "auto_save_dir": False,
+            }
+        )
+
+    assert reached_training is False
+
+
 def test_train_rejects_nhits_distribution_before_data_resolution(monkeypatch, tmp_path):
     train_module = importlib.import_module("modeling_module.api.train")
     reached_data_resolution = False

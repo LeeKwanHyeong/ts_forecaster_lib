@@ -23,6 +23,7 @@ from modeling_module.models.PatchTST.common.configs import PatchTSTConfig
 from modeling_module.models.PatchTST.self_supervised.PatchTST import PatchTSTPretrainModel
 from modeling_module.models.NHITS.configs import NHITSConfig
 from modeling_module.models.SELLM.configs import SELLMConfig
+from modeling_module.models.TimeMixer.configs import TimeMixerConfig
 from modeling_module.models.TimeXer.configs import TimeXerConfig
 from modeling_module.models.Titan.common.configs import TitanConfig
 from modeling_module.models.model_builder import (
@@ -37,6 +38,7 @@ from modeling_module.models.model_builder import (
     build_patchTST_quantile_exogenous,
     build_exotst,
     build_nhits,
+    build_timemixer,
     build_timexer,
     build_sellm,
 )
@@ -54,6 +56,7 @@ from modeling_module.training.model_trainers.patchtst_finetune import train_patc
 from modeling_module.training.model_trainers.patchtst_pretrain import train_patchtst_pretrain
 from modeling_module.training.model_trainers.patchtst_train import train_patchtst
 from modeling_module.training.model_trainers.sellm_train import train_sellm
+from modeling_module.training.model_trainers.timemixer_train import train_timemixer
 from modeling_module.training.model_trainers.timexer_train import train_timexer
 from modeling_module.training.model_trainers.nhits_train import train_nhits
 from modeling_module.training.model_trainers.titan_train import train_titan
@@ -607,6 +610,104 @@ def _run_nhits(
         model_key="nhits_base",
         family_key="nhits",
     )
+
+
+def _run_timemixer(
+    *,
+    results: Dict[str, Dict],
+    freq: str,
+    train_loader,
+    val_loader,
+    point_train_cfg: TrainingConfig,
+    stages: List[StageConfig],
+    device: str,
+    lookback: int,
+    horizon: int,
+    use_exogenous_mode: bool,
+    exo_dim: int,
+    future_exo_cb: Optional[Callable],
+    past_cont_dim: int,
+    past_cat_dim: int,
+    save_root: Optional[Path] = None,
+    requested_artifact_keys: Optional[Iterable[str]] = None,
+    architecture_override: Optional[Mapping[str, Any]] = None,
+    **kwargs,
+):
+    """Run the endogenous, point-only TimeMixer artifact."""
+
+    requested = _requested_target_set(requested_artifact_keys)
+    if not _wants_artifact(requested, "timemixer"):
+        return
+    if (
+        use_exogenous_mode
+        or int(exo_dim) > 0
+        or future_exo_cb is not None
+        or int(past_cont_dim) > 0
+        or int(past_cat_dim) > 0
+    ):
+        raise RuntimeError("[total_train] TimeMixer supports endogenous inputs only.")
+
+    loss_obj = getattr(point_train_cfg, "loss", None)
+    mode = infer_supervised_mode(loss_obj)
+    if mode != "point":
+        raise NotImplementedError(
+            f"[total_train] TimeMixer supports only point mode, got {mode!r}."
+        )
+
+    cfg_kwargs = asdict(point_train_cfg)
+    cfg_kwargs["loss"] = loss_obj
+    cfg_kwargs.update(
+        y_dim=1,
+        use_exogenous_mode=False,
+        future_exo_dim=0,
+    )
+    if architecture_override:
+        cfg_kwargs.update(
+            {
+                key: value
+                for key, value in dict(architecture_override).items()
+                if value is not None
+            }
+        )
+
+    timemixer_cfg = TimeMixerConfig(**cfg_kwargs)
+    timemixer_model = build_timemixer(timemixer_cfg).to(device)
+    timemixer_train_cfg = replace(point_train_cfg, use_exogenous_mode=False)
+
+    print(f"TimeMixer ({freq.capitalize()}) mode=point")
+    best = train_timemixer(
+        model=timemixer_model,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        stages=list(stages),
+        train_cfg=timemixer_train_cfg,
+        device=device,
+    )
+
+    if save_root:
+        ckpt_path = _make_ckpt_path(
+            save_root,
+            freq,
+            "TimeMixer",
+            lookback,
+            horizon,
+        )
+        save_model(
+            timemixer_model,
+            timemixer_cfg,
+            ckpt_path,
+            extra_meta={"model_key": "timemixer", "family_key": "timemixer"},
+        )
+        best["ckpt_path"] = str(ckpt_path)
+
+    _store_result(
+        results,
+        result_name="TimeMixer",
+        best=best,
+        model_key="timemixer",
+        family_key="timemixer",
+    )
+
 
 def _run_exotst(
     *,
@@ -1623,6 +1724,7 @@ MODEL_REGISTRY: Dict[str, Callable] = {
     "patchmixer": _run_patchmixer,
     "exotst": _run_exotst,
     "nhits": _run_nhits,
+    "timemixer": _run_timemixer,
     "timexer": _run_timexer,
     "sellm": _run_sellm,
 }

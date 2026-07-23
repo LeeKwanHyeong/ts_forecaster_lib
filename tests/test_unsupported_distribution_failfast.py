@@ -5,6 +5,7 @@ import importlib
 import pytest
 
 from modeling_module import DistributionLoss, TrainRequest, TrainerConfig, train
+from modeling_module.training.model_losses.loss_module import MQLoss
 
 
 @pytest.mark.parametrize(
@@ -76,3 +77,44 @@ def test_supported_distribution_reaches_data_resolution(
         train(request)
 
     assert exc_info.value is marker
+
+
+@pytest.mark.parametrize(
+    ("loss", "mode"),
+    (
+        pytest.param(
+            DistributionLoss(distribution="Normal"),
+            "distribution",
+            id="distribution",
+        ),
+        pytest.param(
+            MQLoss(quantiles=[0.1, 0.5, 0.9]),
+            "quantile",
+            id="quantile",
+        ),
+    ),
+)
+def test_timemixer_rejects_non_point_loss_before_data_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+    loss,
+    mode: str,
+):
+    train_module = importlib.import_module("modeling_module.api.train")
+    reached_data_resolution = False
+
+    def unexpected_resolve_loaders(payload):
+        nonlocal reached_data_resolution
+        reached_data_resolution = True
+        raise AssertionError("data resolution must not run")
+
+    monkeypatch.setattr(train_module, "_resolve_loaders", unexpected_resolve_loaders)
+
+    request = TrainRequest(
+        models=["timemixer"],
+        trainer=TrainerConfig(loss_point=loss),
+    )
+
+    with pytest.raises(ValueError, match=rf"timemixer supports point loss only.*{mode}"):
+        train(request)
+
+    assert reached_data_resolution is False

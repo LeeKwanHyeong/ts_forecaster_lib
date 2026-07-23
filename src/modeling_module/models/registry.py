@@ -200,7 +200,7 @@ MODEL_SPECS: dict[str, ModelSpec] = {
         aliases=("timemixerbase", "timemixercanonical"),
         class_names=("TimeMixerModel",),
         checkpoint_aliases=("TimeMixer", "TimeMixerCanonical"),
-        trainable=False,
+        trainable=True,
         exogenous_policy="none",
     ),
     "timexer_base": ModelSpec(
@@ -311,6 +311,7 @@ TRAINING_FAMILY_DEFAULTS: dict[str, tuple[str, ...]] = {
     "titan": ("titan_base", "titan_lmm", "titan_seq2seq"),
     "exotst": ("exotst_base",),
     "nhits": ("nhits_base",),
+    "timemixer": ("timemixer",),
     "timexer": ("timexer_base",),
     "sellm": ("sellm_base",),
 }
@@ -360,6 +361,7 @@ TRAINING_FAMILY_ALIASES: dict[str, tuple[str, ...]] = {
     "titan": ("titan",),
     "exotst": ("exotst",),
     "nhits": ("nhits", "n-hits"),
+    "timemixer": ("timemixer",),
     "timexer": ("timexer",),
     "sellm": ("sellm", "se_llm"),
 }

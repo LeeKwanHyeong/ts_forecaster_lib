@@ -21,6 +21,7 @@ from modeling_module import (
     RuntimeConfig,
     SELLMArchitectureConfig,
     SSLConfig,
+    TimeMixerArchitectureConfig,
     TimexerArchitectureConfig,
     TitanArchitectureConfig,
     TrainerConfig,
@@ -195,6 +196,21 @@ def _tiny_nhits_architecture() -> ArchitectureConfig:
     )
 
 
+def _tiny_timemixer_architecture() -> ArchitectureConfig:
+    return ArchitectureConfig(
+        timemixer=TimeMixerArchitectureConfig(
+            d_model=4,
+            d_ff=8,
+            e_layers=1,
+            moving_avg=3,
+            down_sampling_layers=1,
+            down_sampling_window=2,
+            dropout=0.0,
+            use_norm=True,
+        )
+    )
+
+
 def _tiny_sellm_architecture() -> ArchitectureConfig:
     return ArchitectureConfig(
         sellm=SELLMArchitectureConfig(
@@ -294,6 +310,12 @@ POINT_SMOKE_CASES = [
         id="nhits",
     ),
     pytest.param(
+        "timemixer",
+        _tiny_timemixer_architecture(),
+        None,
+        id="timemixer",
+    ),
+    pytest.param(
         "timexer_base",
         ArchitectureConfig(
             timexer=TimexerArchitectureConfig(
@@ -362,22 +384,30 @@ def test_public_point_train_checkpoint_load_predict_smoke(
     assert result.manifest_path is not None
     assert Path(result.manifest_path).is_file()
 
-    if model_key == "nhits_base":
+    if model_key in {"nhits_base", "timemixer"}:
         checkpoint = torch.load(
             result.primary_ckpt_path,
             map_location="cpu",
             weights_only=False,
         )
-        assert checkpoint["cfg_cls"] == "NHITSConfig"
-        assert checkpoint["model_class"] == "NHITSModel"
+        expected_identity = {
+            "nhits_base": ("NHITSConfig", "NHITSModel", "nhits"),
+            "timemixer": ("TimeMixerConfig", "TimeMixerModel", "timemixer"),
+        }
+        cfg_cls, model_class, family_key = expected_identity[model_key]
+        assert checkpoint["cfg_cls"] == cfg_cls
+        assert checkpoint["model_class"] == model_class
         assert checkpoint["output_spec"] == {
             "mode": "point",
             "distribution": None,
             "out_mult": 1,
             "param_names": None,
         }
-        assert checkpoint["meta"]["model_key"] == "nhits_base"
-        assert checkpoint["meta"]["family_key"] == "nhits"
+        assert checkpoint["meta"]["model_key"] == model_key
+        assert checkpoint["meta"]["family_key"] == family_key
+        if model_key == "timemixer":
+            assert checkpoint["cfg_state"]["down_sampling_layers"] == 1
+            assert checkpoint["meta"]["architecture_variant"] == "endogenous"
 
     predictor = load_predictor(result.primary_ckpt_path, device="cpu", strict=True)
     payload = _prediction_payload(model_key)
@@ -392,7 +422,7 @@ def test_public_point_train_checkpoint_load_predict_smoke(
     assert np.isfinite(points).all()
     np.testing.assert_array_equal(points, np.asarray(second["point"]))
 
-    if model_key == "nhits_base":
+    if model_key in {"nhits_base", "timemixer"}:
         restored_state = predictor.model.state_dict()
         assert restored_state.keys() == checkpoint["state_dict"].keys()
         for key, saved_value in checkpoint["state_dict"].items():

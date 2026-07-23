@@ -1072,7 +1072,6 @@ def _validate_checkpoint_safe_distribution_loss(payload: Mapping[str, Any]) -> N
         raise ValueError(
             "nhits_base supports point loss only; distribution checkpoints are not supported."
         )
-
     distribution = getattr(loss_obj, "distribution", None)
     if distribution is None or str(distribution) in _CHECKPOINT_SAFE_DISTRIBUTIONS:
         return
@@ -1083,6 +1082,37 @@ def _validate_checkpoint_safe_distribution_loss(payload: Mapping[str, Any]) -> N
         f"{distribution!r} from `{loss_field}`. "
         f"Supported distributions: {supported}."
     )
+
+
+def _validate_timemixer_point_loss(payload: Mapping[str, Any]) -> None:
+    """Reject non-point loss objects before constructing a TimeMixer model."""
+
+    requested_models = payload.get("models_to_run") or expand_training_targets(None)
+    if "timemixer" not in requested_models:
+        return
+
+    loss_obj = payload.get("loss_point")
+    if loss_obj is None:
+        loss_obj = payload.get("loss")
+    if loss_obj is None:
+        return
+
+    loss_name = loss_obj.__class__.__name__
+    is_distribution = bool(
+        getattr(loss_obj, "is_distribution_output", False)
+    ) or loss_name == "DistributionLoss"
+    is_quantile = loss_name in {
+        "MQLoss",
+        "QuantileLoss",
+        "QuantileAsPointLoss",
+        "MultiQuantilePinball",
+    }
+    if is_distribution or is_quantile:
+        mode = "distribution" if is_distribution else "quantile"
+        raise ValueError(
+            "timemixer supports point loss only; "
+            f"got {mode} loss {loss_name!r}."
+        )
 
 
 def _validate_ssl_artifact_precondition(payload: Mapping[str, Any]) -> None:
@@ -1208,6 +1238,15 @@ def _validate_training_request(
             "endogenous inputs only."
         )
 
+    if (
+        "timemixer" in requested_models
+        and bool(payload.get("use_exogenous_mode", False))
+    ):
+        raise ValueError(
+            "Invalid training request for timemixer: TimeMixer supports "
+            "endogenous inputs only."
+        )
+
     categorical_models = [
         model for model in requested_models if _family_from_training_target(model) != "timexer"
     ]
@@ -1312,6 +1351,7 @@ def train(req: TrainRequest | Mapping[str, Any]) -> TrainResult:
     """
     payload = _normalize_payload(_request_to_dict(req))
     _warn_deprecated_training_targets(payload)
+    _validate_timemixer_point_loss(payload)
     _validate_checkpoint_safe_distribution_loss(payload)
     _validate_ssl_artifact_precondition(payload)
     train_loader, val_loader, datamodule = _resolve_loaders(payload)
