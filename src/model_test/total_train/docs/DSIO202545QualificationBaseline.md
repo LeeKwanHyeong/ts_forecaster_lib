@@ -2,8 +2,10 @@
 
 ## Authoritative Protocol
 
-- Training and evaluation code commit:
+- Checkpoint training code commit:
   `f6d2e84aa316f351c683da878bd81a01b279bda5`
+- Extension evaluation code commit:
+  `c4a6c88d1a09b4dd0541d56108a76b1f60b53569`
 - Evaluation date: `2026-07-23`
 - Canonical target SHA-256:
   `328f547d5eb0a50c80dc60dc7bb89c09799599f8f6b8677406a0e3cc4a3ef547`
