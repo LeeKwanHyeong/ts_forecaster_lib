@@ -2,8 +2,8 @@
 
 ## Status
 
-Accepted. The output-space compatibility contract and normalized-space forward
-paths are implemented for Point, Quantile, and Distribution location outputs.
+Accepted for the active `patchmixer_exo` point model. Quantile and distribution
+paths are retained only for supported load-only checkpoints under ADR 0004.
 
 ## Context
 

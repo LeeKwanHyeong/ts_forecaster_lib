@@ -277,8 +277,8 @@ def _has_nonempty_features(value: Any) -> bool:
     return True
 
 
-class PatchMixerOriginalAdapter(DefaultAdapter):
-    """Keep the canonical PatchMixer path endogenous-only and shape-strict."""
+class PatchMixerEndogenousAdapter(DefaultAdapter):
+    """Keep the paper PatchMixer path endogenous-only and shape-strict."""
 
     def forward(
             self,
@@ -301,7 +301,7 @@ class PatchMixerOriginalAdapter(DefaultAdapter):
         ]
         if provided:
             raise RuntimeError(
-                "PatchMixerOriginal is an endogenous-only baseline; unsupported inputs: "
+                "PatchMixer is endogenous-only; unsupported inputs: "
                 + ", ".join(provided)
             )
 
@@ -314,7 +314,7 @@ class PatchMixerOriginalAdapter(DefaultAdapter):
         if not torch.is_tensor(output) or output.ndim != 3:
             shape = tuple(output.shape) if torch.is_tensor(output) else type(output)
             raise RuntimeError(
-                "PatchMixerOriginal must return [B,H,N], "
+                "PatchMixer must return [B,H,N], "
                 f"got {shape}."
             )
         return output

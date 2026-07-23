@@ -16,12 +16,12 @@ def _config_value(config: Any, *names: str, default: Any = _MISSING) -> Any:
     if default is not _MISSING:
         return default
     joined = " or ".join(repr(name) for name in names)
-    raise ValueError(f"PatchMixerOriginal config requires {joined}.")
+    raise ValueError(f"PatchMixer config requires {joined}.")
 
 
 @dataclass(frozen=True)
-class PatchMixerOriginalConfig:
-    """Architecture fields required by the canonical upstream point model."""
+class PatchMixerConfig:
+    """Architecture fields required by the paper-faithful endogenous model."""
 
     lookback: int
     horizon: int
@@ -71,7 +71,7 @@ class PatchMixerOriginalConfig:
         return self.horizon
 
     @classmethod
-    def from_config(cls, config: Any) -> "PatchMixerOriginalConfig":
+    def from_config(cls, config: Any) -> "PatchMixerConfig":
         if isinstance(config, cls):
             return config
         return cls(
@@ -97,11 +97,13 @@ class PatchMixerOriginalConfig:
         )
 
 
-# =========================
-# PatchMixer 전용 설정
-# =========================
+# Historical name retained for checkpoint/import compatibility. New code should
+# use PatchMixerConfig for the endogenous paper implementation.
+PatchMixerOriginalConfig = PatchMixerConfig
+
+
 @dataclass
-class PatchMixerConfig(TrainingConfig):
+class PatchMixerExogenousConfig(TrainingConfig):
     """
     PatchMixer 모델 학습 및 구조 설정을 위한 구성 클래스.
 
@@ -190,7 +192,7 @@ class PatchMixerConfig(TrainingConfig):
 # 프리셋: 월간/주간
 # =========================
 @dataclass
-class PatchMixerConfigMonthly(PatchMixerConfig):
+class PatchMixerConfigMonthly(PatchMixerExogenousConfig):
     """
     월간(Monthly) 데이터 전용 프리셋 설정.
     특징:
@@ -202,7 +204,7 @@ class PatchMixerConfigMonthly(PatchMixerConfig):
 
 
 @dataclass
-class PatchMixerConfigWeekly(PatchMixerConfig):
+class PatchMixerConfigWeekly(PatchMixerExogenousConfig):
     """
     주간(Weekly) 데이터 전용 프리셋 설정.
     특징:
@@ -211,3 +213,8 @@ class PatchMixerConfigWeekly(PatchMixerConfig):
     """
     expander_season_period: int = 52
     expander_n_harmonics: int = 8
+
+
+# Enhanced/quantile checkpoints created before the public model consolidation
+# are restored with this config shape through load-only builders.
+PatchMixerLegacyConfig = PatchMixerExogenousConfig

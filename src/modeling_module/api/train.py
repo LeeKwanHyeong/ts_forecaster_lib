@@ -1028,10 +1028,10 @@ def _validate_checkpoint_safe_distribution_loss(payload: Mapping[str, Any]) -> N
         return
 
     requested_models = payload.get("models_to_run") or expand_training_targets(None)
-    if "patchmixer_original" in requested_models:
+    if any(model in requested_models for model in ("patchmixer", "patchmixer_exo")):
         raise ValueError(
-            "patchmixer_original supports point loss only; distribution checkpoints "
-            "are not part of the canonical upstream contract."
+            "PatchMixer public training supports point loss only; distribution "
+            "checkpoints are retained through the legacy load-only contract."
         )
     if "nhits_base" in requested_models:
         raise ValueError(
@@ -1146,8 +1146,7 @@ def _validate_training_request(
     explicit_exogenous_models = {
         "patchtst_exogenous",
         "patchtst_quantile_exogenous",
-        "patchmixer_exogenous",
-        "patchmixer_quantile_exogenous",
+        "patchmixer_exo",
     }
     requested_explicit_exogenous = sorted(
         explicit_exogenous_models.intersection(requested_models)
@@ -1166,12 +1165,12 @@ def _validate_training_request(
             )
 
     if (
-        "patchmixer_original" in requested_models
+        "patchmixer" in requested_models
         and bool(payload.get("use_exogenous_mode", False))
     ):
         raise ValueError(
-            "Invalid training request for patchmixer_original: the canonical upstream "
-            "baseline supports endogenous inputs only."
+            "Invalid training request for patchmixer: the paper model supports "
+            "endogenous inputs only."
         )
 
     categorical_models = [

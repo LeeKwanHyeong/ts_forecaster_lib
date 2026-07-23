@@ -364,7 +364,7 @@ def test_train_rejects_timexer_with_categorical_exogenous_input(tmp_path):
         )
 
 
-def test_train_rejects_patchmixer_original_distribution_before_data_resolution(
+def test_train_rejects_patchmixer_distribution_before_data_resolution(
     monkeypatch,
 ):
     train_module = importlib.import_module("modeling_module.api.train")
@@ -377,10 +377,10 @@ def test_train_rejects_patchmixer_original_distribution_before_data_resolution(
 
     monkeypatch.setattr(train_module, "_resolve_loaders", unexpected_resolve_loaders)
 
-    with pytest.raises(ValueError, match="patchmixer_original supports point loss only"):
+    with pytest.raises(ValueError, match="PatchMixer public training supports point loss only"):
         train(
             TrainRequest(
-                models=["patchmixer_original"],
+                models=["patchmixer"],
                 trainer={"loss": DistributionLoss("Normal")},
                 artifacts=ArtifactConfig(save_dir=None, auto_save_dir=False),
             )
@@ -389,7 +389,7 @@ def test_train_rejects_patchmixer_original_distribution_before_data_resolution(
     assert reached_data_resolution is False
 
 
-def test_train_rejects_patchmixer_original_exogenous_inputs_before_training(
+def test_train_rejects_patchmixer_exogenous_inputs_before_training(
     monkeypatch,
     tmp_path,
 ):
@@ -403,7 +403,7 @@ def test_train_rejects_patchmixer_original_exogenous_inputs_before_training(
 
     monkeypatch.setattr(train_module, "run_total_train", unexpected_training)
 
-    with pytest.raises(ValueError, match="canonical upstream baseline supports endogenous"):
+    with pytest.raises(ValueError, match="paper model supports endogenous"):
         train(
             {
                 "data": {
@@ -415,7 +415,7 @@ def test_train_rejects_patchmixer_original_exogenous_inputs_before_training(
                     "past_exo_cont_cols": ["exo_hist"],
                     "future_exo_cont_cols": ["promo_flag"],
                 },
-                "models": ["patchmixer_original"],
+                "models": ["patchmixer"],
                 "use_exogenous_mode": True,
                 "trainer": {"epochs": 1, "lr": 1e-3},
                 "device": "cpu",
@@ -432,8 +432,7 @@ def test_train_rejects_patchmixer_original_exogenous_inputs_before_training(
     [
         "patchtst_exogenous",
         "patchtst_quantile_exogenous",
-        "patchmixer_exogenous",
-        "patchmixer_quantile_exogenous",
+        "patchmixer_exo",
     ],
 )
 def test_train_rejects_explicit_exogenous_models_without_exogenous_mode(
@@ -480,8 +479,7 @@ def test_train_rejects_explicit_exogenous_models_without_exogenous_mode(
     [
         "patchtst_exogenous",
         "patchtst_quantile_exogenous",
-        "patchmixer_exogenous",
-        "patchmixer_quantile_exogenous",
+        "patchmixer_exo",
     ],
 )
 def test_train_rejects_explicit_exogenous_models_without_features(
@@ -523,7 +521,7 @@ def test_train_rejects_explicit_exogenous_models_without_features(
 
 @pytest.mark.parametrize(
     "model_key",
-    ["patchtst_base", "patchmixer_base", "titan_base", "exotst_base"],
+    ["patchtst_base", "patchmixer_exo", "titan_base", "exotst_base"],
 )
 def test_train_rejects_categorical_exogenous_inputs_before_model_construction(
     monkeypatch,

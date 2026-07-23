@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
-"""Benchmark fixed PatchMixer training steps on an RTX 5090.
-
-The benchmark compares the pinned Original and Enhanced point models with the
-same synthetic CUDA-resident batch, loss, optimizer, and precision. Data-loader
-and host-to-device transfer time are intentionally excluded.
-"""
+"""Benchmark active PatchMixer point models on an RTX 5090."""
 
 from __future__ import annotations
 
@@ -16,9 +11,8 @@ import platform
 import statistics
 import subprocess
 import sys
-from contextlib import nullcontext, redirect_stdout
+from contextlib import nullcontext
 from datetime import datetime, timezone
-from io import StringIO
 from pathlib import Path
 from typing import Any, Callable
 
@@ -31,21 +25,21 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from modeling_module.models.PatchMixer.PatchMixer import PatchMixerModel
-from modeling_module.models.PatchMixer import (
-    PatchMixerOriginalConfig,
-    PatchMixerOriginalModel,
+from modeling_module.models.PatchMixer import PatchMixerModel
+from modeling_module.models.PatchMixer.common.configs import (
+    PatchMixerConfig,
+    PatchMixerExogenousConfig,
 )
-from modeling_module.models.PatchMixer.common.configs import PatchMixerConfig
+from modeling_module.models.PatchMixer.variants import PatchMixerExogenousModel
 from modeling_module.models.PatchMixer.provenance import (
-    PATCHMIXER_ENHANCED_BASELINE_COMMIT,
     PATCHMIXER_REFERENCE_CONFIG,
-    PATCHMIXER_REFERENCE_PARAMETER_COUNTS,
     PATCHMIXER_UPSTREAM_COMMIT,
 )
 
 
-MODEL_NAMES = ("original", "enhanced")
+MODEL_NAMES = ("patchmixer", "patchmixer_exo")
+PAST_EXO_DIM = 11
+FUTURE_EXO_DIM = 6
 
 
 def _positive_int(value: str) -> int:
@@ -130,14 +124,17 @@ def _parameter_count(model: torch.nn.Module) -> int:
 
 def _build_model(name: str) -> torch.nn.Module:
     config_values = dict(PATCHMIXER_REFERENCE_CONFIG)
-    if name == "original":
-        config = PatchMixerOriginalConfig.from_config(config_values)
-        return PatchMixerOriginalModel(config)
-    if name == "enhanced":
-        config = PatchMixerConfig(**config_values)
-        # The Enhanced constructor currently emits compatibility diagnostics.
-        with redirect_stdout(StringIO()):
-            return PatchMixerModel(config)
+    if name == "patchmixer":
+        return PatchMixerModel(PatchMixerConfig.from_config(config_values))
+    if name == "patchmixer_exo":
+        config = PatchMixerExogenousConfig(
+            **config_values,
+            past_exo_mode="z_gate",
+            past_exo_cont_dim=PAST_EXO_DIM,
+            future_exo_dim=FUTURE_EXO_DIM,
+            use_revin=True,
+        )
+        return PatchMixerExogenousModel(config)
     raise ValueError(f"Unsupported model: {name}")
 
 
@@ -172,7 +169,7 @@ def _make_batch(
     lookback: int,
     horizon: int,
     seed: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     generator = torch.Generator(device="cuda").manual_seed(seed)
     inputs = torch.randn(
         batch_size,
@@ -189,7 +186,21 @@ def _make_batch(
     )
     trend = torch.linspace(0.0, 0.2, horizon, device="cuda")
     targets = inputs[:, -1, 0].unsqueeze(1) + trend.unsqueeze(0) + noise
-    return inputs, targets
+    past_exo = torch.randn(
+        batch_size,
+        lookback,
+        PAST_EXO_DIM,
+        device="cuda",
+        generator=generator,
+    )
+    future_exo = torch.randn(
+        batch_size,
+        horizon,
+        FUTURE_EXO_DIM,
+        device="cuda",
+        generator=generator,
+    )
+    return inputs, targets, past_exo, future_exo
 
 
 def _benchmark_model(
@@ -209,19 +220,13 @@ def _benchmark_model(
     _seed_everything(seed)
 
     reference = dict(PATCHMIXER_REFERENCE_CONFIG)
-    expected_counts = dict(PATCHMIXER_REFERENCE_PARAMETER_COUNTS)
     lookback = int(reference["lookback"])
     horizon = int(reference["horizon"])
 
     model = _build_model(name).cuda().train()
     parameter_count = _parameter_count(model)
-    if parameter_count != expected_counts[name]:
-        raise RuntimeError(
-            f"{name} parameter-count drift: got {parameter_count:,}, "
-            f"expected {expected_counts[name]:,}."
-        )
 
-    inputs, targets = _make_batch(
+    inputs, targets, past_exo, future_exo = _make_batch(
         batch_size=batch_size,
         lookback=lookback,
         horizon=horizon,
@@ -237,7 +242,15 @@ def _benchmark_model(
     def training_step() -> torch.Tensor:
         optimizer.zero_grad(set_to_none=True)
         with autocast_context():
-            prediction = _point_prediction(model(inputs), horizon=horizon)
+            if name == "patchmixer_exo":
+                output = model(
+                    inputs,
+                    past_exo_cont=past_exo,
+                    future_exo=future_exo,
+                )
+            else:
+                output = model(inputs)
+            prediction = _point_prediction(output, horizon=horizon)
             loss = F.mse_loss(prediction, targets)
         loss.backward()
         optimizer.step()
@@ -297,7 +310,8 @@ def _benchmark_model(
         },
     }
 
-    del optimizer, model, inputs, targets, starts, ends, first_loss, last_loss
+    del optimizer, model, inputs, targets, past_exo, future_exo
+    del starts, ends, first_loss, last_loss
     gc.collect()
     torch.cuda.empty_cache()
     torch.cuda.synchronize()
@@ -342,8 +356,7 @@ def main(argv: list[str] | None = None) -> int:
         },
         "source": {
             "git": _git_metadata(),
-            "original_upstream_commit": PATCHMIXER_UPSTREAM_COMMIT,
-            "enhanced_baseline_commit": PATCHMIXER_ENHANCED_BASELINE_COMMIT,
+            "patchmixer_upstream_commit": PATCHMIXER_UPSTREAM_COMMIT,
         },
         "protocol": {
             "models": args.models,

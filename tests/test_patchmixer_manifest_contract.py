@@ -59,8 +59,8 @@ def test_patchmixer_records_global_best_val_loss_in_manifest(monkeypatch, tmp_pa
 
     manifest_path = save_training_manifest(
         tmp_path,
-        results={"patchmixer_base": result},
+        results={"patchmixer": result},
     )
     manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
 
-    assert manifest["results"]["patchmixer_base"]["best_val_loss"] == pytest.approx(0.25)
+    assert manifest["results"]["patchmixer"]["best_val_loss"] == pytest.approx(0.25)

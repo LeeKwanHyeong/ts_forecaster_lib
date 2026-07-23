@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from modeling_module.models.PatchMixer.common.configs import PatchMixerOriginalConfig
+from modeling_module.models.PatchMixer.common.configs import PatchMixerConfig
 
 
 def _infer_patch_cfgs(lookback: int, n_branches: int = 3) -> List[Tuple[int, int, int]]:
@@ -40,15 +40,12 @@ def _infer_patch_cfgs(lookback: int, n_branches: int = 3) -> List[Tuple[int, int
     return cfgs
 
 
-make_patch_cfgs = _infer_patch_cfgs
-
-
 # =====================================================================
 # Canonical upstream-compatible point backbone
 # The definitions in this section remain source-equivalent to the MIT-licensed
 # implementation pinned in provenance.py.
 # =====================================================================
-class PatchMixerOriginalRevIN(nn.Module):
+class PatchMixerRevIN(nn.Module):
     """Upstream RevIN math kept local to preserve strict output parity."""
 
     def __init__(
@@ -102,7 +99,7 @@ class PatchMixerOriginalRevIN(nn.Module):
         return x
 
 
-class PatchMixerOriginalLayer(nn.Module):
+class PatchMixerLayer(nn.Module):
     """Upstream separable convolution over `(patch_num, d_model)`."""
 
     def __init__(self, dim: int, a: int, kernel_size: int = 8) -> None:
@@ -129,10 +126,10 @@ class PatchMixerOriginalLayer(nn.Module):
         return self.Conv_1x1(x)
 
 
-class PatchMixerOriginalBackbone(nn.Module):
+class PatchMixerBackbone(nn.Module):
     """Canonical single-scale, channel-independent PatchMixer point backbone."""
 
-    def __init__(self, configs: PatchMixerOriginalConfig) -> None:
+    def __init__(self, configs: PatchMixerConfig) -> None:
         super().__init__()
         self.nvals = int(configs.enc_in)
         self.lookback = int(configs.seq_len)
@@ -149,7 +146,7 @@ class PatchMixerOriginalBackbone(nn.Module):
 
         self.PatchMixer_blocks = nn.ModuleList(
             [
-                PatchMixerOriginalLayer(
+                PatchMixerLayer(
                     dim=self.patch_num,
                     a=self.a,
                     kernel_size=self.kernel_size,
@@ -175,7 +172,7 @@ class PatchMixerOriginalBackbone(nn.Module):
         self.dropout = nn.Dropout(float(configs.dropout))
         self.revin = bool(configs.use_revin)
         if self.revin:
-            self.revin_layer = PatchMixerOriginalRevIN(
+            self.revin_layer = PatchMixerRevIN(
                 self.nvals,
                 affine=bool(configs.revin_affine),
                 subtract_last=bool(configs.revin_subtract_last),
@@ -184,15 +181,15 @@ class PatchMixerOriginalBackbone(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if x.ndim != 3:
             raise ValueError(
-                f"PatchMixerOriginal expects [B,L,N], got shape {tuple(x.shape)}."
+                f"PatchMixer expects [B,L,N], got shape {tuple(x.shape)}."
             )
         if x.shape[1] != self.lookback:
             raise ValueError(
-                f"PatchMixerOriginal expected lookback={self.lookback}, got {x.shape[1]}."
+                f"PatchMixer expected lookback={self.lookback}, got {x.shape[1]}."
             )
         if x.shape[2] != self.nvals:
             raise ValueError(
-                f"PatchMixerOriginal expected enc_in={self.nvals}, got {x.shape[2]}."
+                f"PatchMixer expected enc_in={self.nvals}, got {x.shape[2]}."
             )
 
         batch_size, _, nvars = x.shape
@@ -220,7 +217,7 @@ class PatchMixerOriginalBackbone(nn.Module):
         return x
 
 
-class PatchMixerLayer(nn.Module):
+class _PatchMixerLegacyLayer(nn.Module):
     """
     PatchMixer의 핵심 연산 블록. Depthwise Conv와 Pointwise Conv를 사용해 시간/채널 정보를 혼합.
 
@@ -285,7 +282,7 @@ class PatchMixerLayer(nn.Module):
         return x + res
 
 
-class PatchMixerBackbone(nn.Module):
+class _PatchMixerLegacyBackbone(nn.Module):
     """
     단일 스케일 PatchMixer 백본 네트워크.
 
@@ -328,7 +325,7 @@ class PatchMixerBackbone(nn.Module):
 
         # 믹서 블록 스택 생성
         self.blocks = nn.ModuleList([
-            PatchMixerLayer(d_model=self.d_model, kernel_size=int(configs.mixer_kernel_size), dropout=self.dropout_rate)
+            _PatchMixerLegacyLayer(d_model=self.d_model, kernel_size=int(configs.mixer_kernel_size), dropout=self.dropout_rate)
             for _ in range(self.depth)
         ])
 
@@ -399,14 +396,14 @@ class PatchMixerBackbone(nn.Module):
         # 학습 모드 시 차원 불일치 경고 (디버깅용)
         if z.size(-1) != self.out_dim:
             if self.training:
-                print(f"[PatchMixerBackbone][warn] forward out_dim={z.size(-1)} "
+                print(f"[PatchMixerLegacyBackbone][warn] forward out_dim={z.size(-1)} "
                       f"!= declared out_dim={self.out_dim} "
                       f"(A_eff={A_eff}, A_cfg={self.patch_num})")
 
         return z
 
 
-class MultiScalePatchMixerBackbone(nn.Module):
+class _MultiScalePatchMixerLegacyBackbone(nn.Module):
     """
     멀티 스케일(Multi-scale) PatchMixer 백본.
 
@@ -440,7 +437,7 @@ class MultiScalePatchMixerBackbone(nn.Module):
             cfg.mixer_kernel_size = int(ks)
 
             # RevIN is applied once by the parent quantile model.
-            branch = PatchMixerBackbone(cfg)
+            branch = _PatchMixerLegacyBackbone(cfg)
             self.branches.append(branch)
             # 차원 통일용 투영 레이어
             self.projs.append(nn.Linear(branch.out_dim, per_branch_dim))

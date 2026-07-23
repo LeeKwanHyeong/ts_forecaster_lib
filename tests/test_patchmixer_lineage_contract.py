@@ -4,8 +4,8 @@ import torch
 import torch.nn.functional as F
 
 from modeling_module.models.PatchMixer import (
-    PatchMixerOriginalConfig,
-    PatchMixerOriginalModel,
+    PatchMixerConfig,
+    PatchMixerModel,
 )
 from modeling_module.models.PatchMixer.provenance import (
     PATCHMIXER_REFERENCE_CONFIG,
@@ -19,8 +19,8 @@ UPSTREAM_COMMIT = "cfc6c1386e7fe1633f92ef4b258ff1a4649008b4"
 UPSTREAM_MODEL_BLOB = "bf3867109192da6cd8816f4aec8ab0bf16ec80af"
 
 
-def _small_config() -> PatchMixerOriginalConfig:
-    return PatchMixerOriginalConfig(
+def _small_config() -> PatchMixerConfig:
+    return PatchMixerConfig(
         lookback=24,
         horizon=6,
         enc_in=3,
@@ -38,7 +38,7 @@ def _small_config() -> PatchMixerOriginalConfig:
 
 
 def _upstream_functional_forward(
-    model: PatchMixerOriginalModel,
+    model: PatchMixerModel,
     x: torch.Tensor,
 ) -> torch.Tensor:
     """Evaluate the pinned upstream equations without calling model.forward()."""
@@ -131,7 +131,7 @@ def _upstream_functional_forward(
     return forecast * stdev + mean
 
 
-def _expected_state_dict_keys(config: PatchMixerOriginalConfig) -> set[str]:
+def _expected_state_dict_keys(config: PatchMixerConfig) -> set[str]:
     keys = {
         "model.W_P.weight",
         "model.W_P.bias",
@@ -161,9 +161,9 @@ def _expected_state_dict_keys(config: PatchMixerOriginalConfig) -> set[str]:
     return keys
 
 
-def test_original_output_matches_pinned_upstream_equations() -> None:
+def test_paper_output_matches_pinned_upstream_equations() -> None:
     torch.manual_seed(20260721)
-    model = PatchMixerOriginalModel(_small_config()).eval()
+    model = PatchMixerModel(_small_config()).eval()
     x = torch.randn(4, model.configs.lookback, model.configs.enc_in)
 
     with torch.no_grad():
@@ -174,16 +174,16 @@ def test_original_output_matches_pinned_upstream_equations() -> None:
     torch.testing.assert_close(actual, expected, rtol=2e-6, atol=5e-7)
 
 
-def test_original_upstream_state_dict_and_parameter_count_are_pinned() -> None:
+def test_paper_upstream_state_dict_and_parameter_count_are_pinned() -> None:
     config = _small_config()
-    model = PatchMixerOriginalModel(config)
+    model = PatchMixerModel(config)
 
     assert PATCHMIXER_UPSTREAM_COMMIT == UPSTREAM_COMMIT
     assert PATCHMIXER_UPSTREAM_MODEL_BLOB == UPSTREAM_MODEL_BLOB
     assert model.upstream_commit == UPSTREAM_COMMIT
     assert set(model.state_dict()) == _expected_state_dict_keys(config)
 
-    reference_model = PatchMixerOriginalModel(
+    reference_model = PatchMixerModel(
         dict(PATCHMIXER_REFERENCE_CONFIG)
     )
     expected_counts = dict(PATCHMIXER_REFERENCE_PARAMETER_COUNTS)
@@ -191,9 +191,9 @@ def test_original_upstream_state_dict_and_parameter_count_are_pinned() -> None:
     assert parameter_count == expected_counts["original"]
 
 
-def test_original_backward_reaches_every_trainable_parameter() -> None:
+def test_paper_backward_reaches_every_trainable_parameter() -> None:
     torch.manual_seed(20260722)
-    model = PatchMixerOriginalModel(_small_config()).train()
+    model = PatchMixerModel(_small_config()).train()
     x = torch.randn(
         5,
         model.configs.lookback,
@@ -214,9 +214,9 @@ def test_original_backward_reaches_every_trainable_parameter() -> None:
         assert torch.count_nonzero(parameter.grad) > 0, f"zero gradient: {name}"
 
 
-def test_original_forecast_is_channel_independent() -> None:
+def test_paper_forecast_is_channel_independent() -> None:
     torch.manual_seed(20260723)
-    model = PatchMixerOriginalModel(_small_config()).eval()
+    model = PatchMixerModel(_small_config()).eval()
     x = torch.randn(3, model.configs.lookback, model.configs.enc_in)
     perturbed = x.clone()
     waveform = torch.linspace(-3.0, 2.0, model.configs.lookback).pow(3)

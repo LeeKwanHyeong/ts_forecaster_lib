@@ -79,8 +79,7 @@ def _prediction_payload(
         "timexer_base",
         "patchtst_exogenous",
         "patchtst_quantile_exogenous",
-        "patchmixer_exogenous",
-        "patchmixer_quantile_exogenous",
+        "patchmixer_exo",
     }
     if model_key not in exogenous_model_keys:
         return x
@@ -241,7 +240,7 @@ POINT_SMOKE_CASES = [
         id="patchtst",
     ),
     pytest.param(
-        "patchmixer_base",
+        "patchmixer",
         _tiny_patchmixer_architecture(),
         None,
         id="patchmixer",
@@ -259,7 +258,7 @@ POINT_SMOKE_CASES = [
         id="patchtst-exogenous",
     ),
     pytest.param(
-        "patchmixer_exogenous",
+        "patchmixer_exo",
         _tiny_patchmixer_architecture(),
         ExogenousConfig(
             use_exogenous_mode=True,
@@ -269,12 +268,6 @@ POINT_SMOKE_CASES = [
             future_exo_cont_cols=["exo_known"],
         ),
         id="patchmixer-exogenous",
-    ),
-    pytest.param(
-        "patchmixer_original",
-        _tiny_patchmixer_architecture(),
-        None,
-        id="patchmixer-original",
     ),
     pytest.param(
         "titan_base",
@@ -416,14 +409,6 @@ REMAINING_ARTIFACT_SMOKE_CASES = [
         id="patchtst-quantile",
     ),
     pytest.param(
-        "patchmixer_quantile",
-        _tiny_patchmixer_architecture(),
-        8,
-        10,
-        "quantile",
-        id="patchmixer-quantile",
-    ),
-    pytest.param(
         "titan_lmm",
         _tiny_titan_architecture(),
         2,
@@ -524,25 +509,11 @@ QUANTILE_FUTURE_EXOGENOUS_SMOKE_CASES = [
         id="patchtst-quantile-future-exogenous",
     ),
     pytest.param(
-        "patchmixer_quantile",
-        _tiny_patchmixer_architecture(),
-        8,
-        10,
-        id="patchmixer-quantile-future-exogenous",
-    ),
-    pytest.param(
         "patchtst_quantile_exogenous",
         _tiny_patchtst_architecture(),
         2,
         4,
         id="patchtst-quantile-explicit-exogenous",
-    ),
-    pytest.param(
-        "patchmixer_quantile_exogenous",
-        _tiny_patchmixer_architecture(),
-        8,
-        10,
-        id="patchmixer-quantile-explicit-exogenous",
     ),
 ]
 
@@ -698,7 +669,7 @@ FUTURE_EXOGENOUS_SENSITIVITY_CASES = [
         id="patchtst-point",
     ),
     pytest.param(
-        "patchmixer_base",
+        "patchmixer_exo",
         _tiny_patchmixer_architecture(),
         2,
         4,
@@ -720,14 +691,6 @@ FUTURE_EXOGENOUS_SENSITIVITY_CASES = [
         4,
         "q50",
         id="patchtst-quantile",
-    ),
-    pytest.param(
-        "patchmixer_quantile",
-        _tiny_patchmixer_architecture(),
-        8,
-        10,
-        "q50",
-        id="patchmixer-quantile",
     ),
 ]
 

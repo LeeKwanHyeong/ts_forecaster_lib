@@ -28,9 +28,6 @@ __all__ = [
     # explicit builders (stable public surface)
     "build_patch_mixer",
     "build_patch_mixer_exogenous",
-    "build_patch_mixer_original",
-    "build_patch_mixer_quantile",
-    "build_patch_mixer_quantile_exogenous",
     "build_titan_base",
     "build_titan_lmm",
     "build_titan_seq2seq",
@@ -42,7 +39,8 @@ __all__ = [
     "build_nhits",
     "build_timexer",
     "build_sellm",
-    "PatchMixerOriginalConfig",
+    "PatchMixerConfig",
+    "PatchMixerExogenousConfig",
 ]
 
 if TYPE_CHECKING:
@@ -52,9 +50,6 @@ if TYPE_CHECKING:
         build_sellm,
         build_patch_mixer,
         build_patch_mixer_exogenous,
-        build_patch_mixer_original,
-        build_patch_mixer_quantile,
-        build_patch_mixer_quantile_exogenous,
         build_titan_base,
         build_titan_lmm,
         build_titan_seq2seq,
@@ -64,15 +59,12 @@ if TYPE_CHECKING:
         build_patchTST_quantile_exogenous,
         build_timexer,
     )
-    from .PatchMixer.common.configs import PatchMixerOriginalConfig
+    from .PatchMixer.common.configs import PatchMixerConfig, PatchMixerExogenousConfig
 
 # Lazy import map: import modeling_module.models 시점에 heavy import 방지
 _LAZY = {
     "build_patch_mixer": (".model_builder", "build_patch_mixer"),
     "build_patch_mixer_exogenous": (".model_builder", "build_patch_mixer_exogenous"),
-    "build_patch_mixer_original": (".model_builder", "build_patch_mixer_original"),
-    "build_patch_mixer_quantile": (".model_builder", "build_patch_mixer_quantile"),
-    "build_patch_mixer_quantile_exogenous": (".model_builder", "build_patch_mixer_quantile_exogenous"),
     "build_titan_base": (".model_builder", "build_titan_base"),
     "build_titan_lmm": (".model_builder", "build_titan_lmm"),
     "build_titan_seq2seq": (".model_builder", "build_titan_seq2seq"),
@@ -84,9 +76,13 @@ _LAZY = {
     "build_nhits": (".model_builder", "build_nhits"),
     "build_timexer": (".model_builder", "build_timexer"),
     "build_sellm": (".model_builder", "build_sellm"),
-    "PatchMixerOriginalConfig": (
+    "PatchMixerConfig": (
         ".PatchMixer.common.configs",
-        "PatchMixerOriginalConfig",
+        "PatchMixerConfig",
+    ),
+    "PatchMixerExogenousConfig": (
+        ".PatchMixer.common.configs",
+        "PatchMixerExogenousConfig",
     ),
 }
 

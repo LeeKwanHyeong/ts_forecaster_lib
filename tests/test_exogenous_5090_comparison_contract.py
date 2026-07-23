@@ -173,9 +173,13 @@ def test_patchmixer_ablation_configs_enable_only_requested_inputs():
     }
     for key, widths in expected.items():
         config = MODULE._patchmixer_config(cases[key])
-        assert (config.past_exo_cont_dim, config.future_exo_dim) == widths
-        assert config.past_exo_mode == "z_gate"
-        assert config.future_exo_shift_space == "output"
+        assert (
+            int(getattr(config, "past_exo_cont_dim", 0)),
+            int(getattr(config, "future_exo_dim", 0)),
+        ) == widths
+        expected_mode = "none" if key == "patchmixer_endogenous" else "z_gate"
+        assert getattr(config, "past_exo_mode", "none") == expected_mode
+        assert getattr(config, "future_exo_shift_space", "output") == "output"
 
 
 def test_comparison_uses_nonempty_past_and_future_feature_contracts():

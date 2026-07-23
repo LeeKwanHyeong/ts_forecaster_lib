@@ -24,6 +24,7 @@ class ModelSpec:
     included_in_family: bool = True
     deprecated: bool = False
     deprecation_message: Optional[str] = None
+    load_only: bool = False
     exogenous_policy: str = "none"
     exogenous_inputs: tuple[str, ...] = ()
     fusion_strategy: Optional[str] = None
@@ -95,75 +96,31 @@ MODEL_SPECS: dict[str, ModelSpec] = {
         exogenous_inputs=("past_cont", "past_cat", "future_cont"),
         fusion_strategy="patch_concat+future_cross_attention",
     ),
-    "patchmixer_base": ModelSpec(
-        key="patchmixer_base",
+    "patchmixer": ModelSpec(
+        key="patchmixer",
         family="patchmixer",
         builder_module="modeling_module.models.model_builder",
         builder_attr="build_patch_mixer",
-        label="PatchMixer Base",
-        aliases=("patchmixerbase", "patchmixerdist", "patchmixer"),
-        class_names=(
-            "PatchMixerModel",
-            "PatchMixerPointModel",
-            "PatchMixerDistributionModel",
-            "PatchMixerEnhancedModel",
-            "PatchMixerEndogenousModel",
+        label="PatchMixer",
+        aliases=(
+            "patchmixer_original",
+            "patchmixeroriginal",
+            "patchmixercanonical",
+            "patchmixerupstream",
         ),
-        checkpoint_aliases=("PatchMixer", "PatchMixerBase", "PatchMixerDist"),
-        exogenous_policy="optional_legacy",
-        exogenous_inputs=("past_cont", "past_cat", "future_cont"),
-        fusion_strategy="legacy_config_routing",
+        class_names=("PatchMixerModel", "PatchMixerOriginalModel"),
+        checkpoint_aliases=("PatchMixer", "PatchMixerOriginal", "PatchMixerCanonical"),
+        exogenous_policy="none",
     ),
-    "patchmixer_exogenous": ModelSpec(
-        key="patchmixer_exogenous",
+    "patchmixer_exo": ModelSpec(
+        key="patchmixer_exo",
         family="patchmixer",
         builder_module="modeling_module.models.model_builder",
         builder_attr="build_patch_mixer_exogenous",
         label="PatchMixer Exogenous",
-        aliases=("patchmixerexo", "patchmixerexogenous"),
+        aliases=("patchmixer_exogenous", "patchmixerexo", "patchmixerexogenous"),
         class_names=("PatchMixerExogenousModel",),
         checkpoint_aliases=("PatchMixerExogenous", "PatchMixerExo"),
-        included_in_family=False,
-        exogenous_policy="required",
-        exogenous_inputs=("past_cont", "past_cat", "future_cont"),
-        fusion_strategy="gated_residual+future_shift",
-    ),
-    "patchmixer_original": ModelSpec(
-        key="patchmixer_original",
-        family="patchmixer",
-        builder_module="modeling_module.models.model_builder",
-        builder_attr="build_patch_mixer_original",
-        label="PatchMixer Original",
-        aliases=("patchmixeroriginal", "patchmixercanonical", "patchmixerupstream"),
-        class_names=("PatchMixerOriginalModel",),
-        checkpoint_aliases=("PatchMixerOriginal", "PatchMixerCanonical"),
-        trainable=True,
-        included_in_family=False,
-        exogenous_policy="none",
-    ),
-    "patchmixer_quantile": ModelSpec(
-        key="patchmixer_quantile",
-        family="patchmixer",
-        builder_module="modeling_module.models.model_builder",
-        builder_attr="build_patch_mixer_quantile",
-        label="PatchMixer Quantile",
-        aliases=("patchmixerquantile", "patchmixerq"),
-        class_names=("PatchMixerQuantileModel", "PatchMixerQuantileEndogenousModel"),
-        checkpoint_aliases=("PatchMixerQuantile",),
-        exogenous_policy="optional_legacy",
-        exogenous_inputs=("past_cont", "past_cat", "future_cont"),
-        fusion_strategy="legacy_config_routing",
-    ),
-    "patchmixer_quantile_exogenous": ModelSpec(
-        key="patchmixer_quantile_exogenous",
-        family="patchmixer",
-        builder_module="modeling_module.models.model_builder",
-        builder_attr="build_patch_mixer_quantile_exogenous",
-        label="PatchMixer Quantile Exogenous",
-        aliases=("patchmixerquantileexo", "patchmixerquantileexogenous"),
-        class_names=("PatchMixerQuantileExogenousModel",),
-        checkpoint_aliases=("PatchMixerQuantileExogenous",),
-        included_in_family=False,
         exogenous_policy="required",
         exogenous_inputs=("past_cont", "past_cat", "future_cont"),
         fusion_strategy="gated_residual+future_shift",
@@ -263,9 +220,82 @@ MODEL_SPECS: dict[str, ModelSpec] = {
 }
 
 
+_PATCHMIXER_LEGACY_MESSAGE = (
+    "This PatchMixer artifact is load-only. Enhanced endogenous, distribution, and "
+    "quantile training were retired; use 'patchmixer' or 'patchmixer_exo' for new runs."
+)
+
+
+LEGACY_MODEL_SPECS: dict[str, ModelSpec] = {
+    "patchmixer_base": ModelSpec(
+        key="patchmixer_base",
+        family="patchmixer",
+        builder_module="modeling_module.models.model_builder",
+        builder_attr="build_patch_mixer_legacy",
+        label="PatchMixer Enhanced (load-only)",
+        aliases=("patchmixerbase", "patchmixerdist"),
+        class_names=(
+            "PatchMixerEnhancedModel",
+            "PatchMixerPointModel",
+            "PatchMixerDistributionModel",
+            "PatchMixerEndogenousModel",
+            "BaseModel",
+        ),
+        checkpoint_aliases=("PatchMixerBase", "PatchMixerDist"),
+        trainable=False,
+        included_in_family=False,
+        deprecated=True,
+        deprecation_message=_PATCHMIXER_LEGACY_MESSAGE,
+        load_only=True,
+        exogenous_policy="optional_legacy",
+        exogenous_inputs=("past_cont", "past_cat", "future_cont"),
+        fusion_strategy="legacy_config_routing",
+    ),
+    "patchmixer_quantile": ModelSpec(
+        key="patchmixer_quantile",
+        family="patchmixer",
+        builder_module="modeling_module.models.model_builder",
+        builder_attr="build_patch_mixer_quantile_legacy",
+        label="PatchMixer Quantile (load-only)",
+        aliases=("patchmixerquantile", "patchmixerq"),
+        class_names=("PatchMixerQuantileModel", "PatchMixerQuantileEndogenousModel", "QuantileModel"),
+        checkpoint_aliases=("PatchMixerQuantile",),
+        trainable=False,
+        included_in_family=False,
+        deprecated=True,
+        deprecation_message=_PATCHMIXER_LEGACY_MESSAGE,
+        load_only=True,
+        exogenous_policy="optional_legacy",
+        exogenous_inputs=("past_cont", "past_cat", "future_cont"),
+        fusion_strategy="legacy_config_routing",
+    ),
+    "patchmixer_quantile_exogenous": ModelSpec(
+        key="patchmixer_quantile_exogenous",
+        family="patchmixer",
+        builder_module="modeling_module.models.model_builder",
+        builder_attr="build_patch_mixer_quantile_legacy",
+        label="PatchMixer Quantile Exogenous (load-only)",
+        aliases=("patchmixerquantileexo", "patchmixerquantileexogenous"),
+        class_names=("PatchMixerQuantileExogenousModel",),
+        checkpoint_aliases=("PatchMixerQuantileExogenous",),
+        trainable=False,
+        included_in_family=False,
+        deprecated=True,
+        deprecation_message=_PATCHMIXER_LEGACY_MESSAGE,
+        load_only=True,
+        exogenous_policy="required",
+        exogenous_inputs=("past_cont", "past_cat", "future_cont"),
+        fusion_strategy="gated_residual+future_shift",
+    ),
+}
+
+
+_ALL_MODEL_SPECS = {**MODEL_SPECS, **LEGACY_MODEL_SPECS}
+
+
 TRAINING_FAMILY_DEFAULTS: dict[str, tuple[str, ...]] = {
     "patchtst": ("patchtst_base", "patchtst_quantile"),
-    "patchmixer": ("patchmixer_base", "patchmixer_quantile"),
+    "patchmixer": ("patchmixer",),
     "titan": ("titan_base", "titan_lmm", "titan_seq2seq"),
     "exotst": ("exotst_base",),
     "nhits": ("nhits_base",),
@@ -300,11 +330,8 @@ _PATCHTST_CAPABILITY_ALIASES: dict[str, str] = {
 
 
 PATCHMIXER_CAPABILITY_DEFAULTS: dict[str, str] = {
-    "endogenous_point": "patchmixer_original",
-    "exogenous_point": "patchmixer_exogenous",
-    "distribution": "patchmixer_base",
-    "quantile": "patchmixer_quantile",
-    "exogenous_quantile": "patchmixer_quantile_exogenous",
+    "endogenous_point": "patchmixer",
+    "exogenous_point": "patchmixer_exo",
 }
 
 
@@ -312,10 +339,6 @@ _PATCHMIXER_CAPABILITY_ALIASES: dict[str, str] = {
     _norm_name("point"): "endogenous_point",
     _norm_name("endogenous_point"): "endogenous_point",
     _norm_name("exogenous_point"): "exogenous_point",
-    _norm_name("distribution"): "distribution",
-    _norm_name("dist"): "distribution",
-    _norm_name("quantile"): "quantile",
-    _norm_name("exogenous_quantile"): "exogenous_quantile",
 }
 
 
@@ -331,7 +354,7 @@ TRAINING_FAMILY_ALIASES: dict[str, tuple[str, ...]] = {
 
 
 _ARTIFACT_ALIAS_TO_KEY: dict[str, str] = {}
-for _key, _spec in MODEL_SPECS.items():
+for _key, _spec in _ALL_MODEL_SPECS.items():
     for _name in (_key, *_spec.aliases, *_spec.class_names, *_spec.checkpoint_aliases):
         _ARTIFACT_ALIAS_TO_KEY[_norm_name(_name)] = _key
 
@@ -383,7 +406,7 @@ def get_patchmixer_default_model_key(capability: str = "endogenous_point") -> st
 
 def get_model_spec(key: str) -> ModelSpec:
     canonical = resolve_artifact_model_key(key)
-    return MODEL_SPECS[canonical]
+    return _ALL_MODEL_SPECS[canonical]
 
 
 def get_model_builder(key: str) -> Callable[..., Any]:
@@ -420,7 +443,7 @@ def resolve_training_request_key(name: str) -> str:
         return _FAMILY_ALIAS_TO_KEY[normalized]
 
     artifact_key = resolve_artifact_model_key(name)
-    spec = MODEL_SPECS[artifact_key]
+    spec = _ALL_MODEL_SPECS[artifact_key]
     if not spec.trainable:
         raise ValueError(f"Model {artifact_key!r} is not trainable through the public training API.")
     return artifact_key
@@ -443,7 +466,7 @@ def expand_training_targets(targets: Optional[Iterable[str]]) -> list[str]:
 
 
 def family_for_artifact_key(key: str) -> str:
-    return MODEL_SPECS[resolve_artifact_model_key(key)].family
+    return _ALL_MODEL_SPECS[resolve_artifact_model_key(key)].family
 
 
 def ordered_training_families_for_targets(targets: Iterable[str]) -> list[str]:
@@ -466,6 +489,22 @@ def infer_artifact_model_key_from_checkpoint(
     *,
     ckpt_path: Optional[str] = None,
 ) -> str:
+    # Before consolidation, the Enhanced implementation also serialized the
+    # class name `PatchMixerModel`. Its state dict is structurally distinct from
+    # the paper model (`backbone.*` versus `model.*`), so route it load-only.
+    if _norm_name(str(ckpt.get("model_class", ""))) == "patchmixermodel":
+        state = None
+        for state_key in ("model_state", "state_dict", "model_state_dict", "model", "net", "weights"):
+            candidate = ckpt.get(state_key)
+            if isinstance(candidate, Mapping):
+                state = candidate
+                break
+        if state is not None and any(
+            str(name).startswith(("backbone.", "expander.", "head."))
+            for name in state
+        ):
+            return "patchmixer_base"
+
     candidates: list[str] = []
 
     meta = ckpt.get("meta")

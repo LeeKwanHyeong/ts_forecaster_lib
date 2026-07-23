@@ -37,8 +37,7 @@ artifact directory와 `training_manifest.json`으로 분리합니다.
 
 Family request는 public registry artifact로 확장됩니다.
 
-- `endo_only`: `patchtst_base` → `patchtst_quantile` → `patchmixer_base` →
-  `patchmixer_quantile`
+- `endo_only`: `patchtst_base` → `patchtst_quantile` → `patchmixer`
 - `exo_future`: `exotst_base`; past와 future continuous exogenous가 모두 필요
 - `exo_past_only`: `timexer_base`; past continuous exogenous만 사용하고 future exogenous를 거부
 
@@ -183,8 +182,7 @@ resume 기능이 없습니다. `CLEAN_OUTPUT=0`은 기존 directory를 보존할
 |---|---|
 | `patchtst_base` | `endo_only/weekly_PatchTST_L104_H27.pt` |
 | `patchtst_quantile` | `endo_only/weekly_PatchTSTQuantile_L104_H27.pt` |
-| `patchmixer_base` | `endo_only/weekly_PatchMixer_L104_H27.pt` |
-| `patchmixer_quantile` | `endo_only/weekly_PatchMixerQuantile_L104_H27.pt` |
+| `patchmixer` | `endo_only/weekly_PatchMixer_L104_H27.pt` |
 | `exotst_base` | `exo_future/weekly_ExoTSTBase_L104_H27.pt` |
 | `timexer_base` | `exo_past_only/weekly_TimeXerBase_L104_H27.pt` |
 
@@ -197,7 +195,7 @@ PatchTST `full` 재실행은 SSL pretraining도 다시 수행합니다.
 
 ```bash
 MODE=endo \
-ENDO_MODELS="patchmixer_base" \
+ENDO_MODELS="patchmixer" \
 SSL_MODE=sl_only \
 CLEAN_OUTPUT=0 \
 src/model_test/total_train/run_dsio_total_running_linux.sh --device cuda
