@@ -77,6 +77,7 @@ def test_window_stride_is_arithmetic_and_loader_order_is_reproducible():
     first = _datamodule(window_stride=2)
     second = _datamodule(window_stride=2)
     assert first.summary["train_windows"] == 2
+    assert first.summary["train_target_max_week"] == 202451
     assert second.summary["validation_windows"] == 2
     assert first.train_dataset is not None
     assert first.train_dataset.window_metadata(0).y_end_week == 202451
@@ -90,6 +91,26 @@ def test_window_stride_is_arithmetic_and_loader_order_is_reproducible():
     assert torch.equal(first_batch[0], second_batch[0])
     assert torch.equal(first_batch[1], second_batch[1])
     assert first_batch[2] == second_batch[2]
+
+
+def test_production_refit_uses_all_targets_and_has_no_validation_loader():
+    datamodule = _datamodule(training_mode="production_refit")
+
+    assert datamodule.summary["train_windows"] == 10
+    assert datamodule.summary["train_target_max_week"] == 202502
+    assert datamodule.summary["validation_windows"] == 0
+    assert datamodule.train_dataset is not None
+    assert datamodule.val_dataset is None
+
+    last_window = datamodule.train_dataset.window_metadata(
+        len(datamodule.train_dataset) - 1
+    )
+    assert last_window.x_end_week == 202451
+    assert last_window.y_start_week == 202452
+    assert last_window.y_end_week == 202502
+
+    with pytest.raises(RuntimeError, match="has no validation loader"):
+        datamodule.get_val_loader()
 
 
 def test_gap_duplicate_and_cutoff_mismatch_fail_fast():

@@ -351,6 +351,30 @@ def save_model(
     save_checkpoint(model, cfg, str(path), extra_meta=extra_meta)
 
 
+def _training_checkpoint_meta(
+    train_cfg: TrainingConfig,
+    stages: list[StageConfig],
+    result: Mapping[str, Any],
+) -> Dict[str, Any]:
+    training_mode = getattr(train_cfg, "training_mode", "qualification")
+    is_production_refit = training_mode == "production_refit"
+    meta: Dict[str, Any] = {
+        "training_mode": training_mode,
+        "validation_enabled": not is_production_refit,
+        "state_selection": (
+            "final_epoch" if is_production_refit else "best_validation"
+        ),
+        "configured_epochs": sum(int(stage.epochs) for stage in stages),
+    }
+    if result.get("epochs_completed") is not None:
+        meta["completed_epochs"] = int(result["epochs_completed"])
+    if result.get("final_train_loss") is not None:
+        meta["final_train_loss"] = float(result["final_train_loss"])
+    if getattr(train_cfg, "random_seed", None) is not None:
+        meta["random_seed"] = int(train_cfg.random_seed)
+    return meta
+
+
 def _make_ckpt_path(save_dir: Path, freq: str, model_name: str, lookback: int, horizon: int) -> Path:
     save_dir.mkdir(parents=True, exist_ok=True)
     fname = f"{freq}_{model_name}_L{lookback}_H{horizon}.pt"
@@ -406,6 +430,8 @@ def _build_common_train_configs(
     loss_point: Optional[nn.Module],
     loss_quantile: Optional[nn.Module],
     use_exogenous_mode: bool,
+    training_mode: Literal["qualification", "production_refit"] = "qualification",
+    random_seed: Optional[int] = None,
     quantiles=(0.1, 0.5, 0.9),
     use_intermittent: bool = True,
     val_use_weights: bool = True,
@@ -415,6 +441,8 @@ def _build_common_train_configs(
     - point_train_cfg.loss: loss_point(또는 기본 MAE)
     - quantile_train_cfg.loss: loss_quantile(또는 기본 MQLoss)
     """
+    if training_mode not in {"qualification", "production_refit"}:
+        raise ValueError(f"Unsupported training_mode: {training_mode!r}.")
     base_lr = float(base_lr) if base_lr is not None else 1e-4
 
     loss_point_obj = loss_point if loss_point is not None else default_loss_point()
@@ -432,6 +460,8 @@ def _build_common_train_configs(
         max_grad_norm=30.0,
         amp_device="cuda",
         use_exogenous_mode=bool(use_exogenous_mode),
+        training_mode=training_mode,
+        random_seed=random_seed,
         loss=loss_point_obj,
 
         huber_delta=0.8,
@@ -477,6 +507,8 @@ def _build_common_train_configs(
         max_grad_norm=30.0,
         amp_device="cuda",
         use_exogenous_mode=bool(use_exogenous_mode),
+        training_mode=training_mode,
+        random_seed=random_seed,
         loss=loss_quantile_obj,
 
         huber_delta=0.8,
@@ -1206,7 +1238,15 @@ def _run_patchtst(
                 pt_base,
                 pt_train_cfg,
                 ckpt_path,
-                extra_meta={"model_key": point_model_key, "family_key": "patchtst"},
+                extra_meta={
+                    "model_key": point_model_key,
+                    "family_key": "patchtst",
+                    **_training_checkpoint_meta(
+                        point_train_cfg,
+                        stages,
+                        best_pt_base,
+                    ),
+                },
             )
             best_pt_base["ckpt_path"] = str(ckpt_path)
             if (use_ssl_mode == "full") and (pretrain_ckpt_path is not None):
@@ -1281,7 +1321,15 @@ def _run_patchtst(
                 pt_q,
                 pt_q_cfg,
                 ckpt_path_q,
-                extra_meta={"model_key": quantile_model_key, "family_key": "patchtst"},
+                extra_meta={
+                    "model_key": quantile_model_key,
+                    "family_key": "patchtst",
+                    **_training_checkpoint_meta(
+                        quantile_train_cfg,
+                        stages,
+                        best_pt_q,
+                    ),
+                },
             )
             best_pt_q["ckpt_path"] = str(ckpt_path_q)
             if (use_ssl_mode == "full") and (pretrain_ckpt_path is not None):
@@ -1822,6 +1870,8 @@ def run_total_train(
     # weights policy
     use_intermittent: bool = True,
     val_use_weights: bool = True,
+    training_mode: Literal["qualification", "production_refit"] = "qualification",
+    random_seed: Optional[int] = None,
 ) -> Dict[str, Dict]:
     """
     Unified training entrypoint.
@@ -1837,6 +1887,17 @@ def run_total_train(
 
     selected_artifact_keys = _resolve_requested_artifact_keys(models_to_run)
     selected_families = ordered_training_families_for_targets(selected_artifact_keys)
+    if training_mode not in {"qualification", "production_refit"}:
+        raise ValueError(f"Unsupported training_mode: {training_mode!r}.")
+    if training_mode == "production_refit":
+        if val_loader is not None:
+            raise ValueError("production_refit requires val_loader=None.")
+        if selected_artifact_keys != ["patchtst_base"]:
+            raise ValueError(
+                "production_refit currently supports exactly one artifact: "
+                "patchtst_base."
+            )
+
     use_ssl_mode = _validate_ssl_mode(use_ssl_mode)
     if use_ssl_mode in ("ssl_only", "full"):
         if "patchtst" not in selected_families:
@@ -1866,6 +1927,8 @@ def run_total_train(
         loss_point=loss_point,
         loss_quantile=loss_quantile,
         use_exogenous_mode=bool(use_exogenous_mode),
+        training_mode=training_mode,
+        random_seed=random_seed,
         quantiles=(0.1, 0.5, 0.9),
         use_intermittent=bool(use_intermittent),
         val_use_weights=bool(val_use_weights),

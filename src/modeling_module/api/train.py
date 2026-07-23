@@ -63,6 +63,10 @@ class TrainerConfig:
     - `loss_quantile`: Loss for quantile models.
     - `use_intermittent`: Enable intermittent-demand weighting logic.
     - `val_use_weights`: Apply intermittent weights during validation as well.
+    - `training_mode`: `qualification` selects/restores the best validation state.
+      `production_refit` requires a train-only loader and saves the final epoch state.
+    - `random_seed`: Reproducibility seed recorded in checkpoint metadata. The
+      caller remains responsible for seeding its data loader and runtime.
     """
     epochs: Optional[int] = None
     lr: Optional[float] = None
@@ -74,6 +78,8 @@ class TrainerConfig:
     loss_quantile: Any = None
     use_intermittent: Optional[bool] = None
     val_use_weights: Optional[bool] = None
+    training_mode: Literal["qualification", "production_refit"] = "qualification"
+    random_seed: Optional[int] = None
 
 
 @dataclass
@@ -341,7 +347,8 @@ class TrainRequest:
     Parameters
     - `config_path`: Optional JSON/YAML config file to load first.
     - `config`: Optional in-memory mapping merged before explicit request fields.
-    - `train_loader`, `val_loader`: Prebuilt loaders. Must be provided together.
+    - `train_loader`, `val_loader`: Prebuilt loaders. Qualification requires both;
+      production refit requires only `train_loader`.
     - `data`: `DataRequest` or mapping used to build a datamodule when loaders are not supplied.
     - `trainer`, `ssl`, `runtime`, `artifacts`: Nested config groups for public API usage.
     - `models` / `model` / `models_to_run`: Requested training targets. Families such as
@@ -731,6 +738,8 @@ def _normalize_payload(raw: Mapping[str, Any]) -> dict[str, Any]:
             "loss_quantile": "loss_quantile",
             "use_intermittent": "use_intermittent",
             "val_use_weights": "val_use_weights",
+            "training_mode": "training_mode",
+            "random_seed": "random_seed",
         },
         "ssl": {
             "mode": "use_ssl_mode",
@@ -898,7 +907,21 @@ def _resolve_loaders(payload: dict[str, Any]) -> tuple[Any, Any, Any]:
     train_loader = payload.get("train_loader")
     val_loader = payload.get("val_loader")
     datamodule = None
+    training_mode = payload.get("training_mode", "qualification")
 
+    if training_mode == "production_refit":
+        if train_loader is None:
+            raise ValueError(
+                "production_refit requires a prebuilt `train_loader`."
+            )
+        if val_loader is not None:
+            raise ValueError(
+                "production_refit requires `val_loader=None`."
+            )
+        return train_loader, None, datamodule
+
+    if training_mode != "qualification":
+        raise ValueError(f"Unsupported training_mode: {training_mode!r}.")
     if (train_loader is None) != (val_loader is None):
         raise ValueError("`train_loader` and `val_loader` must be provided together.")
 
@@ -1166,6 +1189,29 @@ def _validate_training_request(
     if lookback_i <= 0 or horizon_i <= 0:
         raise ValueError("`lookback` and `horizon` must be positive integers.")
 
+    training_mode = payload.get("training_mode", "qualification")
+    if training_mode not in {"qualification", "production_refit"}:
+        raise ValueError(f"Unsupported training_mode: {training_mode!r}.")
+    if training_mode == "production_refit":
+        if list(requested_models) != ["patchtst_base"]:
+            raise ValueError(
+                "production_refit currently supports exactly one artifact: "
+                "patchtst_base."
+            )
+        if int(payload.get("spike_epochs") or 0) > 0:
+            raise ValueError(
+                "production_refit requires spike_epochs=0 so the configured "
+                "epoch count maps to one fixed supervised stage."
+            )
+        if str(payload.get("use_ssl_mode") or "sl_only").lower() in {
+            "ssl_only",
+            "full",
+        }:
+            raise ValueError(
+                "production_refit supports supervised-only PatchTST training; "
+                "use ssl.mode='sl_only' or 'off'."
+            )
+
     freq_spec = get_freq_spec(freq_value)
     architecture = payload.get("model_architecture") or {}
     patch_requirements: dict[str, int] = {}
@@ -1405,6 +1451,8 @@ def train(req: TrainRequest | Mapping[str, Any]) -> TrainResult:
         ssl_pretrained_ckpt_path=payload.get("ssl_pretrained_ckpt_path"),
         use_intermittent=bool(use_intermittent if use_intermittent is not None else True),
         val_use_weights=bool(val_use_weights if val_use_weights is not None else True),
+        training_mode=str(payload.get("training_mode", "qualification")),
+        random_seed=payload.get("random_seed"),
     )
 
     return _make_result(

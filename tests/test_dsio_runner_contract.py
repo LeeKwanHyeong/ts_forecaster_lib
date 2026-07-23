@@ -28,6 +28,7 @@ def test_dsio_runner_defaults_match_executable_model_contracts():
     future_models, past_only_models = runner._split_exo_training_targets(exo_models)
 
     assert args.mode == "both"
+    assert args.training_mode == "qualification"
     assert args.ssl_mode == "sl_only"
     assert args.lookback == 52
     assert args.horizon == 27
@@ -66,6 +67,8 @@ def test_linux_wrapper_uses_the_same_non_deprecated_endo_defaults():
     ).read_text(encoding="utf-8")
 
     assert 'MODE="${MODE:-endo}"' in wrapper
+    assert 'TRAINING_MODE="${TRAINING_MODE:-qualification}"' in wrapper
+    assert '--training-mode "$TRAINING_MODE"' in wrapper
     assert (
         'ENDO_MODELS="${ENDO_MODELS:-patchtst patchmixer nhits timemixer}"'
         in wrapper
@@ -73,6 +76,7 @@ def test_linux_wrapper_uses_the_same_non_deprecated_endo_defaults():
     assert 'ENDO_MODELS="${ENDO_MODELS:-patchtst patchmixer titan}"' not in wrapper
     assert 'TRAIN_END_WEEK="${TRAIN_END_WEEK:-202544}"' in wrapper
     assert 'FORECAST_ORIGIN="${FORECAST_ORIGIN:-202545}"' in wrapper
+    assert 'SEED="${SEED:-42}"' in wrapper
 
 
 def test_dsio_runner_can_reproduce_the_previous_patchtst_capacity():
@@ -92,3 +96,28 @@ def test_dsio_runner_can_reproduce_the_previous_patchtst_capacity():
     assert architecture.patchtst.d_model == 384
     assert architecture.patchtst.n_layers == 5
     assert architecture.patchtst.d_ff == 1536
+
+
+def test_dsio_runner_production_refit_contract_is_explicit():
+    args = runner.build_parser().parse_args(
+        [
+            "--mode",
+            "endo",
+            "--training-mode",
+            "production_refit",
+            "--endo-models",
+            "patchtst_base",
+            "--warmup-epochs",
+            "8",
+            "--seed",
+            "42",
+        ]
+    )
+    endo_models, _ = runner._resolve_model_groups(args)
+
+    assert args.training_mode == "production_refit"
+    assert args.warmup_epochs == 8
+    assert args.spike_epochs == 0
+    assert args.seed == 42
+    assert endo_models == ["patchtst_base"]
+    assert runner.expand_training_targets(endo_models) == ["patchtst_base"]

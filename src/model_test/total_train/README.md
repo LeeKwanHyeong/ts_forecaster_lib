@@ -284,6 +284,36 @@ Quantile validation loss와 point loss의 숫자는 서로 직접 비교하지 �
 
 Production refit은 선정 epoch만큼 새로 학습하되 target `202544`까지 모두 학습에 편입합니다.
 이미 모델 선택에 사용한 qualification holdout으로 early stopping을 다시 수행하지 않습니다.
+`production_refit` mode는 validation loader를 생성하거나 전달하지 않으며, validation loop,
+early stopping, best-state 복원을 모두 비활성화하고 마지막 epoch state를 저장합니다.
+
+PatchTST Small production artifact는 다음처럼 독립 artifact root에서 생성합니다.
+
+```bash
+MODE=endo \
+TRAINING_MODE=production_refit \
+ENDO_MODELS=patchtst_base \
+WARMUP_EPOCHS=8 \
+SPIKE_EPOCHS=0 \
+SEED=42 \
+SSL_MODE=sl_only \
+ARTIFACT_ROOT="$PWD/artifacts/dsio_202545_patchtst_small_production_refit" \
+src/model_test/total_train/run_dsio_total_running_linux.sh --device cuda
+```
+
+생성 checkpoint의 `meta`에는 `training_mode=production_refit`,
+`validation_enabled=false`, `state_selection=final_epoch`, `configured_epochs=8`,
+`completed_epochs=8`, `random_seed=42`가 기록되어야 합니다. Strict restore와 운영 origin
+예측 검증은 다음 명령으로 수행합니다.
+
+```bash
+python tools/verify_dsio_production_refit.py \
+  --checkpoint "$PWD/artifacts/dsio_202545_patchtst_small_production_refit/endo_only/weekly_PatchTST_L52_H27.pt" \
+  --target-source "$PWD/raw_data/master/tb_master_target.parquet" \
+  --output-dir "$PWD/artifacts/dsio_202545_patchtst_small_production_refit/verification" \
+  --device cuda
+```
+
 202545 qualification 확정 결과와 checkpoint identity는
 [`docs/DSIO202545QualificationBaseline.md`](docs/DSIO202545QualificationBaseline.md)에
 고정합니다.

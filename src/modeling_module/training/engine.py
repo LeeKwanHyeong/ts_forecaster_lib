@@ -844,6 +844,18 @@ class CommonTrainer:
         - 검증 루프 및 TTA(Test-Time Adaptation) 수행.
         """
         device = self.device
+        training_mode = getattr(self.cfg, "training_mode", "qualification")
+        if training_mode not in {"qualification", "production_refit"}:
+            raise ValueError(f"Unsupported training_mode: {training_mode!r}.")
+        is_production_refit = training_mode == "production_refit"
+        if is_production_refit and val_loader is not None:
+            raise ValueError(
+                "production_refit requires val_loader=None so validation and "
+                "best-state restoration cannot run."
+            )
+        if not is_production_refit and val_loader is None:
+            raise ValueError("qualification training requires a validation loader.")
+
         model.to(device)
         from modeling_module.training.optim import build_optimizer_and_scheduler
 
@@ -852,8 +864,12 @@ class CommonTrainer:
         self.scaler = GradScaler(device="cuda", enabled=(self.enabled and self.amp_device == "cuda"))
         # 조기 종료(Early Stopping) 추적 변수 초기화
         best_loss = float("inf")
-        best_state = copy.deepcopy(model.state_dict())
+        best_state = (
+            None if is_production_refit else copy.deepcopy(model.state_dict())
+        )
         counter = 0
+        final_train_loss = float("nan")
+        epochs_completed = 0
 
         # TTA(Test-Time Adaptation) 상태 초기화
         if self.adapter.uses_tta():
@@ -862,6 +878,18 @@ class CommonTrainer:
         for epoch in range(self.cfg.epochs):
             # 1. 학습 루프 실행
             train_loss = self._run_epoch(model, train_loader, train=True)
+            final_train_loss = float(train_loss)
+            epochs_completed = epoch + 1
+
+            if is_production_refit:
+                self.sched.step()
+                cur_lr = self.sched.get_last_lr()[0]
+                self.logger(
+                    f"Epoch {epoch + 1}/{self.cfg.epochs} | LR {cur_lr:.6f} | "
+                    f"Train {train_loss:.6f} | Validation disabled "
+                    "(production_refit)"
+                )
+                continue
 
             # 2. 검증 루프 진입
             model.eval()
@@ -963,7 +991,15 @@ class CommonTrainer:
             self.logger(
                 f"Epoch {epoch + 1}/{self.cfg.epochs} | LR {cur_lr:.6f} | Train {train_loss:.6f} | Val {val_loss:.6f}")
 
+        self.final_train_loss_ = final_train_loss
+        self.epochs_completed_ = epochs_completed
+        self.validation_enabled_ = not is_production_refit
+        if is_production_refit:
+            self.best_loss_ = None
+            return model
+
         # 학습 종료 후 최적 가중치 복원
+        assert best_state is not None
         model.load_state_dict(best_state)
         # 상위 stage runner가 stage 간 global-best를 비교할 수 있도록 노출한다.
         self.best_loss_ = float(best_loss)

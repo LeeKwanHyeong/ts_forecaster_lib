@@ -82,6 +82,8 @@ class TrainingConfig:
     max_grad_norm: float = 30.0  # 그라디언트 클리핑 임계값
     amp_device: str = 'cuda' if torch.cuda.is_available() else 'cpu'  # AMP 수행 장치 유형
     use_amp: bool = torch.cuda.is_available()  # 자동 혼합 정밀도(AMP) 사용 여부
+    training_mode: Literal['qualification', 'production_refit'] = 'qualification'
+    random_seed: Optional[int] = None
 
     # --- New unified loss object (preferred) ---
     # Any torch.nn.Module that can be called as loss(y, y_hat, mask=..., y_insample=...)
