@@ -40,6 +40,7 @@ artifact directory와 `training_manifest.json`으로 분리합니다.
 | warmup / spike epochs | `30 / 0` | 동일 |
 | SSL mode | `sl_only` | `sl_only` |
 | workers / prefetch | `8 / 4` | 동일 |
+| PatchTST default capacity | Small: `128 / 2 / 512` | 동일 |
 | device | `auto` | 동일 |
 | artifact root | `<repo>/artifacts/total_train` | 동일 |
 
@@ -292,6 +293,13 @@ checkpoint를 변경하지 않는 별도 실험입니다. 정확한 capacity, �
 승격 경계는
 [`docs/DSIO202545PatchTSTCapacitySweep.md`](docs/DSIO202545PatchTSTCapacitySweep.md)에
 기록합니다.
+
+Seed `11 / 22 / 33 / 42`의 Small·Current 격리 검증 결과, DSIO PatchTST
+기본 capacity는 Small (`d_model=128`, `n_layers=2`, `d_ff=512`)이고 고정
+production-refit epoch는 `8`입니다. Dense·intermittent cohort와 horizon별 적용 경계,
+Current 재현 인수 및 refit 계약은
+[`docs/DSIO202545PatchTSTMultiSeedDecision.md`](docs/DSIO202545PatchTSTMultiSeedDecision.md)에
+고정합니다.
 
 ## Promotion order
 

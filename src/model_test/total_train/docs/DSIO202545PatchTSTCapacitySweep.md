@@ -1,5 +1,11 @@
 # DSIO 202545 PatchTST Capacity Sweep
 
+## Status
+
+This seed-42 baseline remains immutable experiment evidence. Its promotion gate
+has been completed by the seed `11 / 22 / 33 / 42` decision in
+`DSIO202545PatchTSTMultiSeedDecision.md`.
+
 ## Decision Boundary
 
 This experiment tests PatchTST encoder capacity only. It does not replace or
