@@ -2,7 +2,8 @@
 
 이 문서는 NHITS와 ExoTST 실행 기준선을 닫은 다음 진행할 TimeMixer 원본 계보 이식의
 출처, 수식 경계, public 계약, 파일 책임과 검증 순서를 고정합니다. 현재 단계에서는
-TimeMixer를 registry에 등록하거나 학습 가능 모델로 노출하지 않습니다.
+wrapper, builder, registry와 checkpoint 복원까지 연결했으며 public trainer는 아직 노출하지
+않습니다.
 
 ## Decision
 
@@ -58,9 +59,11 @@ commit, tree, model 마지막 변경 commit, 검토 대상 파일의 SHA-256/Git
 [`LICENSE.upstream`](../LICENSE.upstream)은 upstream `LICENSE`를 byte-for-byte로 보존합니다.
 두 파일은 wheel package data에 포함되며 테스트가 manifest와 license의 정합성을 검증합니다.
 
-현재 forecasting-only 계산 코드는 [`backbone.py`](../backbone.py)에 격리되어 있습니다. 아직
-public config, wrapper, registry key 또는 trainer를 노출하지 않으며, PatchMixer 구현과 동결
-기준선도 변경하지 않습니다.
+현재 forecasting-only 계산 코드는 [`backbone.py`](../backbone.py)에 격리되어 있습니다.
+[`TimeMixer.py`](../TimeMixer.py)의 public wrapper는 계산 모듈을 추가하지 않고 finite
+`[B,L,1]` 입력과 endogenous-only 경계를 강제합니다. `timemixer` registry key는 build/load
+용으로 등록했지만 runner 연결 전까지 `trainable=False`이며, PatchMixer 구현과 동결 기준선은
+변경하지 않습니다.
 
 ### Backbone port status
 
@@ -109,6 +112,15 @@ scale 길이는 `lookback // window**i`로 한 곳에서 계산하며 다음 경
 
 `down_sampling_layers=0`은 단일-scale 경계로 지원합니다. positional state는 parity를 유지하면서
 odd `d_model`에서도 생성 가능하도록 마지막 cosine 열만 안전하게 절단합니다.
+
+### Public contract status
+
+- `TimeMixerModel`은 backbone을 상속해 parameter 수와 state-dict key를 바꾸지 않습니다.
+- `build_timemixer`, `timemixerbase`, `timemixercanonical` alias를 제공합니다.
+- `TimeMixerArchitectureConfig`는 지원되는 multiscale/model-width override만 노출합니다.
+- checkpoint는 model/config class, upstream commit과 endogenous capability를 기록하고 strict
+  restore를 지원합니다.
+- public trainer가 추가되기 전 `train(models=["timemixer"])`는 preflight에서 즉시 거부됩니다.
 
 ## Paper and upstream boundary
 

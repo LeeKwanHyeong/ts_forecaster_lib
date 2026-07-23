@@ -19,6 +19,7 @@ from modeling_module._internal.loss_runtime import CHECKPOINT_SAFE_DISTRIBUTIONS
 from modeling_module._internal.model_registry import (
     expand_training_targets,
     get_training_deprecation_messages,
+    resolve_artifact_model_key,
     resolve_training_request_key,
 )
 from modeling_module._internal.training_runtime import (
@@ -247,6 +248,22 @@ class TimexerArchitectureConfig:
 
 
 @dataclass
+class TimeMixerArchitectureConfig:
+    """TimeMixer endogenous point-model architecture overrides."""
+
+    d_model: Optional[int] = None
+    d_ff: Optional[int] = None
+    e_layers: Optional[int] = None
+    moving_avg: Optional[int] = None
+    down_sampling_layers: Optional[int] = None
+    down_sampling_window: Optional[int] = None
+    dropout: Optional[float] = None
+    use_norm: Optional[bool] = None
+    embed: Optional[Literal["timeF", "fixed", "learned"]] = None
+    freq: Optional[str] = None
+
+
+@dataclass
 class SELLMArchitectureConfig:
     """
     SELLM family architecture overrides.
@@ -291,14 +308,15 @@ class ArchitectureConfig:
     - Overrides are applied per family. For example, `patchtst` settings affect
       both `patchtst_base` and `patchtst_quantile`.
     - Mapping-style input is also supported. Keys may be family names such as
-      `patchtst`, `patchmixer`, `titan`, `exotst`, `nhits`, or canonical artifact keys
-      such as `titan_base`.
+      `patchtst`, `patchmixer`, `titan`, `exotst`, `nhits`, `timemixer`, or
+      canonical artifact keys such as `titan_base`.
     """
     patchtst: Optional[PatchTSTArchitectureConfig | Mapping[str, Any]] = None
     titan: Optional[TitanArchitectureConfig | Mapping[str, Any]] = None
     patchmixer: Optional[PatchMixerArchitectureConfig | Mapping[str, Any]] = None
     exotst: Optional[ExoTSTArchitectureConfig | Mapping[str, Any]] = None
     nhits: Optional[NHITSArchitectureConfig | Mapping[str, Any]] = None
+    timemixer: Optional[TimeMixerArchitectureConfig | Mapping[str, Any]] = None
     timexer: Optional[TimexerArchitectureConfig | Mapping[str, Any]] = None
     sellm: Optional[SELLMArchitectureConfig | Mapping[str, Any]] = None
 
@@ -535,6 +553,18 @@ _ARCHITECTURE_ALLOWED_KEYS: dict[str, set[str]] = {
         "dropout_prob_theta",
         "shared_weights",
     },
+    "timemixer": {
+        "d_model",
+        "d_ff",
+        "e_layers",
+        "moving_avg",
+        "down_sampling_layers",
+        "down_sampling_window",
+        "dropout",
+        "use_norm",
+        "embed",
+        "freq",
+    },
     "timexer": {
         "patch_len",
         "d_model",
@@ -577,7 +607,10 @@ _ARCHITECTURE_ALLOWED_KEYS: dict[str, set[str]] = {
 
 
 def _family_from_training_target(name: str) -> str:
-    canonical = resolve_training_request_key(name)
+    try:
+        canonical = resolve_training_request_key(name)
+    except ValueError:
+        canonical = resolve_artifact_model_key(name)
     if canonical == "patchtst" or canonical.startswith("patchtst_"):
         return "patchtst"
     if canonical == "patchmixer" or canonical.startswith("patchmixer_"):
@@ -588,6 +621,8 @@ def _family_from_training_target(name: str) -> str:
         return "exotst"
     if canonical == "nhits" or canonical.startswith("nhits_"):
         return "nhits"
+    if canonical == "timemixer" or canonical.startswith("timemixer_"):
+        return "timemixer"
     if canonical == "timexer" or canonical.startswith("timexer_"):
         return "timexer"
     if canonical == "sellm" or canonical.startswith("sellm_"):
@@ -1350,6 +1385,7 @@ __all__ = [
     "PatchTSTArchitectureConfig",
     "RuntimeConfig",
     "SSLConfig",
+    "TimeMixerArchitectureConfig",
     "TimexerArchitectureConfig",
     "TitanArchitectureConfig",
     "TrainRequest",

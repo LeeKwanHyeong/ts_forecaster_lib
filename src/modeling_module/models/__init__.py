@@ -37,16 +37,19 @@ __all__ = [
     "build_patchTST_quantile_exogenous",
     "build_exotst",
     "build_nhits",
+    "build_timemixer",
     "build_timexer",
     "build_sellm",
     "PatchMixerConfig",
     "PatchMixerExogenousConfig",
+    "TimeMixerConfig",
 ]
 
 if TYPE_CHECKING:
     from .model_builder import (
         build_exotst,
         build_nhits,
+        build_timemixer,
         build_sellm,
         build_patch_mixer,
         build_patch_mixer_exogenous,
@@ -60,6 +63,7 @@ if TYPE_CHECKING:
         build_timexer,
     )
     from .PatchMixer.common.configs import PatchMixerConfig, PatchMixerExogenousConfig
+    from .TimeMixer.configs import TimeMixerConfig
 
 # Lazy import map: import modeling_module.models 시점에 heavy import 방지
 _LAZY = {
@@ -74,6 +78,7 @@ _LAZY = {
     "build_patchTST_quantile_exogenous": (".model_builder", "build_patchTST_quantile_exogenous"),
     "build_exotst": (".model_builder", "build_exotst"),
     "build_nhits": (".model_builder", "build_nhits"),
+    "build_timemixer": (".model_builder", "build_timemixer"),
     "build_timexer": (".model_builder", "build_timexer"),
     "build_sellm": (".model_builder", "build_sellm"),
     "PatchMixerConfig": (
@@ -83,6 +88,10 @@ _LAZY = {
     "PatchMixerExogenousConfig": (
         ".PatchMixer.common.configs",
         "PatchMixerExogenousConfig",
+    ),
+    "TimeMixerConfig": (
+        ".TimeMixer.configs",
+        "TimeMixerConfig",
     ),
 }
 
