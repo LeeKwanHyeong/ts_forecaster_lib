@@ -275,6 +275,9 @@ Quantile validation loss와 point loss의 숫자는 서로 직접 비교하지 �
 
 Production refit은 선정 epoch만큼 새로 학습하되 target `202544`까지 모두 학습에 편입합니다.
 이미 모델 선택에 사용한 qualification holdout으로 early stopping을 다시 수행하지 않습니다.
+202545 qualification 확정 결과와 checkpoint identity는
+[`docs/DSIO202545QualificationBaseline.md`](docs/DSIO202545QualificationBaseline.md)에
+고정합니다.
 
 ## Promotion order
 
