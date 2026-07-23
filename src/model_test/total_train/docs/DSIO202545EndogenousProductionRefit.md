@@ -73,3 +73,41 @@ processed-output boundary.
 
 The canonical checkpoint is under each root's `endo_only/` directory. The
 binary artifacts remain on the RTX 5090 host and are not committed to Git.
+
+## Private Wheel Deployment
+
+The production library artifact was built once from a clean detached
+`c2135a343f0bd5ae84dfc49b45027af7c557da65` worktree:
+
+| Item | Value |
+|---|---|
+| Wheel | `modeling_module-0.2.0-1c2135a3-cp312-none-any.whl` |
+| Wheel SHA-256 | `65555c6e3ac6cad945761d4960fc2e0cab55e1e8416ca9f926feef17c2f40c8f` |
+| Source wheel SHA-256 | `b28bb3973c393b49676b57981895c0a2c648fb1ef39395434db47301e4d46620` |
+| Build tag | `1c2135a3` |
+| Python tag | `cp312` |
+| Builder worktree dirty | `false` |
+
+The local retained copy is
+`dist/private/modeling_module-0.2.0-1c2135a3-cp312-none-any.whl`; `dist/` remains
+Git-ignored, while the artifact identity is committed in this document and the
+Demand Engine production Registry.
+
+The same byte-for-byte wheel was installed with `--no-deps` in:
+
+- RTX 5080:
+  `/home/leekwanhyeong/miniconda3/envs/demand_engine`
+- RTX 5090:
+  `/home/leekwanhyeong/.venvs/ts_forecaster_non_sellm_e53269e`
+
+Both hosts reported `modeling-module==0.2.0`, PyTorch `2.11.0+cu130`, the
+expected GPU, all five public model keys, and the embedded `c2135a3`
+provenance. The RTX 5090 installation also strictly restored all five
+production checkpoints with the parameter counts listed above.
+
+The RTX 5090 Demand Engine runtime root is:
+
+`/home/leekwanhyeong/workspace/DemandEngine-v2/data/models/weekly/production/202545`
+
+Its `.env` sets `FORECAST_CHECKPOINT_ROOT` to that absolute path. All copied
+checkpoint hashes match the sealed Demand Engine production Registry.
