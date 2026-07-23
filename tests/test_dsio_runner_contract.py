@@ -40,6 +40,13 @@ def test_dsio_runner_defaults_match_executable_model_contracts():
     assert args.exo_batch_size == 512
     assert args.warmup_epochs == 30
     assert args.spike_epochs == 0
+    assert args.patchtst_d_model == 128
+    assert args.patchtst_layers == 2
+    assert args.patchtst_d_ff == 512
+    architecture = runner.build_model_architecture(args)
+    assert architecture.patchtst.d_model == 128
+    assert architecture.patchtst.n_layers == 2
+    assert architecture.patchtst.d_ff == 512
     assert endo_models == ["patchtst", "patchmixer", "nhits", "timemixer"]
     assert runner.expand_training_targets(endo_models) == [
         "patchtst_base",
@@ -66,3 +73,22 @@ def test_linux_wrapper_uses_the_same_non_deprecated_endo_defaults():
     assert 'ENDO_MODELS="${ENDO_MODELS:-patchtst patchmixer titan}"' not in wrapper
     assert 'TRAIN_END_WEEK="${TRAIN_END_WEEK:-202544}"' in wrapper
     assert 'FORECAST_ORIGIN="${FORECAST_ORIGIN:-202545}"' in wrapper
+
+
+def test_dsio_runner_can_reproduce_the_previous_patchtst_capacity():
+    args = runner.build_parser().parse_args(
+        [
+            "--patchtst-d-model",
+            "384",
+            "--patchtst-layers",
+            "5",
+            "--patchtst-d-ff",
+            "1536",
+        ]
+    )
+
+    architecture = runner.build_model_architecture(args)
+
+    assert architecture.patchtst.d_model == 384
+    assert architecture.patchtst.n_layers == 5
+    assert architecture.patchtst.d_ff == 1536

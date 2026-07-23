@@ -60,6 +60,10 @@ ID_COL = "oper_part_no"
 DATE_COL = "demand_dt"
 Y_COL = "demand_qty"
 
+PATCHTST_DEFAULT_D_MODEL = 128
+PATCHTST_DEFAULT_LAYERS = 2
+PATCHTST_DEFAULT_D_FF = 512
+
 PAST_EXO_CONT_COLS = [
     "sin_annual",
     "cos_annual",
@@ -868,9 +872,21 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--patch-len", type=int, default=13)
     parser.add_argument("--stride", type=int, default=6)
-    parser.add_argument("--patchtst-d-model", type=int, default=384)
-    parser.add_argument("--patchtst-layers", type=int, default=5)
-    parser.add_argument("--patchtst-d-ff", type=int, default=1536)
+    parser.add_argument(
+        "--patchtst-d-model",
+        type=int,
+        default=PATCHTST_DEFAULT_D_MODEL,
+    )
+    parser.add_argument(
+        "--patchtst-layers",
+        type=int,
+        default=PATCHTST_DEFAULT_LAYERS,
+    )
+    parser.add_argument(
+        "--patchtst-d-ff",
+        type=int,
+        default=PATCHTST_DEFAULT_D_FF,
+    )
     parser.add_argument("--patchmixer-d-model", type=int, default=192)
     parser.add_argument("--patchmixer-layers", type=int, default=6)
     parser.add_argument("--patchmixer-f-out", type=int, default=256)
