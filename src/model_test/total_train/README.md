@@ -331,6 +331,11 @@ Current 재현 인수 및 refit 계약은
 [`docs/DSIO202545PatchTSTMultiSeedDecision.md`](docs/DSIO202545PatchTSTMultiSeedDecision.md)에
 고정합니다.
 
+실제 Small·seed 42·8 epoch production checkpoint의 source/checkpoint hash, final-state
+metadata, strict restore 결과와 Demand Engine 비음수 후처리 경계는
+[`docs/DSIO202545PatchTSTProductionRefit.md`](docs/DSIO202545PatchTSTProductionRefit.md)에
+고정합니다.
+
 ## Promotion order
 
 1. local `pytest`와 전체 canonical source `PREFLIGHT_ONLY=1`
