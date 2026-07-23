@@ -47,9 +47,20 @@ def train_nhits(
         ]
 
     adapter = DefaultAdapter()
+    is_production_refit = (
+        getattr(train_cfg, "training_mode", "qualification")
+        == "production_refit"
+    )
+    if is_production_refit and val_loader is not None:
+        raise ValueError("production_refit requires val_loader=None.")
+
     global_best_loss = float("inf")
-    global_best_state = copy.deepcopy(model.state_dict())
+    global_best_state = (
+        None if is_production_refit else copy.deepcopy(model.state_dict())
+    )
     global_best_cfg = train_cfg
+    total_epochs_completed = 0
+    result = None
 
     for index, stage in enumerate(stages, 1):
         cfg_i = apply_stage(train_cfg, stage)
@@ -79,12 +90,31 @@ def train_nhits(
             device=device,
         )
         model = trainer.fit(model, stage_loader, val_loader, tta_steps=0)
+        total_epochs_completed += int(getattr(trainer, "epochs_completed_", 0))
+        if is_production_refit:
+            result = {
+                "model": model,
+                "cfg": cfg_i,
+                "best_val_loss": None,
+                "final_train_loss": float(
+                    getattr(trainer, "final_train_loss_", float("nan"))
+                ),
+                "epochs_completed": total_epochs_completed,
+                "state_selection": "final_epoch",
+            }
+            continue
+
         stage_best_loss = float(getattr(trainer, "best_loss_", float("inf")))
         if stage_best_loss < global_best_loss:
             global_best_loss = stage_best_loss
             global_best_state = copy.deepcopy(model.state_dict())
             global_best_cfg = cfg_i
 
+    if is_production_refit:
+        assert result is not None
+        return result
+
+    assert global_best_state is not None
     model.load_state_dict(global_best_state)
     return {
         "model": model,

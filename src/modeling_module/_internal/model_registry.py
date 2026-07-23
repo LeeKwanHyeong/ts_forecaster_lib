@@ -3,6 +3,7 @@ Private registry helpers used by the public API.
 """
 
 from modeling_module.models.registry import (
+    PRODUCTION_REFIT_ARTIFACT_KEYS,
     expand_training_targets,
     family_for_artifact_key,
     get_model_builder,
@@ -13,6 +14,7 @@ from modeling_module.models.registry import (
 )
 
 __all__ = [
+    "PRODUCTION_REFIT_ARTIFACT_KEYS",
     "expand_training_targets",
     "family_for_artifact_key",
     "get_model_builder",

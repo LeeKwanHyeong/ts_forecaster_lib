@@ -46,7 +46,11 @@ from modeling_module.data_loader.indexed_temporal_data_module import (
     IndexedTemporalDataModule,
     validate_weekly_forecast_calendar,
 )
-from modeling_module._internal.model_registry import expand_training_targets, family_for_artifact_key
+from modeling_module._internal.model_registry import (
+    PRODUCTION_REFIT_ARTIFACT_KEYS,
+    expand_training_targets,
+    family_for_artifact_key,
+)
 from modeling_module.utils.device import select_default_device
 
 
@@ -579,10 +583,15 @@ def run_endo(
             raise ValueError(
                 "production_refit requires --endo-loader-backend indexed_temporal."
             )
-        if expand_training_targets(models) != ["patchtst_base"]:
+        artifact_models = expand_training_targets(models)
+        if (
+            len(artifact_models) != 1
+            or artifact_models[0] not in PRODUCTION_REFIT_ARTIFACT_KEYS
+        ):
+            supported = ", ".join(PRODUCTION_REFIT_ARTIFACT_KEYS)
             raise ValueError(
-                "production_refit currently requires exactly "
-                "--endo-models patchtst_base."
+                "production_refit requires exactly one supported --endo-models "
+                f"artifact: {supported}."
             )
         if args.spike_epochs != 0:
             raise ValueError("production_refit requires --spike-epochs 0.")

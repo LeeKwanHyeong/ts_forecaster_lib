@@ -317,6 +317,15 @@ TRAINING_FAMILY_DEFAULTS: dict[str, tuple[str, ...]] = {
 }
 
 
+PRODUCTION_REFIT_ARTIFACT_KEYS: tuple[str, ...] = (
+    "patchtst_base",
+    "patchtst_quantile",
+    "patchmixer",
+    "nhits_base",
+    "timemixer",
+)
+
+
 PATCHTST_CAPABILITY_DEFAULTS: dict[str, str] = {
     "endogenous_point": "patchtst_base",
     "exogenous_point": "patchtst_exogenous",

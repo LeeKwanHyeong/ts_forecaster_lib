@@ -4,6 +4,8 @@ import importlib.util
 import sys
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNNER_PATH = ROOT / "src" / "model_test" / "total_train" / "dsio_total_running.py"
@@ -98,7 +100,17 @@ def test_dsio_runner_can_reproduce_the_previous_patchtst_capacity():
     assert architecture.patchtst.d_ff == 1536
 
 
-def test_dsio_runner_production_refit_contract_is_explicit():
+@pytest.mark.parametrize(
+    ("model_key", "epochs"),
+    [
+        ("patchtst_base", 8),
+        ("patchtst_quantile", 3),
+        ("patchmixer", 3),
+        ("nhits_base", 31),
+        ("timemixer", 33),
+    ],
+)
+def test_dsio_runner_production_refit_contract_is_explicit(model_key, epochs):
     args = runner.build_parser().parse_args(
         [
             "--mode",
@@ -106,9 +118,9 @@ def test_dsio_runner_production_refit_contract_is_explicit():
             "--training-mode",
             "production_refit",
             "--endo-models",
-            "patchtst_base",
+            model_key,
             "--warmup-epochs",
-            "8",
+            str(epochs),
             "--seed",
             "42",
         ]
@@ -116,8 +128,8 @@ def test_dsio_runner_production_refit_contract_is_explicit():
     endo_models, _ = runner._resolve_model_groups(args)
 
     assert args.training_mode == "production_refit"
-    assert args.warmup_epochs == 8
+    assert args.warmup_epochs == epochs
     assert args.spike_epochs == 0
     assert args.seed == 42
-    assert endo_models == ["patchtst_base"]
-    assert runner.expand_training_targets(endo_models) == ["patchtst_base"]
+    assert endo_models == [model_key]
+    assert runner.expand_training_targets(endo_models) == [model_key]
