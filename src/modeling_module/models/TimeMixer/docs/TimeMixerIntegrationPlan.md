@@ -58,8 +58,23 @@ commit, tree, model 마지막 변경 commit, 검토 대상 파일의 SHA-256/Git
 [`LICENSE.upstream`](../LICENSE.upstream)은 upstream `LICENSE`를 byte-for-byte로 보존합니다.
 두 파일은 wheel package data에 포함되며 테스트가 manifest와 license의 정합성을 검증합니다.
 
-이 단계에서는 TimeMixer 계산 코드, config, registry key 또는 trainer를 노출하지 않습니다.
-PatchMixer 구현과 동결 기준선도 변경하지 않습니다.
+현재 forecasting-only 계산 코드는 [`backbone.py`](../backbone.py)에 격리되어 있습니다. 아직
+public config, wrapper, registry key 또는 trainer를 노출하지 않으며, PatchMixer 구현과 동결
+기준선도 변경하지 않습니다.
+
+### Backbone port status
+
+Pinned upstream의 channel-independent forecasting 경로에서 다음 모듈과 생성 순서를 보존했습니다.
+
+- scale별 Normalize와 average-pooling 입력 생성
+- moving-average seasonal/trend decomposition
+- bottom-up seasonal 및 top-down trend mixing
+- PDM residual MLP와 scale별 FMM predictor 합산
+- value/position/temporal embedding state와 projection layer
+
+DFT, max/conv downsampling, future temporal feature, channel-dependent 및 forecasting 외 task는
+생성 시 명시적으로 거부합니다. 현재 단계의 smoke는 `[2,16,1] -> [2,4,1]` finite forward만
+확인하며, exact output/gradient/state-dict parity는 다음 numerical identity gate에서 고정합니다.
 
 ## Paper and upstream boundary
 
