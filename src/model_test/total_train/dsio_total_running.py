@@ -180,6 +180,17 @@ def write_endogenous_data_manifest(
             "horizon": args.horizon,
             "window_stride": args.window_stride,
         },
+        "training_contract": {
+            "mode": args.training_mode,
+            "validation_enabled": args.training_mode == "qualification",
+            "early_stopping_enabled": args.training_mode == "qualification",
+            "state_selection": (
+                "best_validation"
+                if args.training_mode == "qualification"
+                else "final_epoch"
+            ),
+            "configured_epochs": args.warmup_epochs + args.spike_epochs,
+        },
         "selection": {
             "sample_part_count": args.sample_part_count,
             "seed": args.seed,
@@ -563,11 +574,32 @@ def run_endo(
     architecture: ArchitectureConfig,
     models: list[str],
 ) -> None:
-    min_obs = (
-        args.lookback + 2 * args.horizon
-        if args.endo_loader_backend == "indexed_temporal"
-        else args.lookback + args.horizon
-    )
+    if args.training_mode == "production_refit":
+        if args.endo_loader_backend != "indexed_temporal":
+            raise ValueError(
+                "production_refit requires --endo-loader-backend indexed_temporal."
+            )
+        if expand_training_targets(models) != ["patchtst_base"]:
+            raise ValueError(
+                "production_refit currently requires exactly "
+                "--endo-models patchtst_base."
+            )
+        if args.spike_epochs != 0:
+            raise ValueError("production_refit requires --spike-epochs 0.")
+        if args.warmup_epochs <= 0:
+            raise ValueError("production_refit requires --warmup-epochs > 0.")
+        if args.ssl_mode not in {"sl_only", "off"}:
+            raise ValueError(
+                "production_refit requires supervised-only "
+                "--ssl-mode sl_only (or off)."
+            )
+
+    if args.training_mode == "production_refit":
+        min_obs = args.lookback + args.horizon
+    elif args.endo_loader_backend == "indexed_temporal":
+        min_obs = args.lookback + 2 * args.horizon
+    else:
+        min_obs = args.lookback + args.horizon
     target_raw = load_polars_table(args.target_source, "tb_master_target")
     target_df = prepare_target_df(
         target_raw,
@@ -603,12 +635,22 @@ def run_endo(
             forecast_origin=args.forecast_origin,
             validation_origin=args.validation_origin,
             window_stride=args.window_stride,
+            training_mode=args.training_mode,
             seed=args.seed,
             part_col=ID_COL,
             date_col=DATE_COL,
             qty_col=Y_COL,
         )
         data_summary = datamodule.summary
+        if (
+            args.training_mode == "production_refit"
+            and data_summary["train_target_max_week"] != args.train_end_week
+        ):
+            raise ValueError(
+                "production_refit did not include the full target cutoff: "
+                f"train_target_max_week={data_summary['train_target_max_week']}, "
+                f"train_end_week={args.train_end_week}."
+            )
         train_loader = datamodule.get_train_loader(
             batch_size=args.endo_batch_size,
             shuffle=not args.no_shuffle,
@@ -618,23 +660,38 @@ def run_endo(
             prefetch_factor=args.prefetch_factor,
             drop_last=data_summary["train_windows"] >= args.endo_batch_size,
         )
-        val_loader = datamodule.get_val_loader(
-            batch_size=args.endo_batch_size,
-            num_workers=args.num_workers,
-            pin_memory=args.pin_memory,
-            persistent_workers=args.persistent_workers,
-            prefetch_factor=args.prefetch_factor,
-        )
+        if args.training_mode == "qualification":
+            val_loader = datamodule.get_val_loader(
+                batch_size=args.endo_batch_size,
+                num_workers=args.num_workers,
+                pin_memory=args.pin_memory,
+                persistent_workers=args.persistent_workers,
+                prefetch_factor=args.prefetch_factor,
+            )
         print("[ENDO] loader backend   : indexed_temporal")
+        print("[ENDO] training_mode    :", args.training_mode)
         print("[ENDO] train_end_week   :", args.train_end_week)
         print("[ENDO] forecast_origin  :", args.forecast_origin)
         print("[ENDO] validation_origin:", args.validation_origin)
         print("[ENDO] window_stride    :", args.window_stride)
         print("[ENDO] train_windows    :", data_summary["train_windows"])
+        print("[ENDO] train_target_max :", data_summary["train_target_max_week"])
         print("[ENDO] validation_windows:", data_summary["validation_windows"])
         if not args.skip_batch_check:
-            batch = next(iter(val_loader))
-            describe_batch(batch, "ENDO/validation")
+            check_loader = (
+                val_loader
+                if args.training_mode == "qualification"
+                else train_loader
+            )
+            batch = next(iter(check_loader))
+            describe_batch(
+                batch,
+                (
+                    "ENDO/validation"
+                    if args.training_mode == "qualification"
+                    else "ENDO/production_train"
+                ),
+            )
     else:
         validate_weekly_forecast_calendar(
             train_end_week=args.train_end_week,
@@ -700,6 +757,8 @@ def run_endo(
             warmup_epochs=args.warmup_epochs,
             spike_epochs=args.spike_epochs,
             lr=args.lr,
+            training_mode=args.training_mode,
+            random_seed=args.seed,
         ),
         "ssl": SSLConfig(
             mode=args.ssl_mode,
@@ -713,13 +772,14 @@ def run_endo(
             auto_save_dir=False,
         ),
     }
-    if train_loader is not None and val_loader is not None:
+    if train_loader is not None:
         request_kwargs.update(
             train_loader=train_loader,
-            val_loader=val_loader,
             lookback=args.lookback,
             horizon=args.horizon,
         )
+        if val_loader is not None:
+            request_kwargs["val_loader"] = val_loader
     else:
         request_kwargs["data"] = data_req
 
@@ -822,6 +882,16 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--mode", choices=["endo", "exo", "both"], default="both")
+    parser.add_argument(
+        "--training-mode",
+        choices=["qualification", "production_refit"],
+        default="qualification",
+        help=(
+            "qualification uses a last-origin validation split and restores the "
+            "best state; production_refit trains on all observations through "
+            "train_end_week and saves the final epoch state."
+        ),
+    )
     parser.add_argument("--artifact-root", type=Path, default=REPO_ROOT / "artifacts" / "total_train")
     parser.add_argument("--target-source", type=Path, default=TARGET_SOURCE)
     parser.add_argument("--models", nargs="+", default=None)
@@ -931,6 +1001,8 @@ def main() -> None:
     args.artifact_root = args.artifact_root.expanduser().resolve()
     args.artifact_root.mkdir(parents=True, exist_ok=True)
     args.target_source = args.target_source.expanduser().resolve()
+    if args.training_mode == "production_refit" and args.mode != "endo":
+        parser.error("production_refit requires --mode endo.")
 
     set_global_seed(args.seed)
     default_device, device_note = configure_torch_runtime()
@@ -947,6 +1019,7 @@ def main() -> None:
     print("TARGET_EXO_SOURCE   :", TARGET_EXO_SOURCE, "(exists=", TARGET_EXO_SOURCE.exists(), ")")
     print("EXO_SOURCE_FALLBACK :", EXO_SOURCE_FALLBACK, "(exists=", EXO_SOURCE_FALLBACK.exists(), ")")
     print("MODE                :", args.mode)
+    print("TRAINING_MODE       :", args.training_mode)
     print("LOOKBACK            :", args.lookback)
     print("HORIZON             :", args.horizon)
     print("ENDO_LOADER_BACKEND :", args.endo_loader_backend)

@@ -17,6 +17,7 @@ from modeling_module.data_loader.temporal import add_period, normalize_period_ke
 
 
 Split = Literal["train", "validation"]
+TrainingMode = Literal["qualification", "production_refit"]
 
 
 @dataclass(frozen=True)
@@ -85,6 +86,7 @@ class IndexedTemporalWindowDataset(Dataset):
         lookback: int,
         horizon: int,
         split: Split,
+        training_mode: TrainingMode = "qualification",
         window_stride: int = 1,
     ) -> None:
         if lookback <= 0:
@@ -97,10 +99,17 @@ class IndexedTemporalWindowDataset(Dataset):
             )
         if split not in {"train", "validation"}:
             raise ValueError(f"Unsupported split: {split!r}.")
+        if training_mode not in {"qualification", "production_refit"}:
+            raise ValueError(f"Unsupported training_mode: {training_mode!r}.")
+        if split == "validation" and training_mode == "production_refit":
+            raise ValueError(
+                "production_refit does not define a validation dataset."
+            )
 
         self.lookback = int(lookback)
         self.horizon = int(horizon)
         self.split = split
+        self.training_mode = training_mode
         self.window_stride = int(window_stride)
         self._series = series
 
@@ -109,7 +118,9 @@ class IndexedTemporalWindowDataset(Dataset):
         for item in series:
             if split == "train":
                 max_start = (
-                    item.validation_index - self.lookback - self.horizon
+                    len(item.values) - self.lookback - self.horizon
+                    if self.training_mode == "production_refit"
+                    else item.validation_index - self.lookback - self.horizon
                 )
                 count = (
                     max_start // self.window_stride + 1
@@ -158,7 +169,11 @@ class IndexedTemporalWindowDataset(Dataset):
         local_index = index - previous_count
         item = self._series[series_index]
         if self.split == "train":
-            max_start = item.validation_index - self.lookback - self.horizon
+            max_start = (
+                len(item.values) - self.lookback - self.horizon
+                if self.training_mode == "production_refit"
+                else item.validation_index - self.lookback - self.horizon
+            )
             first_start = max_start % self.window_stride
             start = first_start + local_index * self.window_stride
         else:
@@ -199,6 +214,7 @@ class IndexedTemporalDataModule:
         forecast_origin: int,
         validation_origin: int,
         window_stride: int = 1,
+        training_mode: TrainingMode = "qualification",
         seed: int = 42,
         part_col: str = "oper_part_no",
         date_col: str = "demand_dt",
@@ -213,6 +229,8 @@ class IndexedTemporalDataModule:
             raise ValueError(
                 f"window_stride must be positive, got {window_stride}."
             )
+        if training_mode not in {"qualification", "production_refit"}:
+            raise ValueError(f"Unsupported training_mode: {training_mode!r}.")
         validate_weekly_forecast_calendar(
             train_end_week=train_end_week,
             forecast_origin=forecast_origin,
@@ -226,6 +244,7 @@ class IndexedTemporalDataModule:
         self.forecast_origin = int(forecast_origin)
         self.validation_origin = int(validation_origin)
         self.window_stride = int(window_stride)
+        self.training_mode = training_mode
         self.seed = int(seed)
         self.part_col = part_col
         self.date_col = date_col
@@ -328,14 +347,20 @@ class IndexedTemporalDataModule:
                 )
                 continue
             validation_index = int(validation_matches[0])
-            has_train_window = (
-                validation_index - self.lookback - self.horizon >= 0
-            )
+            if self.training_mode == "production_refit":
+                has_train_window = len(weeks) - self.lookback - self.horizon >= 0
+            else:
+                has_train_window = (
+                    validation_index - self.lookback - self.horizon >= 0
+                )
             has_validation_window = (
                 validation_index >= self.lookback
                 and len(weeks) - validation_index >= self.horizon
             )
-            if not (has_train_window and has_validation_window):
+            has_required_windows = has_train_window and (
+                self.training_mode == "production_refit" or has_validation_window
+            )
+            if not has_required_windows:
                 ineligible.append(
                     f"{part_id}:rows={len(weeks)},validation_index={validation_index}"
                 )
@@ -367,24 +392,32 @@ class IndexedTemporalDataModule:
         return eligible
 
     def setup(self) -> None:
-        if self.train_dataset is not None and self.val_dataset is not None:
+        if self.train_dataset is not None and (
+            self.training_mode == "production_refit"
+            or self.val_dataset is not None
+        ):
             return
         self.train_dataset = IndexedTemporalWindowDataset(
             self._series,
             lookback=self.lookback,
             horizon=self.horizon,
             split="train",
+            training_mode=self.training_mode,
             window_stride=self.window_stride,
         )
+        if len(self.train_dataset) == 0:
+            raise ValueError("Temporal split produced no training windows.")
+        if self.training_mode == "production_refit":
+            self.val_dataset = None
+            return
         self.val_dataset = IndexedTemporalWindowDataset(
             self._series,
             lookback=self.lookback,
             horizon=self.horizon,
             split="validation",
+            training_mode=self.training_mode,
             window_stride=1,
         )
-        if len(self.train_dataset) == 0:
-            raise ValueError("Temporal split produced no training windows.")
         if len(self.val_dataset) == 0:
             raise ValueError("Temporal split produced no validation windows.")
 
@@ -392,14 +425,19 @@ class IndexedTemporalDataModule:
     def summary(self) -> dict[str, int]:
         self.setup()
         assert self.train_dataset is not None
-        assert self.val_dataset is not None
+        last_train_window = self.train_dataset.window_metadata(
+            len(self.train_dataset) - 1
+        )
         return {
             "row_count": self.df.height,
             "series_count": len(self._series),
             "source_min_week": int(self.df[self.date_col].min()),
             "source_max_week": int(self.df[self.date_col].max()),
             "train_windows": len(self.train_dataset),
-            "validation_windows": len(self.val_dataset),
+            "train_target_max_week": last_train_window.y_end_week,
+            "validation_windows": (
+                len(self.val_dataset) if self.val_dataset is not None else 0
+            ),
         }
 
     @staticmethod
@@ -460,7 +498,10 @@ class IndexedTemporalDataModule:
         drop_last: bool = False,
     ) -> DataLoader:
         self.setup()
-        assert self.val_dataset is not None
+        if self.val_dataset is None:
+            raise RuntimeError(
+                "production_refit has no validation loader; use get_train_loader()."
+            )
         return DataLoader(
             self.val_dataset,
             batch_size=int(batch_size),
@@ -479,5 +520,6 @@ __all__ = [
     "IndexedTemporalDataModule",
     "IndexedTemporalWindowDataset",
     "TemporalWindowMetadata",
+    "TrainingMode",
     "validate_weekly_forecast_calendar",
 ]
