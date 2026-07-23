@@ -236,6 +236,46 @@ src/model_test/total_train/run_dsio_total_running_linux.sh --device cuda
 `total_running.ipynb`는 과거 수동 prototype으로, 현재 model group·batch·artifact 경로의 기준이
 아닙니다. 실행 계약은 이 문서와 `dsio_total_running.py`를 기준으로 합니다.
 
+## Qualification evaluation and production-refit epochs
+
+Qualification checkpoint는 public `load_predictor(..., strict=True)` 경로로 다시 로드한 뒤
+`202518..202544`의 last-origin holdout 전체를 예측해 비교합니다. Point 모델은 `point`,
+PatchTST Quantile은 `q50`을 point forecast로 사용합니다.
+
+```bash
+python tools/evaluate_dsio_qualification.py \
+  --artifact-dir "$PWD/artifacts/<qualification-run>/endo_only" \
+  --training-log "$PWD/logs/<qualification-run>.log" \
+  --target-source "$PWD/raw_data/master/tb_master_target.parquet" \
+  --device cuda \
+  --batch-size 1024 \
+  --num-workers 4
+```
+
+평가 metric은 모든 `(series, horizon)` 관측치를 합친 micro 기준입니다.
+
+- MAE: `mean(abs(prediction - actual))`
+- WAPE: `sum(abs(prediction - actual)) / sum(abs(actual))`
+- sMAPE: `mean(2 * abs(prediction - actual) / (abs(actual) + abs(prediction)))`
+
+분모에는 zero-safe epsilon `1e-8`을 더합니다. CSV의 `wape`, `smape`는 ratio이고
+`wape_pct`, `smape_pct`는 백분율입니다. 모델별 production refit epoch는 세 metric의 순위로
+고르지 않습니다. 각 모델이 학습에 사용한 고유 validation objective의 최소 epoch를 사용하며,
+평가기에서 log의 최소값과 `training_manifest.json`의 `best_val_loss`가 일치해야만 확정됩니다.
+Quantile validation loss와 point loss의 숫자는 서로 직접 비교하지 않습니다.
+
+기본 결과 위치는 `<artifact-dir>/qualification_evaluation`입니다.
+
+- `qualification_metrics.csv`: 모델별 micro metric, 순위, checkpoint hash와 추론 정보
+- `qualification_predictions.parquet`: 전체 point 예측과 오차
+- `qualification_metrics_by_series.parquet`: 모델·부품별 metric
+- `qualification_metrics_by_horizon.parquet`: 모델·horizon별 metric
+- `production_refit_epochs.json`: 모델별 고정 refit epoch와 선택 근거
+- `qualification_summary.json`: metric/epoch 계약, 전체 학습 history와 산출물 manifest
+
+Production refit은 선정 epoch만큼 새로 학습하되 target `202544`까지 모두 학습에 편입합니다.
+이미 모델 선택에 사용한 qualification holdout으로 early stopping을 다시 수행하지 않습니다.
+
 ## Promotion order
 
 1. local `pytest`와 전체 canonical source `PREFLIGHT_ONLY=1`
