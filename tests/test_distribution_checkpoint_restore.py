@@ -16,7 +16,6 @@ from modeling_module import (
     ExogenousConfig,
     ExoTSTArchitectureConfig,
     LoaderConfig,
-    PatchMixerArchitectureConfig,
     PatchTSTArchitectureConfig,
     RuntimeConfig,
     SSLConfig,
@@ -34,7 +33,6 @@ EXPECTED_PARAMS = {
 }
 EXPECTED_HEADS = {
     "patchtst_base": "DistHeadWithExo",
-    "patchmixer_base": "Sequential",
     "titan_base": "Linear",
     "exotst_base": "HorizonDistMLPHead",
 }
@@ -116,26 +114,6 @@ DISTRIBUTION_CHECKPOINT_CASES = [
         ),
         None,
         id="patchtst",
-    ),
-    pytest.param(
-        "patchmixer_base",
-        ArchitectureConfig(
-            patchmixer=PatchMixerArchitectureConfig(
-                patch_len=2,
-                stride=1,
-                d_model=4,
-                e_layers=1,
-                f_out=4,
-                head_hidden=4,
-                dropout=0.0,
-                head_dropout=0.0,
-                use_revin=False,
-                final_nonneg=False,
-                expander_n_harmonics=1,
-            )
-        ),
-        None,
-        id="patchmixer",
     ),
     pytest.param(
         "titan_base",

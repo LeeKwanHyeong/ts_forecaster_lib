@@ -4,7 +4,31 @@ from typing import Any, Optional
 
 import torch
 
-from .PatchMixer import PatchMixerEnhancedModel, PatchMixerQuantileModel
+from .PatchMixer import _PatchMixerProjectCore
+
+
+_RETIRED_EXOGENOUS_POINT_STATE = (
+    "out_scale",
+    "out_bias",
+    "dw_gain",
+    "dw_head.weight",
+    "dw_head.bias",
+)
+
+
+def _drop_retired_exogenous_point_state(
+    module: torch.nn.Module,
+    state_dict: dict[str, torch.Tensor],
+    prefix: str,
+    local_metadata: dict[str, Any],
+    strict: bool,
+    missing_keys: list[str],
+    unexpected_keys: list[str],
+    error_msgs: list[str],
+) -> None:
+    del module, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
+    for name in _RETIRED_EXOGENOUS_POINT_STATE:
+        state_dict.pop(prefix + name, None)
 
 
 def patchmixer_exogenous_widths(cfg: Any) -> tuple[int, int, int]:
@@ -13,19 +37,6 @@ def patchmixer_exogenous_widths(cfg: Any) -> tuple[int, int, int]:
         int(getattr(cfg, "past_exo_cat_dim", 0) or 0),
         int(getattr(cfg, "future_exo_dim", 0) or 0),
     )
-
-
-def patchmixer_uses_exogenous_inputs(cfg: Any) -> bool:
-    return any(width > 0 for width in patchmixer_exogenous_widths(cfg))
-
-
-def _require_endogenous_config(cfg: Any, *, model_name: str) -> None:
-    widths = patchmixer_exogenous_widths(cfg)
-    if any(widths):
-        raise ValueError(
-            f"{model_name} requires zero exogenous widths, got "
-            f"past_cont={widths[0]}, past_cat={widths[1]}, future_cont={widths[2]}."
-        )
 
 
 def _require_exogenous_config(cfg: Any, *, model_name: str) -> None:
@@ -60,35 +71,24 @@ def _validate_required_inputs(
         raise RuntimeError(f"{model_name} is missing required inputs: {', '.join(missing)}.")
 
 
-class PatchMixerEndogenousModel(PatchMixerEnhancedModel):
-    """Enhanced PatchMixer with a strict target-only input contract."""
-
-    architecture_variant = "endogenous"
-    exogenous_fusion_strategy = "none"
-
-    def __init__(self, cfg):
-        _require_endogenous_config(cfg, model_name=type(self).__name__)
-        super().__init__(cfg)
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        *,
-        part_ids: Optional[torch.Tensor] = None,
-        mode: Optional[str] = None,
-    ):
-        return super().forward(x, part_ids=part_ids)
-
-
-class PatchMixerExogenousModel(PatchMixerEnhancedModel):
-    """Enhanced PatchMixer with gated latent fusion and a future output shift."""
+class PatchMixerExogenousModel(_PatchMixerProjectCore):
+    """Point forecaster with gated past fusion and a future residual shift."""
 
     architecture_variant = "exogenous"
     exogenous_fusion_strategy = "gated_residual+future_shift"
 
     def __init__(self, cfg):
         _require_exogenous_config(cfg, model_name=type(self).__name__)
+        if int(getattr(cfg, "out_mul", 1)) != 1:
+            raise ValueError("PatchMixerExogenousModel supports point output only.")
         super().__init__(cfg)
+        # Preserve the established initialization sequence, then remove five
+        # distribution-only tensors that never participate in point forward.
+        for name in ("out_scale", "out_bias", "dw_gain", "dw_head"):
+            delattr(self, name)
+        self.learn_output_scale = False
+        self.learn_dw_gain = False
+        self.register_load_state_dict_pre_hook(_drop_retired_exogenous_point_state)
 
     def forward(
         self,
@@ -101,64 +101,7 @@ class PatchMixerExogenousModel(PatchMixerEnhancedModel):
         exo_is_normalized: Optional[bool] = None,
         **kwargs,
     ):
-        _validate_required_inputs(
-            self.configs,
-            past_exo_cont=past_exo_cont,
-            past_exo_cat=past_exo_cat,
-            future_exo=future_exo,
-            model_name=type(self).__name__,
-        )
-        return super().forward(
-            x,
-            future_exo=future_exo,
-            past_exo_cont=past_exo_cont,
-            past_exo_cat=past_exo_cat,
-            part_ids=part_ids,
-            exo_is_normalized=exo_is_normalized,
-            **kwargs,
-        )
-
-class PatchMixerQuantileEndogenousModel(PatchMixerQuantileModel):
-    """Quantile PatchMixer with a strict target-only input contract."""
-
-    architecture_variant = "endogenous"
-    exogenous_fusion_strategy = "none"
-
-    def __init__(self, cfg):
-        _require_endogenous_config(cfg, model_name=type(self).__name__)
-        super().__init__(cfg)
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        *,
-        part_ids: Optional[torch.Tensor] = None,
-        mode: Optional[str] = None,
-    ):
-        return super().forward(x, part_ids=part_ids)
-
-
-class PatchMixerQuantileExogenousModel(PatchMixerQuantileModel):
-    """Quantile PatchMixer with explicit gated exogenous fusion."""
-
-    architecture_variant = "exogenous"
-    exogenous_fusion_strategy = "gated_residual+future_shift"
-
-    def __init__(self, cfg):
-        _require_exogenous_config(cfg, model_name=type(self).__name__)
-        super().__init__(cfg)
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        future_exo: Optional[torch.Tensor] = None,
-        *,
-        past_exo_cont: Optional[torch.Tensor] = None,
-        past_exo_cat: Optional[torch.Tensor] = None,
-        part_ids: Optional[torch.Tensor] = None,
-        exo_is_normalized: Optional[bool] = None,
-        **kwargs,
-    ):
+        self._validate_future_exo_contract(future_exo, batch_size=x.size(0))
         _validate_required_inputs(
             self.configs,
             past_exo_cont=past_exo_cont,

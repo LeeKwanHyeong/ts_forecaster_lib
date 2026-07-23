@@ -45,6 +45,7 @@ from modeling_module.data_loader.multi_part_exo_dataset import (  # noqa: E402
 )
 from modeling_module.models.PatchMixer.common.configs import (  # noqa: E402
     PatchMixerConfig,
+    PatchMixerExogenousConfig,
 )
 from modeling_module.models.PatchTST.common.configs import (  # noqa: E402
     AttentionConfig,
@@ -508,8 +509,10 @@ def _patchtst_config(case: ModelCase) -> PatchTSTConfig:
     )
 
 
-def _patchmixer_config(case: ModelCase) -> PatchMixerConfig:
-    return PatchMixerConfig(
+def _patchmixer_config(
+    case: ModelCase,
+) -> PatchMixerConfig | PatchMixerExogenousConfig:
+    common = dict(
         lookback=LOOKBACK,
         horizon=HORIZON,
         enc_in=1,
@@ -520,6 +523,12 @@ def _patchmixer_config(case: ModelCase) -> PatchMixerConfig:
         e_layers=6,
         dropout=0.1,
         head_dropout=0.02,
+        use_revin=True,
+    )
+    if not case.exogenous:
+        return PatchMixerConfig(**common)
+    return PatchMixerExogenousConfig(
+        **common,
         f_out=256,
         head_hidden=256,
         past_exo_mode="z_gate",
@@ -533,7 +542,6 @@ def _patchmixer_config(case: ModelCase) -> PatchMixerConfig:
         future_exo_normalized_residual_limit=(
             case.future_normalized_residual_limit
         ),
-        use_revin=True,
     )
 
 

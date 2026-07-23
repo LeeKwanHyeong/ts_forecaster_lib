@@ -76,9 +76,8 @@ pip check
 | explicit only | `patchtst_exogenous` | 지원 | point, Normal, StudentT | past/future 중 하나 이상 필수 | `full`, `ssl_only` |
 | `patchtst` | `patchtst_quantile` | 지원 | q10/q50/q90 | endogenous 기본, legacy exogenous 호환 | `full`, `ssl_only` |
 | explicit only | `patchtst_quantile_exogenous` | 지원 | q10/q50/q90 | past/future 중 하나 이상 필수 | `full`, `ssl_only` |
-| `patchmixer` | `patchmixer_base` | 지원 | point, Normal, StudentT | past/future optional | 미지원 |
-| `patchmixer` | `patchmixer_quantile` | 지원 | q10/q50/q90 | past/future optional | 미지원 |
-| explicit only | `patchmixer_original` | 지원 | point only | 미지원 | 미지원 |
+| `patchmixer` | `patchmixer` | 지원 | point only | 미지원 | 미지원 |
+| explicit only | `patchmixer_exo` | 지원 | point only | past/future 중 하나 이상 필수 | 미지원 |
 | `titan` | `titan_base` | Deprecated | point, Normal, StudentT | past/future optional | 미지원 |
 | `titan` | `titan_lmm` | Deprecated | point, Normal, StudentT | past/future optional | 미지원 |
 | `titan` | `titan_seq2seq` | Deprecated | point, Normal, StudentT | past/future optional | 미지원 |
@@ -90,8 +89,10 @@ pip check
 
 - family key는 표에 나열된 canonical artifact로 확장됩니다.
 - artifact key를 직접 주면 해당 artifact만 학습합니다.
-- `patchmixer_original`은 upstream 비교용 endogenous baseline이므로 `models`에 직접 지정해야 하며,
-  `patchmixer` family 요청에는 자동으로 포함되지 않습니다.
+- `patchmixer`는 upstream 논문 계보를 따르는 endogenous point 모델입니다.
+  `patchmixer_original`은 같은 모델을 가리키는 legacy alias입니다.
+- 과거 `patchmixer_base`, `patchmixer_quantile`, `patchmixer_quantile_exogenous`는 지원되는
+  checkpoint schema를 복원하기 위한 load-only key이며 public training target이 아닙니다.
 - 신규 PatchTST exogenous 학습은 `patchtst_exogenous` 또는
   `patchtst_quantile_exogenous`를 직접 지정합니다. Base key의 exogenous config routing은 기존
   checkpoint와 호출자 호환을 위해서만 유지합니다.
@@ -227,7 +228,7 @@ req = TrainRequest(
         df=target_df,
         window=DataWindowConfig(lookback=104, horizon=27, freq="weekly"),
     ),
-    models=["patchtst_base", "patchmixer_base"],
+    models=["patchtst_base", "patchmixer"],
     architecture=ArchitectureConfig(
         patchtst=PatchTSTArchitectureConfig(
             patch_len=13,

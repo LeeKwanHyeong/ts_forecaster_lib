@@ -7,16 +7,14 @@ import torch
 import torch.nn as nn
 
 from modeling_module.models.PatchMixer.backbone import (
-    MultiScalePatchMixerBackbone,
     PatchMixerBackbone,
-    PatchMixerOriginalBackbone,
-    PatchMixerOriginalLayer,
-    PatchMixerOriginalRevIN,
+    _MultiScalePatchMixerLegacyBackbone,
+    _PatchMixerLegacyBackbone,
     _infer_patch_cfgs,
 )
 from modeling_module.models.PatchMixer.common.configs import (
     PatchMixerConfig,
-    PatchMixerOriginalConfig,
+    PatchMixerExogenousConfig,
 )
 from modeling_module.models.PatchMixer.provenance import (
     PATCHMIXER_UPSTREAM_COMMIT,
@@ -55,22 +53,27 @@ def _pad_or_slice_last_dim(x: torch.Tensor, target_dim: int, *, pad_value: float
     return torch.cat([x, pad_t], dim=-1)
 
 
-class PatchMixerOriginalModel(nn.Module):
-    """Public model wrapper retaining upstream `model.*` state-dict keys."""
+class PatchMixerModel(nn.Module):
+    """Paper-faithful endogenous model retaining upstream state-dict keys."""
 
     upstream_repository = PATCHMIXER_UPSTREAM_REPOSITORY
     upstream_commit = PATCHMIXER_UPSTREAM_COMMIT
-    architecture_variant = "original"
+    architecture_variant = "endogenous"
 
     def __init__(self, configs: Any) -> None:
         super().__init__()
-        self.configs = PatchMixerOriginalConfig.from_config(configs)
+        self.configs = PatchMixerConfig.from_config(configs)
         self.horizon = self.configs.horizon
         self.future_exo_dim = 0
-        self.model = PatchMixerOriginalBackbone(self.configs)
+        self.model = PatchMixerBackbone(self.configs)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.model(x)
+
+
+# Checkpoints and imports created before the public naming consolidation use
+# this class name. It resolves to the exact same implementation and state dict.
+PatchMixerOriginalModel = PatchMixerModel
 
 
 # =====================================================================
@@ -87,7 +90,7 @@ class _ExoMixin(nn.Module):
 
     def _init_exo(
         self,
-        cfg: PatchMixerConfig,
+        cfg: PatchMixerExogenousConfig,
         *,
         z_dim: int,
         supported_future_shift_spaces: tuple[str, ...],
@@ -355,7 +358,7 @@ class PatchMixerQuantileModel(_ExoMixin):
     - RevIN denorm -> output shift
     """
 
-    def __init__(self, cfg: PatchMixerConfig):
+    def __init__(self, cfg: PatchMixerExogenousConfig):
         super().__init__()
         self.is_quantile = True
         self.configs = cfg
@@ -367,7 +370,7 @@ class PatchMixerQuantileModel(_ExoMixin):
         if not patch_cfgs:
             patch_cfgs = tuple(_infer_patch_cfgs(int(cfg.lookback), n_branches=3))
 
-        self.backbone = MultiScalePatchMixerBackbone(
+        self.backbone = _MultiScalePatchMixerLegacyBackbone(
             base_configs=cfg,
             patch_cfgs=patch_cfgs,
             per_branch_dim=int(getattr(cfg, "per_branch_dim", 64)),
@@ -529,7 +532,7 @@ class PatchMixerQuantileModel(_ExoMixin):
 
         return {"q": q_raw}
 
-class PatchMixerEnhancedModel(_ExoMixin):
+class _PatchMixerProjectCore(_ExoMixin):
     """
     Project-enhanced PatchMixer model for point and distribution forecasting.
 
@@ -543,11 +546,11 @@ class PatchMixerEnhancedModel(_ExoMixin):
     If `param_names` is given, 'loc' index is detected from it.
     """
 
-    architecture_variant = "enhanced"
+    architecture_variant = "project_core"
 
     def __init__(
         self,
-        cfg: PatchMixerConfig,
+        cfg: PatchMixerExogenousConfig,
     ):
         super().__init__()
         self.configs = cfg
@@ -555,10 +558,8 @@ class PatchMixerEnhancedModel(_ExoMixin):
         self.f_out = int(getattr(cfg, "f_out", 128))
         self.final_nonneg = bool(getattr(cfg, "final_nonneg", True))
         self.out_mul = int(getattr(cfg, "out_mul", 1))
-        print(f'[PatchMixerEnhancedModel] out_mul:: {self.out_mul}')
         if self.out_mul > 1:
             self.param_names = list(getattr(cfg, "param_names", None))
-            print(f'[PatchMixerEnhancedModel] param_names:: {self.param_names}')
             # ---- dist param safety clip (NaN 방지; 특히 AMP에서 expm1 터지는 케이스 방지) ----
             # LossComputer에서 softplus/transform을 적용할 때 raw가 너무 크면 overflow로 NaN이 납니다.
             self.dist_param_clip = float(getattr(cfg, "dist_param_clip", 15.0))  # 권장: 10~20
@@ -583,7 +584,7 @@ class PatchMixerEnhancedModel(_ExoMixin):
         # self.param_names = list(param_names) if param_names is not None else None
 
         # 1) backbone
-        self.backbone = PatchMixerBackbone(configs=cfg)
+        self.backbone = _PatchMixerLegacyBackbone(configs=cfg)
         z_dim = int(getattr(self.backbone, "out_dim", getattr(self.backbone, "patch_repr_dim", 0)))
         if z_dim <= 0:
             raise RuntimeError("Backbone must expose out_dim or patch_repr_dim")
@@ -843,22 +844,8 @@ class PatchMixerEnhancedModel(_ExoMixin):
         out2 = torch.cat(parts, dim=-1)
         return out2
 
-# Compatibility class for existing imports and checkpoint metadata.
-class PatchMixerModel(PatchMixerEnhancedModel):
-    """Legacy name for the enhanced implementation."""
 
+class _PatchMixerLegacyModel(_PatchMixerProjectCore):
+    """Load-only identity for retired Enhanced point/distribution artifacts."""
 
-class PatchMixerPointModel(PatchMixerEnhancedModel):
-    def __init__(self, cfg: PatchMixerConfig):
-        super().__init__(cfg)
-
-
-class PatchMixerDistributionModel(PatchMixerEnhancedModel):
-    def __init__(self, cfg: PatchMixerConfig):
-        super().__init__(cfg)
-
-
-# Historical public names retained for downstream imports.
-BaseModel = PatchMixerPointModel
-QuantileModel = PatchMixerQuantileModel
-make_patch_cfgs = _infer_patch_cfgs
+    architecture_variant = "legacy_enhanced"

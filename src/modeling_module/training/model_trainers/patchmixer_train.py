@@ -12,7 +12,7 @@ from torch.utils.data import DataLoader, WeightedRandomSampler
 
 from modeling_module.training.adapters import (
     PatchMixerAdapter,
-    PatchMixerOriginalAdapter,
+    PatchMixerEndogenousAdapter,
 )
 from modeling_module.training.config import TrainingConfig, StageConfig, apply_stage
 from modeling_module.training.engine import CommonTrainer
@@ -83,10 +83,10 @@ def train_patchmixer(
     assert train_cfg is not None, "train_cfg는 필수입니다."
     use_exogenous_mode = getattr(train_cfg, 'use_exogenous_mode', True)
     exo_is_normalized = getattr(train_cfg, 'exo_is_normalized', True)
-    is_original = getattr(model, "architecture_variant", None) == "original"
-    if is_original and (bool(use_exogenous_mode) or future_exo_cb is not None):
+    is_endogenous = getattr(model, "architecture_variant", None) == "endogenous"
+    if is_endogenous and (bool(use_exogenous_mode) or future_exo_cb is not None):
         raise RuntimeError(
-            "[train_patchmixer] PatchMixerOriginal supports endogenous-only training."
+            "[train_patchmixer] PatchMixer supports endogenous-only training."
         )
     # 1. 외생 변수 헤드 설정 (Callback 모드일 경우에만 동적 처리)
     if future_exo_cb is not None:
@@ -114,7 +114,7 @@ def train_patchmixer(
     autocast_input = dict(device_type=amp_device, enabled=amp_enabled, dtype=amp_dtype)
 
     # 3. 모델 어댑터 초기화 (입/출력 형식 변환용)
-    adapter = PatchMixerOriginalAdapter() if is_original else PatchMixerAdapter()
+    adapter = PatchMixerEndogenousAdapter() if is_endogenous else PatchMixerAdapter()
 
     # 4. 학습 스테이지 설정
     # 별도 스테이지가 없으면 단일 스테이지로 구성

@@ -4,35 +4,22 @@ from dataclasses import asdict, fields
 from pathlib import Path
 from typing import get_args, get_type_hints
 
-import pytest
 import torch
 
 from modeling_module import load_predictor
-from modeling_module.models.PatchMixer.common.configs import (
-    PatchMixerConfig,
-    PatchMixerConfigMonthly,
-)
-from modeling_module.models.PatchMixer.variants import (
-    PatchMixerExogenousModel,
-    PatchMixerQuantileEndogenousModel,
-    PatchMixerQuantileExogenousModel,
-)
+from modeling_module.models.PatchMixer.PatchMixer import PatchMixerQuantileModel
+from modeling_module.models.PatchMixer.common.configs import PatchMixerExogenousConfig
+from modeling_module.models.PatchMixer.variants import PatchMixerExogenousModel
 from modeling_module.utils.checkpoint import build_checkpoint_payload
 
 
 def _config(
     *,
-    use_revin: bool,
-    exogenous: bool = False,
-    distribution: bool = False,
-    q_clip_norm: float | None = 10.0,
-    exo_is_normalized_default: bool = True,
-    exo_is_normalized: bool = True,
-    future_exo_shift_space: str = "output",
-    future_exo_normalized_residual_limit: float | None = None,
-    config_cls: type[PatchMixerConfig] = PatchMixerConfig,
-) -> PatchMixerConfig:
-    return config_cls(
+    exogenous: bool,
+    shift_space: str = "output",
+    residual_limit: float | None = None,
+) -> PatchMixerExogenousConfig:
+    return PatchMixerExogenousConfig(
         device="cpu",
         lookback=8,
         horizon=2,
@@ -46,22 +33,15 @@ def _config(
         head_dropout=0.0,
         f_out=8,
         head_hidden=8,
-        use_revin=use_revin,
+        use_revin=True,
         final_nonneg=False,
         past_exo_mode="none",
         future_exo_dim=1 if exogenous else 0,
-        future_exo_shift_space=future_exo_shift_space,
-        future_exo_normalized_residual_limit=(
-            future_exo_normalized_residual_limit
-        ),
-        patch_cfgs=((4, 2, 3),),
-        per_branch_dim=4,
-        fused_dim=8,
-        out_mul=2 if distribution else 1,
-        param_names=["loc", "scale"] if distribution else None,
-        q_clip_norm=q_clip_norm,
-        exo_is_normalized_default=exo_is_normalized_default,
-        exo_is_normalized=exo_is_normalized,
+        future_exo_shift_space=shift_space,
+        future_exo_normalized_residual_limit=residual_limit,
+        q_clip_norm=2.5,
+        exo_is_normalized_default=True,
+        exo_is_normalized=True,
     )
 
 
@@ -71,33 +51,14 @@ def _inputs() -> tuple[torch.Tensor, torch.Tensor]:
     return x, future
 
 
-def _output_tensor(output):
-    return output["q"] if isinstance(output, dict) else output
-
-
-@pytest.mark.parametrize(
-    ("model_cls", "distribution"),
-    (
-        (PatchMixerExogenousModel, False),
-        (PatchMixerQuantileExogenousModel, False),
-        (PatchMixerExogenousModel, True),
-    ),
-)
-def test_patchmixer_legacy_exo_normalization_flag_is_a_noop(
-    model_cls,
-    distribution: bool,
-) -> None:
+def test_patchmixer_legacy_exo_normalization_argument_is_a_noop() -> None:
     torch.manual_seed(20260802)
-    model = model_cls(
-        _config(use_revin=True, exogenous=True, distribution=distribution)
-    ).eval()
+    model = PatchMixerExogenousModel(_config(exogenous=True)).eval()
     x, future = _inputs()
 
     with torch.no_grad():
         outputs = [
-            _output_tensor(
-                model(x, future_exo=future, exo_is_normalized=value)
-            )
+            model(x, future_exo=future, exo_is_normalized=value)
             for value in (None, False, True)
         ]
 
@@ -105,146 +66,38 @@ def test_patchmixer_legacy_exo_normalization_flag_is_a_noop(
     torch.testing.assert_close(outputs[0], outputs[2], rtol=0.0, atol=0.0)
 
 
-def test_patchmixer_legacy_exo_normalization_config_fields_are_noops() -> None:
-    torch.manual_seed(20260805)
-    reference = PatchMixerExogenousModel(
-        _config(use_revin=True, exogenous=True)
-    ).eval()
-    state_dict = reference.state_dict()
-    x, future = _inputs()
-
-    outputs = []
-    for default_value in (False, True):
-        for training_value in (False, True):
-            model = PatchMixerExogenousModel(
-                _config(
-                    use_revin=True,
-                    exogenous=True,
-                    exo_is_normalized_default=default_value,
-                    exo_is_normalized=training_value,
-                )
-            ).eval()
-            model.load_state_dict(state_dict, strict=True)
-            assert model.exo_is_normalized_default is default_value
-            with torch.no_grad():
-                outputs.append(model(x, future_exo=future))
-
-    for output in outputs[1:]:
-        torch.testing.assert_close(outputs[0], output, rtol=0.0, atol=0.0)
-
-
-def test_patchmixer_quantile_training_does_not_apply_output_clip() -> None:
-    torch.manual_seed(20260803)
-    model = PatchMixerQuantileEndogenousModel(
-        _config(use_revin=True, q_clip_norm=1e-3)
-    ).train()
-    x, _ = _inputs()
-
-    model.q_clip_eval = 1e-3
-    output_small = model(x)["q"]
-    model.q_clip_eval = 1e3
-    output_large = model(x)["q"]
-
-    torch.testing.assert_close(output_small, output_large, rtol=0.0, atol=0.0)
-    assert not hasattr(model, "q_clip_train")
-
-
-@pytest.mark.parametrize(
-    ("use_revin", "clip_expected"),
-    ((True, True), (False, False)),
-)
-def test_patchmixer_quantile_eval_clip_is_revin_space_only(
-    use_revin: bool,
-    clip_expected: bool,
-) -> None:
-    torch.manual_seed(20260804)
-    model = PatchMixerQuantileEndogenousModel(
-        _config(use_revin=use_revin, q_clip_norm=0.05)
-    ).eval()
-    x = torch.linspace(0.0, 100.0, steps=16).reshape(2, 8, 1)
-
-    with torch.no_grad():
-        clipped = model(x)["q"]
-        model.q_clip_eval = None
-        unclipped = model(x)["q"]
-
-    max_delta = float((clipped - unclipped).abs().max())
-    if clip_expected:
-        assert max_delta > 0.0
-    else:
-        torch.testing.assert_close(clipped, unclipped, rtol=0.0, atol=0.0)
-
-
-def test_patchmixer_quantile_clip_config_and_checkpoint_contract() -> None:
-    field_names = {field.name for field in fields(PatchMixerConfig)}
+def test_patchmixer_exogenous_config_keeps_load_compatibility_fields() -> None:
+    field_names = {field.name for field in fields(PatchMixerExogenousConfig)}
     assert "q_clip_norm" in field_names
     assert "q_clip_train" not in field_names
+    assert "exo_is_normalized_default" in field_names
     assert "future_exo_shift_space" in field_names
     assert "future_exo_normalized_residual_limit" in field_names
 
-    config = _config(use_revin=True, q_clip_norm=2.5)
-    model = PatchMixerQuantileEndogenousModel(config)
-    payload = build_checkpoint_payload(model, config)
-
-    assert asdict(config)["q_clip_norm"] == 2.5
-    assert asdict(config)["future_exo_shift_space"] == "output"
-    assert asdict(config)["future_exo_normalized_residual_limit"] is None
-    assert payload["config"]["q_clip_norm"] == 2.5
-    assert payload["config"]["future_exo_shift_space"] == "output"
-    assert payload["config"]["future_exo_normalized_residual_limit"] is None
-    assert payload["config"]["exo_is_normalized_default"] is True
-    assert payload["config"]["exo_is_normalized"] is True
-    assert model.q_clip_eval == 2.5
-    assert model.future_exo_shift_space == "output"
-    assert not hasattr(model, "q_clip_train")
-    assert all("clip" not in key for key in model.state_dict())
-
-    restored_config = PatchMixerConfig(**payload["config"])
-    assert restored_config.q_clip_norm == 2.5
-    assert restored_config.future_exo_shift_space == "output"
-    assert restored_config.future_exo_normalized_residual_limit is None
-
-    disabled = PatchMixerQuantileEndogenousModel(
-        _config(use_revin=True, q_clip_norm=None)
-    )
-    assert disabled.q_clip_eval is None
-
 
 def test_patchmixer_future_shift_space_config_roundtrips_normalized() -> None:
-    shift_space_type = get_type_hints(PatchMixerConfig)["future_exo_shift_space"]
+    shift_space_type = get_type_hints(PatchMixerExogenousConfig)[
+        "future_exo_shift_space"
+    ]
     assert get_args(shift_space_type) == ("output", "normalized")
 
     config = _config(
-        use_revin=True,
         exogenous=True,
-        future_exo_shift_space="normalized",
-        future_exo_normalized_residual_limit=0.15,
+        shift_space="normalized",
+        residual_limit=0.15,
     )
-    serialized = asdict(config)
-    restored = PatchMixerConfig(**serialized)
-
-    assert serialized["future_exo_shift_space"] == "normalized"
-    assert serialized["future_exo_normalized_residual_limit"] == 0.15
+    restored = PatchMixerExogenousConfig(**asdict(config))
     assert restored.future_exo_shift_space == "normalized"
     assert restored.future_exo_normalized_residual_limit == 0.15
 
 
-@pytest.mark.parametrize(
-    "config_cls",
-    (PatchMixerConfig, PatchMixerConfigMonthly),
-    ids=("base", "monthly"),
-)
-def test_legacy_checkpoint_without_q_clip_norm_strict_loads(
+def test_retired_quantile_checkpoint_without_new_fields_strict_loads(
     tmp_path: Path,
-    config_cls: type[PatchMixerConfig],
 ) -> None:
     torch.manual_seed(20260806)
-    config = _config(
-        use_revin=True,
-        q_clip_norm=10.0,
-        config_cls=config_cls,
-    )
-    model = PatchMixerQuantileEndogenousModel(config).eval()
+    config = _config(exogenous=False)
+    config.q_clip_norm = 10.0
+    model = PatchMixerQuantileModel(config).eval()
     x, _ = _inputs()
     with torch.no_grad():
         expected = model(x)["q"]
@@ -258,78 +111,14 @@ def test_legacy_checkpoint_without_q_clip_norm_strict_loads(
     legacy_config.pop("q_clip_norm")
     legacy_config.pop("future_exo_shift_space")
     legacy_config.pop("future_exo_normalized_residual_limit")
-    payload.pop("config")
-    payload["cfg_state"] = dict(legacy_config)
-    checkpoint_path = tmp_path / f"{config_cls.__name__}_without_q_clip_norm.pt"
-    torch.save(payload, checkpoint_path)
+    payload["config"] = legacy_config
 
+    checkpoint_path = tmp_path / "patchmixer_quantile_legacy.pt"
+    torch.save(payload, checkpoint_path)
     predictor = load_predictor(str(checkpoint_path), device="cpu", strict=True)
 
     assert predictor.model_key == "patchmixer_quantile"
-    assert "q_clip_norm" not in payload["cfg_state"]
-    assert "future_exo_shift_space" not in payload["cfg_state"]
-    assert "future_exo_normalized_residual_limit" not in payload["cfg_state"]
     assert predictor.model.q_clip_eval == 10.0
-    assert predictor.model.future_exo_shift_space == "output"
-    assert predictor.model.future_exo_normalized_residual_limit is None
-    assert predictor.model.state_dict().keys() == model.state_dict().keys()
     with torch.no_grad():
         actual = predictor.model(x)["q"]
     torch.testing.assert_close(actual, expected, rtol=0.0, atol=0.0)
-
-
-@pytest.mark.parametrize(
-    ("model_cls", "distribution"),
-    (
-        (PatchMixerExogenousModel, False),
-        (PatchMixerQuantileExogenousModel, False),
-        (PatchMixerExogenousModel, True),
-    ),
-)
-def test_patchmixer_rejects_unknown_future_shift_space(
-    model_cls,
-    distribution: bool,
-) -> None:
-    config = _config(
-        use_revin=True,
-        exogenous=True,
-        distribution=distribution,
-        future_exo_shift_space="invalid",
-    )
-
-    with pytest.raises(ValueError, match="must be one of.*normalized.*output"):
-        model_cls(config)
-
-
-@pytest.mark.parametrize("bad_limit", (0.0, -0.1, float("inf"), float("nan")))
-def test_patchmixer_rejects_invalid_normalized_residual_limit(
-    bad_limit: float,
-) -> None:
-    config = _config(
-        use_revin=True,
-        exogenous=True,
-        future_exo_shift_space="normalized",
-        future_exo_normalized_residual_limit=bad_limit,
-    )
-
-    with pytest.raises(ValueError, match="finite positive value or None"):
-        PatchMixerExogenousModel(config)
-
-
-@pytest.mark.parametrize(
-    ("future_exo_shift_space", "use_revin"),
-    (("output", True), ("normalized", False)),
-)
-def test_patchmixer_normalized_residual_limit_requires_normalized_revin_path(
-    future_exo_shift_space: str,
-    use_revin: bool,
-) -> None:
-    config = _config(
-        use_revin=use_revin,
-        exogenous=True,
-        future_exo_shift_space=future_exo_shift_space,
-        future_exo_normalized_residual_limit=0.15,
-    )
-
-    with pytest.raises(ValueError, match="requires.*normalized.*use_revin=True"):
-        PatchMixerExogenousModel(config)

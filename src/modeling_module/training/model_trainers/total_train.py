@@ -15,8 +15,10 @@ from modeling_module.models.registry import (
     ordered_training_families_for_targets,
     resolve_artifact_model_key,
 )
-from modeling_module.models.PatchMixer.common.configs import PatchMixerConfig
-from modeling_module.models.PatchMixer.common.configs import PatchMixerOriginalConfig
+from modeling_module.models.PatchMixer.common.configs import (
+    PatchMixerConfig,
+    PatchMixerExogenousConfig,
+)
 from modeling_module.models.PatchTST.common.configs import PatchTSTConfig
 from modeling_module.models.PatchTST.self_supervised.PatchTST import PatchTSTPretrainModel
 from modeling_module.models.NHITS.configs import NHITSConfig
@@ -28,10 +30,7 @@ from modeling_module.models.model_builder import (
     build_titan_lmm,
     build_titan_seq2seq,
     build_patch_mixer_exogenous,
-    build_patch_mixer_quantile,
-    build_patch_mixer_quantile_exogenous,
     build_patch_mixer,
-    build_patch_mixer_original,
     build_patchTST,
     build_patchTST_exogenous,
     build_patchTST_quantile,
@@ -1447,56 +1446,30 @@ def _run_patchmixer(
     requested_artifact_keys: Optional[Iterable[str]] = None,
     architecture_override: Optional[Mapping[str, Any]] = None,
 ):
-    """PatchMixer enhanced and canonical-original artifact runner."""
+    """Train the paper endogenous model or the dedicated exogenous point model."""
     if stages is None:
         stages = [StageConfig(epochs=1, lr=1e-4, spike_enabled=False)]
 
     loss_point_obj = loss if loss is not None else (loss_point if loss_point is not None else point_train_cfg.loss)
-    mode, out_mul, param_names, dist_name = _infer_mode_and_dist(loss_point_obj)
-    requested = _requested_target_set(requested_artifact_keys)
-    run_explicit_exogenous = requested is not None and "patchmixer_exogenous" in requested
-    run_explicit_quantile_exogenous = (
-        requested is not None and "patchmixer_quantile_exogenous" in requested
-    )
-    run_base = _wants_artifact(requested, "patchmixer_base") or run_explicit_exogenous
-    run_original = _wants_artifact(requested, "patchmixer_original")
-    run_quantile = (
-        _wants_artifact(requested, "patchmixer_quantile")
-        or run_explicit_quantile_exogenous
-    )
-
-    if requested is not None and {
-        "patchmixer_base",
-        "patchmixer_exogenous",
-    }.issubset(requested):
-        raise ValueError("Request either patchmixer_base or patchmixer_exogenous, not both.")
-    if requested is not None and {
-        "patchmixer_quantile",
-        "patchmixer_quantile_exogenous",
-    }.issubset(requested):
-        raise ValueError(
-            "Request either patchmixer_quantile or patchmixer_quantile_exogenous, not both."
+    mode, _, _, _ = _infer_mode_and_dist(loss_point_obj)
+    if mode != "point":
+        raise NotImplementedError(
+            "PatchMixer public training supports point loss only; retired distribution "
+            "and quantile artifacts remain load-only."
         )
-    if (run_explicit_exogenous or run_explicit_quantile_exogenous) and not use_exogenous_mode:
-        raise ValueError("Explicit PatchMixer exogenous variants require use_exogenous_mode=True.")
-    if (run_explicit_exogenous or run_explicit_quantile_exogenous) and not any(
+
+    requested = _requested_target_set(requested_artifact_keys)
+    run_endogenous = _wants_artifact(requested, "patchmixer")
+    run_exogenous = _wants_artifact(requested, "patchmixer_exo")
+
+    if run_exogenous and not use_exogenous_mode:
+        raise ValueError("patchmixer_exo requires use_exogenous_mode=True.")
+    if run_exogenous and not any(
         (int(exo_dim), int(past_cont_dim), int(past_cat_dim))
     ):
-        raise ValueError("Explicit PatchMixer exogenous variants require configured exogenous features.")
-
-    if run_original and mode != "point":
-        raise NotImplementedError(
-            "PatchMixerOriginal supports point loss only, "
-            f"got supervised mode {mode!r}."
-        )
-    if run_original and use_exogenous_mode:
-        raise NotImplementedError(
-            "PatchMixerOriginal is an endogenous-only baseline."
-        )
-
-    quantiles = (0.1, 0.5, 0.9)
-    loss_q_obj = coerce_quantile_loss(loss_quantile, quantiles=quantiles)
-    quantile_train_cfg = replace(quantile_train_cfg, loss=loss_q_obj)
+        raise ValueError("patchmixer_exo requires configured exogenous features.")
+    if run_endogenous and use_exogenous_mode:
+        raise ValueError("patchmixer is endogenous-only; set use_exogenous_mode=False.")
 
     # cat embedding 정책 (데이터 메타로 대체 권장)
     if use_exogenous_mode and int(past_cat_dim) > 0:
@@ -1508,7 +1481,7 @@ def _run_patchmixer(
 
 
 
-    pm_kwargs = dict(
+    exogenous_kwargs = dict(
         lookback=lookback,
         horizon=horizon,
         device=device,
@@ -1540,10 +1513,8 @@ def _run_patchmixer(
         expander_season_period=int(season_period),
         expander_n_harmonics=min(int(season_period) // 2, 24),
 
-        out_mul=int(out_mul),
-        dist_name=dist_name,
-        param_names=param_names,
-        quantiles=quantiles,
+        out_mul=1,
+        param_names=None,
 
         head_dropout=0.02,
         learn_output_scale=True,
@@ -1551,11 +1522,13 @@ def _run_patchmixer(
         past_exo_mode="z_gate",
     )
     if architecture_override:
-        pm_kwargs.update({key: value for key, value in dict(architecture_override).items() if value is not None})
+        exogenous_kwargs.update(
+            {key: value for key, value in dict(architecture_override).items() if value is not None}
+        )
 
     _fcb = future_exo_cb if use_exogenous_mode else None
     if use_exogenous_mode:
-        pm_kwargs.update(
+        exogenous_kwargs.update(
             dict(
                 past_exo_cont_dim=int(past_cont_dim),
                 past_exo_cat_dim=int(past_cat_dim),
@@ -1566,28 +1539,59 @@ def _run_patchmixer(
         )
     else:
         # exo OFF 불변식
-        pm_kwargs.update(dict(future_exo_dim = 0,
-                              past_exo_cont_dim=0,
-                              past_exo_cat_dim=0,
-                              past_exo_cat_vocab_sizes=(),
-                              past_exo_cat_embed_dims=()))
+        exogenous_kwargs.update(dict(future_exo_dim=0,
+                                     past_exo_cont_dim=0,
+                                     past_exo_cat_dim=0,
+                                     past_exo_cat_vocab_sizes=(),
+                                     past_exo_cat_embed_dims=()))
 
-    print(f"[PatchMixer][EXO] use_exo={use_exogenous_mode} future_exo_dim={pm_kwargs.get('future_exo_dim')} "
-          f"past_exo_cont_dim={pm_kwargs.get('past_exo_cont_dim')} future_cb={_fcb is not None} "
-          f"past_exo_cat_dim={pm_kwargs.get('past_exo_cat_dim')}")
-    if run_base:
-        point_model_key = (
-            "patchmixer_exogenous" if run_explicit_exogenous else "patchmixer_base"
+    print(f"[PatchMixer][EXO] use_exo={use_exogenous_mode} future_exo_dim={exogenous_kwargs.get('future_exo_dim')} "
+          f"past_exo_cont_dim={exogenous_kwargs.get('past_exo_cont_dim')} future_cb={_fcb is not None} "
+          f"past_exo_cat_dim={exogenous_kwargs.get('past_exo_cat_dim')}")
+
+    if run_endogenous:
+        endogenous_source = dict(exogenous_kwargs)
+        if architecture_override:
+            endogenous_source.update(dict(architecture_override))
+        pm_cfg = PatchMixerConfig.from_config(endogenous_source)
+        pm_model = build_patch_mixer(pm_cfg)
+        endogenous_train_cfg = replace(point_train_cfg, use_exogenous_mode=False)
+
+        print(f"PatchMixer ({freq.capitalize()}) mode=point")
+        best_pm = train_patchmixer(
+            pm_model,
+            train_loader,
+            val_loader,
+            device=device,
+            train_cfg=endogenous_train_cfg,
+            stages=list(stages),
+            future_exo_cb=None,
         )
-        pm_base_cfg = PatchMixerConfig(**pm_kwargs)
-        pm_base_cfg.loss = loss_point_obj
-        point_builder = build_patch_mixer_exogenous if run_explicit_exogenous else build_patch_mixer
-        pm_base_model = point_builder(pm_base_cfg)
+        if save_root:
+            ckpt_path = _make_ckpt_path(save_root, freq, "PatchMixer", lookback, horizon)
+            save_model(
+                pm_model,
+                pm_cfg,
+                ckpt_path,
+                extra_meta={"model_key": "patchmixer", "family_key": "patchmixer"},
+            )
+            best_pm["ckpt_path"] = str(ckpt_path)
+        _store_result(
+            results,
+            result_name="PatchMixer",
+            best=best_pm,
+            model_key="patchmixer",
+            family_key="patchmixer",
+        )
 
-        point_name = "PatchMixer Exogenous" if run_explicit_exogenous else "PatchMixer"
-        print(f"{point_name} ({freq.capitalize()}) mode={mode}")
-        best_pm_base = train_patchmixer(
-            pm_base_model,
+    if run_exogenous:
+        pm_exo_cfg = PatchMixerExogenousConfig(**exogenous_kwargs)
+        pm_exo_cfg.loss = loss_point_obj
+        pm_exo_model = build_patch_mixer_exogenous(pm_exo_cfg)
+
+        print(f"PatchMixer Exogenous ({freq.capitalize()}) mode=point")
+        best_pm_exo = train_patchmixer(
+            pm_exo_model,
             train_loader,
             val_loader,
             device=device,
@@ -1596,113 +1600,19 @@ def _run_patchmixer(
             future_exo_cb=_fcb,
         )
         if save_root:
-            artifact_name = "PatchMixerExogenous" if run_explicit_exogenous else "PatchMixer"
-            ckpt_path = _make_ckpt_path(save_root, freq, artifact_name, lookback, horizon)
+            ckpt_path = _make_ckpt_path(save_root, freq, "PatchMixerExogenous", lookback, horizon)
             save_model(
-                pm_base_model,
-                pm_base_cfg,
+                pm_exo_model,
+                pm_exo_cfg,
                 ckpt_path,
-                extra_meta={"model_key": point_model_key, "family_key": "patchmixer"},
+                extra_meta={"model_key": "patchmixer_exo", "family_key": "patchmixer"},
             )
-            best_pm_base["ckpt_path"] = str(ckpt_path)
+            best_pm_exo["ckpt_path"] = str(ckpt_path)
         _store_result(
             results,
-            result_name=point_name,
-            best=best_pm_base,
-            model_key=point_model_key,
-            family_key="patchmixer",
-        )
-
-    if run_original:
-        pm_original_cfg = PatchMixerOriginalConfig.from_config(pm_kwargs)
-        pm_original_model = build_patch_mixer_original(pm_original_cfg)
-        original_train_cfg = replace(point_train_cfg, use_exogenous_mode=False)
-
-        print(f"PatchMixer Original ({freq.capitalize()}) mode=point")
-        best_pm_original = train_patchmixer(
-            pm_original_model,
-            train_loader,
-            val_loader,
-            device=device,
-            train_cfg=original_train_cfg,
-            stages=list(stages),
-            future_exo_cb=None,
-        )
-        if save_root:
-            ckpt_path = _make_ckpt_path(
-                save_root,
-                freq,
-                "PatchMixerOriginal",
-                lookback,
-                horizon,
-            )
-            save_model(
-                pm_original_model,
-                pm_original_cfg,
-                ckpt_path,
-                extra_meta={
-                    "model_key": "patchmixer_original",
-                    "family_key": "patchmixer",
-                },
-            )
-            best_pm_original["ckpt_path"] = str(ckpt_path)
-        _store_result(
-            results,
-            result_name="PatchMixer Original",
-            best=best_pm_original,
-            model_key="patchmixer_original",
-            family_key="patchmixer",
-        )
-
-    if run_quantile:
-        quantile_model_key = (
-            "patchmixer_quantile_exogenous"
-            if run_explicit_quantile_exogenous
-            else "patchmixer_quantile"
-        )
-        pm_q_cfg = PatchMixerConfig(**pm_kwargs)
-        pm_q_cfg.loss = loss_q_obj
-        quantile_builder = (
-            build_patch_mixer_quantile_exogenous
-            if run_explicit_quantile_exogenous
-            else build_patch_mixer_quantile
-        )
-        pm_q_model = quantile_builder(pm_q_cfg)
-
-        quantile_name = (
-            "PatchMixer Quantile Exogenous"
-            if run_explicit_quantile_exogenous
-            else "PatchMixer Quantile"
-        )
-        print(f"{quantile_name} ({freq.capitalize()})")
-        best_pm_q = train_patchmixer(
-            pm_q_model,
-            train_loader,
-            val_loader,
-            device=device,
-            train_cfg=quantile_train_cfg,
-            stages=list(stages),
-            future_exo_cb=_fcb,
-        )
-        if save_root:
-            artifact_name = (
-                "PatchMixerQuantileExogenous"
-                if run_explicit_quantile_exogenous
-                else "PatchMixerQuantile"
-            )
-            ckpt_path = _make_ckpt_path(save_root, freq, artifact_name, lookback, horizon)
-            save_model(
-                pm_q_model,
-                pm_q_cfg,
-                ckpt_path,
-                extra_meta={"model_key": quantile_model_key, "family_key": "patchmixer"},
-            )
-            best_pm_q["ckpt_path"] = str(ckpt_path)
-        _store_result(
-            results,
-            result_name=quantile_name,
-            best=best_pm_q,
-            model_key=quantile_model_key,
+            result_name="PatchMixer Exogenous",
+            best=best_pm_exo,
+            model_key="patchmixer_exo",
             family_key="patchmixer",
         )
 

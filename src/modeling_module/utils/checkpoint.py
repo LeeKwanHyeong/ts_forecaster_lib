@@ -10,6 +10,8 @@ import torch
 from dataclasses import asdict, is_dataclass
 
 from modeling_module.models.PatchMixer.common.configs import (
+    PatchMixerConfig,
+    PatchMixerExogenousConfig,
     PatchMixerConfigMonthly,
     PatchMixerConfigWeekly,
 )
@@ -48,9 +50,11 @@ def _rebuild_patchmixer_weekly(cfgd: dict):
 
 
 def _rebuild_patchmixer_original(cfgd: dict):
-    from modeling_module.models.PatchMixer.common.configs import PatchMixerOriginalConfig
+    return PatchMixerConfig.from_config(cfgd)
 
-    return PatchMixerOriginalConfig.from_config(cfgd)
+
+def _rebuild_patchmixer_exogenous(cfgd: dict):
+    return PatchMixerExogenousConfig(**cfgd)
 
 
 def _rebuild_titan(cfgd: dict):
@@ -72,6 +76,7 @@ _REBUILDERS_BY_CLS = {
     # PatchMixer
     "PatchMixerConfigMonthly": _rebuild_patchmixer_monthly,
     "PatchMixerConfigWeekly": _rebuild_patchmixer_weekly,
+    "PatchMixerExogenousConfig": _rebuild_patchmixer_exogenous,
     "PatchMixerOriginalConfig": _rebuild_patchmixer_original,
     # Titan
     "TitanConfig": _rebuild_titan,
@@ -895,6 +900,16 @@ def _extract_cfg_obj(ckpt: dict) -> Any:
     cfg_cls = ckpt.get("cfg_cls", None)
     if cfg_state is not None and cfg_cls is not None:
         prepared_cfg_state = _prepare_config_for_restore(ckpt, cfg_state)
+        if cfg_cls == "PatchMixerConfig":
+            try:
+                from modeling_module.models.registry import infer_artifact_model_key_from_checkpoint
+
+                model_key = infer_artifact_model_key_from_checkpoint(ckpt)
+            except ValueError:
+                model_key = None
+            if model_key == "patchmixer":
+                return _rebuild_patchmixer_original(prepared_cfg_state)
+            return _rebuild_patchmixer_exogenous(prepared_cfg_state)
         rb = _REBUILDERS_BY_CLS.get(cfg_cls, None)
         if rb is not None:
             return rb(prepared_cfg_state)

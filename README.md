@@ -97,8 +97,8 @@ public API 시그니처는 그대로 유지할 수 있습니다.
 
 - `patchtst_base`
 - `patchtst_quantile`
-- `patchmixer_base`
-- `patchmixer_quantile`
+- `patchmixer`
+- `patchmixer_exo`
 - `titan_base`
 - `titan_lmm`
 - `titan_seq2seq`
@@ -133,10 +133,8 @@ family 이름으로도 요청할 수 있습니다.
 | PatchTST | `patchtst_exogenous` | 지원 | point, Normal, StudentT | past/future 중 하나 이상 필수 | `full`, `ssl_only` |
 | PatchTST | `patchtst_quantile` | 지원 | q10/q50/q90 | endogenous 기본, legacy exogenous 호환 | `full`, `ssl_only` |
 | PatchTST | `patchtst_quantile_exogenous` | 지원 | q10/q50/q90 | past/future 중 하나 이상 필수 | `full`, `ssl_only` |
-| PatchMixer | `patchmixer_base` | 지원 | point, Normal, StudentT | endogenous 기본, legacy exogenous 호환 | 미지원 |
-| PatchMixer | `patchmixer_exogenous` | 지원 | point, Normal, StudentT | past/future 중 하나 이상 필수 | 미지원 |
-| PatchMixer | `patchmixer_quantile` | 지원 | q10/q50/q90 | endogenous 기본, legacy exogenous 호환 | 미지원 |
-| PatchMixer | `patchmixer_quantile_exogenous` | 지원 | q10/q50/q90 | past/future 중 하나 이상 필수 | 미지원 |
+| PatchMixer | `patchmixer` | 지원 | point only | 미지원 | 미지원 |
+| PatchMixer | `patchmixer_exo` | 지원 | point only | past/future 중 하나 이상 필수 | 미지원 |
 | Titan | `titan_base` | Deprecated | point, Normal, StudentT | past/future optional | 미지원 |
 | Titan | `titan_lmm` | Deprecated | point, Normal, StudentT | past/future optional | 미지원 |
 | Titan | `titan_seq2seq` | Deprecated | point, Normal, StudentT | past/future optional | 미지원 |
@@ -148,8 +146,11 @@ family 이름으로도 요청할 수 있습니다.
 
 - `PatchTST`의 `full`/`ssl_only`는 artifact `save_dir`가 필수이며 다른 family-only request에는 사용할 수 없습니다.
 - 신규 exogenous 학습은 `patchtst_exogenous`, `patchtst_quantile_exogenous`,
-  `patchmixer_exogenous`, `patchmixer_quantile_exogenous`를 직접 요청합니다. 이 키들은 기존
-  `patchtst`/`patchmixer` family 기본 확장에는 포함되지 않습니다.
+  `patchmixer_exo`를 직접 요청합니다. 이 키들은 기존 `patchtst`/`patchmixer` family 기본
+  확장에는 포함되지 않습니다.
+- `patchmixer`는 논문 기반 endogenous point 모델입니다. `patchmixer_original`은 같은 모델의
+  legacy alias이며, 과거 `patchmixer_base`와 quantile key는 지원 schema의 checkpoint
+  복원에만 사용하는 load-only key입니다.
 - mixed request에서는 SSL이 PatchTST stage에만 적용되고 다른 family는 supervised로 실행됩니다.
   `ssl_only`는 PatchTST supervised checkpoint 없이 pretraining checkpoint만 만듭니다.
 - `ExoTST`는 `use_exogenous_mode=True`와 past/future continuous exogenous가 모두 필요합니다.
@@ -169,7 +170,7 @@ family 이름으로도 요청할 수 있습니다.
 - `models` 생략 또는 빈 목록은 `patchtst_base`, `patchtst_quantile`로 확장됩니다.
 - `models=["titan"]`은 호환상 세 Titan artifact로 계속 확장되지만 `FutureWarning`을 냅니다.
 - artifact key를 직접 주면 family 전체가 아니라 그 모델만 학습됩니다.
-  예: `models=["titan_lmm"]`, `models=["titan_seq2seq"]`, `models=["titan_base"]`, `models=["patchmixer_quantile"]`, `models=["patchtst_quantile"]`
+  예: `models=["titan_lmm"]`, `models=["titan_seq2seq"]`, `models=["titan_base"]`, `models=["patchmixer_exo"]`, `models=["patchtst_quantile"]`
 - repo 안의 `Transformer` 디렉토리는 아직 public training/inference registry에 연결되지 않았습니다.
 
 ## Installation

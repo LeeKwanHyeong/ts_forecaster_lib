@@ -28,6 +28,19 @@ def _config_get(cfg: Any, key: str, default: Any = None) -> Any:
     return getattr(cfg, key, default)
 
 
+def _requires_exact_unversioned_patchmixer_restore(
+    ckpt: Mapping[str, Any],
+    model_key: str,
+) -> bool:
+    """Prevent silent partial restores for unversioned project checkpoints."""
+    if ckpt.get("format_version") is not None or not model_key.startswith("patchmixer"):
+        return False
+    model_class = "".join(
+        ch for ch in str(ckpt.get("model_class", "")).casefold() if ch.isalnum()
+    )
+    return model_class in {"basemodel", "quantilemodel"}
+
+
 def _load_single_model(
     ckpt_path: str,
     *,
@@ -47,9 +60,21 @@ def _load_single_model(
     if "patchtst" in model.__class__.__name__.lower():
         state_dict = _drop_revin_buffers(state_dict)
 
+    exact_legacy_restore = _requires_exact_unversioned_patchmixer_restore(
+        ckpt,
+        model_key,
+    )
     try:
-        model.load_state_dict(state_dict, strict=strict)
-    except RuntimeError:
+        model.load_state_dict(state_dict, strict=strict or exact_legacy_restore)
+    except RuntimeError as exc:
+        if exact_legacy_restore:
+            raise ValueError(
+                "Unsupported pre-version PatchMixer checkpoint: its BaseModel/QuantileModel "
+                "state schema cannot be restored exactly by the maintained load-only model. "
+                "Recreate the historical source environment and resave it in checkpoint "
+                "format v3 before loading it through the public API. "
+                f"Checkpoint: {ckpt_path}"
+            ) from exc
         if strict:
             raise
         _partial_load_with_shape_filter(model, state_dict)

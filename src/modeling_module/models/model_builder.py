@@ -3,10 +3,10 @@ from typing import Union, Any, Optional, Mapping
 
 from modeling_module.models.ExoTST.configs import ExoTSTConfig
 from modeling_module.models.NHITS.configs import NHITSConfig
-from modeling_module.models.PatchMixer.PatchMixer import PatchMixerOriginalModel
+from modeling_module.models.PatchMixer.PatchMixer import PatchMixerModel
 from modeling_module.models.PatchMixer.common.configs import (
     PatchMixerConfig,
-    PatchMixerOriginalConfig,
+    PatchMixerExogenousConfig,
 )
 from modeling_module.models.PatchTST.common.configs import PatchTSTConfig
 from modeling_module.models.SELLM.configs import SELLMConfig
@@ -16,88 +16,68 @@ from modeling_module.models.Titan.common.configs import TitanConfig
 
 
 # -----------------------------
-# PatchMixer: dict → PatchMixerConfig
+# PatchMixer
 # -----------------------------
-def _ensure_patchmixer_config(cfg: Any):
-    """
-    load_model_dict에서 cfg가 dict로 들어오는 케이스를 흡수.
-    - dict -> PatchMixerConfig(**dict)
-    - dataclass -> 그대로
-    """
-    # 프로젝트 경로에 맞춰 import 경로만 유지해 주세요.
-    from modeling_module.models.PatchMixer.common.configs import PatchMixerConfig
+def _ensure_patchmixer_config(cfg: Any) -> PatchMixerConfig:
+    exogenous_widths = (
+        int(getattr(cfg, "past_exo_cont_dim", 0) or 0),
+        int(getattr(cfg, "past_exo_cat_dim", 0) or 0),
+        int(getattr(cfg, "future_exo_dim", 0) or 0),
+    )
+    if isinstance(cfg, Mapping):
+        exogenous_widths = tuple(
+            int(cfg.get(name, 0) or 0)
+            for name in ("past_exo_cont_dim", "past_exo_cat_dim", "future_exo_dim")
+        )
+    if any(exogenous_widths):
+        raise ValueError(
+            "PatchMixerModel is endogenous-only; use build_patch_mixer_exogenous "
+            "for configured exogenous inputs."
+        )
+    return PatchMixerConfig.from_config(cfg)
 
-    if isinstance(cfg, PatchMixerConfig):
+
+def _ensure_patchmixer_exogenous_config(cfg: Any) -> PatchMixerExogenousConfig:
+    if isinstance(cfg, PatchMixerExogenousConfig):
         return cfg
-    if is_dataclass(cfg):
-        # PatchMixerConfig가 dataclass라면 여기로 들어올 수 있음
-        return cfg
-    if isinstance(cfg, dict):
-        return PatchMixerConfig(**cfg)
-
-    raise TypeError(f"[build_patch_mixer] unsupported cfg type: {type(cfg)}")
-
-# def build_patch_mixer(cfg: PatchMixerConfig, *, out_mult: int = 1, param_names = None):
-#     cfg = _ensure_patchmixer_config(cfg)
-#     return PatchMixerModel(cfg, out_mult=out_mult, param_names=param_names)
-def build_patch_mixer(cfg: PatchMixerConfig):
-    """Compatibility builder selecting the strict variant from configured widths."""
-    cfg = _ensure_patchmixer_config(cfg)
-    from modeling_module.models.PatchMixer.variants import (
-        PatchMixerEndogenousModel,
-        PatchMixerExogenousModel,
-        patchmixer_uses_exogenous_inputs,
+    if isinstance(cfg, Mapping):
+        values = dict(cfg)
+    elif hasattr(cfg, "__dict__"):
+        values = dict(vars(cfg))
+    elif is_dataclass(cfg):
+        values = asdict(cfg)
+    else:
+        raise TypeError(f"Unsupported PatchMixer exogenous config type: {type(cfg)}")
+    allowed = {field.name for field in fields(PatchMixerExogenousConfig)}
+    return PatchMixerExogenousConfig(
+        **{key: value for key, value in values.items() if key in allowed}
     )
 
-    model_cls = (
-        PatchMixerExogenousModel
-        if patchmixer_uses_exogenous_inputs(cfg)
-        else PatchMixerEndogenousModel
-    )
-    return model_cls(cfg)
+
+def build_patch_mixer(cfg: Any) -> PatchMixerModel:
+    """Build the paper-faithful endogenous point model."""
+    return PatchMixerModel(_ensure_patchmixer_config(cfg))
 
 
-def build_patch_mixer_exogenous(cfg: PatchMixerConfig):
-    """Build the explicit gated-fusion PatchMixer exogenous variant."""
+def build_patch_mixer_exogenous(cfg: Any):
+    """Build the gated-fusion exogenous point model."""
     from modeling_module.models.PatchMixer.variants import PatchMixerExogenousModel
 
-    cfg = _ensure_patchmixer_config(cfg)
-    return PatchMixerExogenousModel(cfg)
+    return PatchMixerExogenousModel(_ensure_patchmixer_exogenous_config(cfg))
 
 
-def build_patch_mixer_quantile(cfg):
-    """
-    기존 quantile builder는 그대로 유지 (QuantileModel이 별도 class인 구조)
-    """
-    from modeling_module.models.PatchMixer.variants import (
-        PatchMixerQuantileEndogenousModel,
-        PatchMixerQuantileExogenousModel,
-        patchmixer_uses_exogenous_inputs,
-    )
-    cfg = _ensure_patchmixer_config(cfg)
-    model_cls = (
-        PatchMixerQuantileExogenousModel
-        if patchmixer_uses_exogenous_inputs(cfg)
-        else PatchMixerQuantileEndogenousModel
-    )
-    return model_cls(cfg)
+def build_patch_mixer_legacy(cfg: Any):
+    """Load-only builder for retired Enhanced point/distribution checkpoints."""
+    from modeling_module.models.PatchMixer.PatchMixer import _PatchMixerLegacyModel
+
+    return _PatchMixerLegacyModel(_ensure_patchmixer_exogenous_config(cfg))
 
 
-def build_patch_mixer_quantile_exogenous(cfg):
-    """Build the explicit quantile PatchMixer exogenous variant."""
-    from modeling_module.models.PatchMixer.variants import PatchMixerQuantileExogenousModel
+def build_patch_mixer_quantile_legacy(cfg: Any):
+    """Load-only builder for retired endogenous/exogenous quantile checkpoints."""
+    from modeling_module.models.PatchMixer.PatchMixer import PatchMixerQuantileModel
 
-    cfg = _ensure_patchmixer_config(cfg)
-    return PatchMixerQuantileExogenousModel(cfg)
-
-
-def _ensure_patchmixer_original_config(cfg: Any) -> PatchMixerOriginalConfig:
-    return PatchMixerOriginalConfig.from_config(cfg)
-
-
-def build_patch_mixer_original(cfg: Any) -> PatchMixerOriginalModel:
-    """Build the canonical upstream-compatible PatchMixer point model."""
-    return PatchMixerOriginalModel(_ensure_patchmixer_original_config(cfg))
+    return PatchMixerQuantileModel(_ensure_patchmixer_exogenous_config(cfg))
 
 
 # -----------------------------

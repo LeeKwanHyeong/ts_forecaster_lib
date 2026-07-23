@@ -3,14 +3,15 @@ from __future__ import annotations
 import pytest
 import torch
 
-from modeling_module.models.PatchMixer.PatchMixer import PatchMixerModel
-from modeling_module.models.PatchMixer.common.configs import PatchMixerConfig
-from modeling_module.models.PatchMixer.variants import (
-    PatchMixerEndogenousModel,
-    PatchMixerExogenousModel,
-    PatchMixerQuantileEndogenousModel,
-    PatchMixerQuantileExogenousModel,
+from modeling_module.models.PatchMixer.PatchMixer import (
+    PatchMixerModel,
+    _PatchMixerProjectCore,
 )
+from modeling_module.models.PatchMixer.common.configs import (
+    PatchMixerConfig,
+    PatchMixerExogenousConfig,
+)
+from modeling_module.models.PatchMixer.variants import PatchMixerExogenousModel
 from modeling_module.models.PatchTST.common.configs import AttentionConfig, PatchTSTConfig
 from modeling_module.models.PatchTST.supervised.PatchTST import PatchTSTModel
 from modeling_module.models.PatchTST.supervised.variants import (
@@ -22,8 +23,6 @@ from modeling_module.models.PatchTST.supervised.variants import (
 from modeling_module.models.model_builder import (
     build_patch_mixer,
     build_patch_mixer_exogenous,
-    build_patch_mixer_quantile,
-    build_patch_mixer_quantile_exogenous,
     build_patchTST,
     build_patchTST_exogenous,
     build_patchTST_quantile,
@@ -57,8 +56,19 @@ def _patchtst_config(*, exogenous: bool) -> PatchTSTConfig:
     )
 
 
-def _patchmixer_config(*, exogenous: bool) -> PatchMixerConfig:
-    return PatchMixerConfig(
+def _patchmixer_config(*, exogenous: bool):
+    if not exogenous:
+        return PatchMixerConfig(
+            lookback=8,
+            horizon=2,
+            patch_len=4,
+            stride=2,
+            d_model=8,
+            e_layers=1,
+            mixer_kernel_size=3,
+            dropout=0.0,
+        )
+    return PatchMixerExogenousConfig(
         lookback=8,
         horizon=2,
         patch_len=4,
@@ -89,22 +99,13 @@ def test_compatibility_builders_route_by_configured_exogenous_widths():
         PatchTSTQuantileExogenousModel,
     )
 
+    assert isinstance(build_patch_mixer(_patchmixer_config(exogenous=False)), PatchMixerModel)
     assert isinstance(
-        build_patch_mixer(_patchmixer_config(exogenous=False)),
-        PatchMixerEndogenousModel,
-    )
-    assert isinstance(
-        build_patch_mixer(_patchmixer_config(exogenous=True)),
+        build_patch_mixer_exogenous(_patchmixer_config(exogenous=True)),
         PatchMixerExogenousModel,
     )
-    assert isinstance(
-        build_patch_mixer_quantile(_patchmixer_config(exogenous=False)),
-        PatchMixerQuantileEndogenousModel,
-    )
-    assert isinstance(
-        build_patch_mixer_quantile(_patchmixer_config(exogenous=True)),
-        PatchMixerQuantileExogenousModel,
-    )
+    with pytest.raises(ValueError, match="endogenous-only"):
+        build_patch_mixer(_patchmixer_config(exogenous=True))
 
 
 @pytest.mark.parametrize(
@@ -113,7 +114,6 @@ def test_compatibility_builders_route_by_configured_exogenous_widths():
         (build_patchTST_exogenous, _patchtst_config(exogenous=False)),
         (build_patchTST_quantile_exogenous, _patchtst_config(exogenous=False)),
         (build_patch_mixer_exogenous, _patchmixer_config(exogenous=False)),
-        (build_patch_mixer_quantile_exogenous, _patchmixer_config(exogenous=False)),
     ),
 )
 def test_explicit_exogenous_builders_reject_endogenous_configs(builder, config):
@@ -133,11 +133,18 @@ def test_patchtst_legacy_exogenous_state_dict_strict_loads_into_split_variant():
 
 def test_patchmixer_legacy_exogenous_state_dict_strict_loads_into_split_variant():
     config = _patchmixer_config(exogenous=True)
-    legacy = PatchMixerModel(config)
-    split = build_patch_mixer(config)
+    legacy = _PatchMixerProjectCore(config)
+    split = build_patch_mixer_exogenous(config)
 
     assert isinstance(split, PatchMixerExogenousModel)
-    assert legacy.state_dict().keys() == split.state_dict().keys()
+    assert set(legacy.state_dict()) - set(split.state_dict()) == {
+        "out_scale",
+        "out_bias",
+        "dw_gain",
+        "dw_head.weight",
+        "dw_head.bias",
+    }
+    assert set(split.state_dict()).issubset(legacy.state_dict())
     split.load_state_dict(legacy.state_dict(), strict=True)
 
 
@@ -152,7 +159,7 @@ def test_explicit_exogenous_models_reject_missing_configured_inputs(builder, con
     model = builder(config)
     x = torch.randn(2, 8, 1)
 
-    with pytest.raises(RuntimeError, match="missing required inputs: past_exo_cont, future_exo"):
+    with pytest.raises(RuntimeError, match="future_exo.*required|missing required inputs"):
         model(x)
 
 

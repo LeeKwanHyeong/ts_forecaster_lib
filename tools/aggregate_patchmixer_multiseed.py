@@ -511,8 +511,6 @@ def _decision(aggregate: Mapping[str, Any], performance: Mapping[str, Any]) -> d
         },
     ]
     promoted = all(check["passed"] for check in checks)
-    point_default = "patchmixer_original" if promoted else "patchmixer_base"
-
     return {
         "status": (
             "promote_original_for_endogenous_point"
@@ -521,22 +519,20 @@ def _decision(aggregate: Mapping[str, Any], performance: Mapping[str, Any]) -> d
         ),
         "checks": checks,
         "capability_defaults": {
-            "endogenous_point": point_default,
-            "exogenous_point": "patchmixer_exogenous",
-            "distribution": "patchmixer_base",
-            "quantile": "patchmixer_quantile",
-            "exogenous_quantile": "patchmixer_quantile_exogenous",
+            "endogenous_point": "patchmixer",
+            "exogenous_point": "patchmixer_exo",
         },
         "compatibility_contract": {
-            "patchmixer_family_expansion": ["patchmixer_base", "patchmixer_quantile"],
-            "existing_checkpoint_aliases_changed": False,
-            "automatic_family_alias_change": False,
+            "patchmixer_family_expansion": ["patchmixer"],
+            "retired_artifacts_are_load_only": True,
+            "legacy_checkpoint_aliases_retained": True,
         },
         "caveats": [
             "Accuracy evidence covers one Walmart weekly dataset and three disjoint-series splits.",
             "Enhanced wins seed 22 on both aggregate MAE evaluations.",
             "Original has lower mean last-origin MAE but regresses mean last-origin sMAPE.",
-            "Original is endogenous-only and point-only; exogenous, distribution, and quantile requests stay on Enhanced variants.",
+            "PatchMixer is endogenous-only and point-only; exogenous point requests use patchmixer_exo.",
+            "Enhanced distribution and quantile artifacts remain load-only and are not valid new training targets.",
         ],
     }
 

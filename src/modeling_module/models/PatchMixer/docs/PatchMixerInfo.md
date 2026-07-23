@@ -1,78 +1,98 @@
-# PatchMixer implementation notes
+# PatchMixer implementation contract
 
-이 문서는 논문 일반론이 아니라 현재 repository 구현과 public API 계약을 설명합니다. 최종 지원
-범위는 repository root의 `README.md`와 `README.package.md` 표를 기준으로 합니다.
+이 문서는 현재 repository에서 지원하는 PatchMixer의 public 모델, 입력, 출력, 학습 및
+checkpoint 계약을 설명합니다.
 
-## Registered artifacts
+## Active models
 
-| Artifact key | Output mode | Checkpoint-safe loss |
-|---|---|---|
-| `patchmixer_base` | point 또는 distribution | point loss, `Normal`, `StudentT` |
-| `patchmixer_exogenous` | exogenous point | point loss only |
-| `patchmixer_original` | endogenous point | point loss only |
-| `patchmixer_quantile` | q10/q50/q90 | quantile loss |
-| `patchmixer_quantile_exogenous` | exogenous q10/q50/q90 | quantile loss |
+| Registry key | Public model | Public config | Capability |
+|---|---|---|---|
+| `patchmixer` | `PatchMixerModel` | `PatchMixerConfig` | endogenous point |
+| `patchmixer_exo` | `PatchMixerExogenousModel` | `PatchMixerExogenousConfig` | exogenous point |
 
-`patchmixer_base`는 point 전용 모델이 아니라 `out_mul`에 따라 point와 distribution parameter를
-출력하는 unified model입니다. Quantile은 별도 artifact입니다. Distribution checkpoint의 public
-prediction 결과는 현재 location을 `{"point": ...}`로 노출합니다.
+`patchmixer`는 Zeying-Gong/PatchMixer의 고정 upstream commit을 따르는 논문 기반 모델입니다.
+과거의 `patchmixer_original`은 같은 모델을 가리키는 legacy alias이며 새 artifact key가
+아닙니다. `patchmixer_exo`는 project gated-fusion 계보로, 논문 parity 경계 밖의 별도 모델입니다.
 
-기본 선택 전략은 기능별로 구분합니다. 내생변수 point 예측은 RTX 5090 3-seed 검증에서 승격된
-`patchmixer_original`, 외생변수 point는 `patchmixer_exogenous`, distribution은
-`patchmixer_base`, quantile은 입력 계약에 따라 `patchmixer_quantile` 또는
-`patchmixer_quantile_exogenous`를 사용합니다. 코드는 `get_patchmixer_default_model_key`로
-조회합니다. 기존 `patchmixer` family 확장 순서와 checkpoint alias는 호환성을 위해 변경하지
-않습니다.
+PatchMixer family 요청은 `patchmixer` 하나로 확장됩니다. Distribution과 quantile은 신규 학습
+capability가 아니며 `list_available_model_keys()`에도 나타나지 않습니다.
 
-`patchmixer_exogenous`는 외생 입력을 요구하는 호출의 명시적 capability route입니다. 현재
-`z_gate + future_shift` 구현은 RTX 5090 3-seed ablation에서 Endogenous보다 정확도가 낮았으므로
-accuracy promotion 상태가 아닙니다. 상세 수치와 제약은
-[PatchMixerBaseline.md](PatchMixerBaseline.md)에 고정합니다.
+## Tensor contract
 
-Future shift 좌표의 기본값은 checkpoint 호환성을 포함해 `output`을 유지합니다. `normalized`는
-명시적으로 선택할 수 있지만, RTX 5090 3-seed 비교에서 output보다 rolling MAE가 평균 0.805%,
-last-origin MAE가 평균 3.629% 나빠 일반 기본값으로 승격하지 않습니다.
+### Endogenous
 
-## Data contract
+- input: finite floating tensor `[B, lookback, enc_in]`
+- output: point tensor `[B, horizon, enc_in]`
+- non-empty past/future exogenous input: fail-fast
+- channel handling: upstream과 같은 channel-independent 계산
 
-- target input: `(B, lookback, 1)`
-- past continuous exogenous: 선택 사항; latent gate 경로로 주입
-- future continuous exogenous: 선택 사항; horizon별 target-space shift로 주입
-  - Point/Quantile: `output` 또는 target RevIN-space `normalized`
-  - Distribution: `loc`에 한해 `output` 또는 `normalized`
-- categorical exogenous: public training과 prediction API에서 fail-fast
+### Exogenous
 
-Future width가 설정된 checkpoint는 public prediction 시 batch 공용 `(horizon, future_exo_dim)`
-또는 `(B, horizon, future_exo_dim)`을 요구합니다. 누락과 차원 오류는 즉시 실패하며, future
-width가 0인 모델은 non-empty future input을 거부합니다.
+- target input: finite floating tensor `[B, lookback, 1]`
+- output: point tensor `[B, horizon]`
+- past continuous: configured width가 양수이면 `[B, lookback, E_p]` 필수
+- past categorical: model 내부 계약은 지원하지만 public data API는 현재 fail-fast
+- future continuous: configured width가 양수이면 `[B, horizon, E_f]` 필수
+- configured exogenous width: past 또는 future 중 하나 이상 필수
+- output multiplier: 정확히 `1`; distribution/quantile 요청은 생성 전에 거부
 
-## Current base path
+`future_exo_shift_space`는 외생 입력의 정규화 여부가 아니라 target residual의 좌표계입니다.
 
-1. target을 RevIN으로 정규화합니다.
-2. `PatchMixerBackbone`이 patch 기반 latent vector를 만듭니다.
-3. 구성된 past continuous feature와 optional part embedding을 latent에 결합합니다.
-4. `TemporalExpander`와 MLP head가 horizon별 output을 만듭니다.
-5. point branch는 마지막 관측값을 level anchor로 더하고, `normalized` shift는 target scale 복원
-   전에, `output` shift는 복원 후에 적용한 다음 nonnegative transform을 적용합니다.
-6. distribution branch는 location에 level anchor와 depthwise refinement를 적용합니다. `normalized`
-   shift는 target denormalization 전에, `output` shift는 그 후에 `loc`에만 적용하고 나머지
-   distribution parameter를 그대로 유지한 채 tensor를 다시 조립합니다.
+- `output`: target denormalization 뒤 raw output에 residual을 더합니다.
+- `normalized`: target RevIN 공간에서 residual을 더한 뒤 denormalize합니다.
+- 기본값은 checkpoint 및 RTX 5090 정확도 근거에 따라 `output`입니다.
 
-과거 문서의 point dual-head와 point depthwise-refinement 설명은 현재 구현과 다르므로 더 이상
-계약으로 사용하지 않습니다.
+## Architecture ownership
 
-## Quantile path
+`PatchMixerModel`은 upstream 수식을 그대로 소유합니다.
 
-`PatchMixerQuantileModel`은 q10/q50/q90을 출력하는 별도 artifact입니다. Base distribution mode와
-혼용하지 않으며 public family `patchmixer` 요청은 base 다음 quantile 순서로 확장됩니다.
-Future shift는 모든 quantile에 동일하게 broadcast되며, `normalized`는 eval clip과 per-quantile
-denormalization 전에 적용됩니다.
+1. RevIN
+2. patch unfold와 projection
+3. separable convolution PatchMixer block
+4. linear/nonlinear dual forecasting head
+5. channel-independent reshape와 RevIN inverse
+
+`PatchMixerExogenousModel`은 retired Enhanced identity를 상속하지 않습니다. Past feature는 pooled
+latent gated residual로, future feature는 horizon별 target residual로 결합합니다. 두 모델은 config,
+state-dict와 출력 shape가 서로 다르므로 checkpoint를 교차 로드하지 않습니다.
+
+## Checkpoint policy
+
+| Artifact | New training | Public registry | Restore policy |
+|---|---:|---:|---|
+| `patchmixer` | yes | active | v3 strict restore |
+| `patchmixer_exo` | yes | active | v3 strict restore |
+| `patchmixer_base` | no | hidden load-only | supported v1/v2/v3 schema only |
+| `patchmixer_quantile` | no | hidden load-only | supported v3 schema only |
+| `patchmixer_quantile_exogenous` | no | hidden load-only | supported v3 schema only |
+
+과거 Enhanced, distribution 및 quantile key는 checkpoint 식별과 복원만 위해 registry의 legacy
+영역에 남습니다. Public training 요청은 즉시 거부됩니다. 새 코드에서 해당 builder/class를 직접
+사용하는 것은 지원 계약이 아닙니다.
+
+포맷 정보가 없고 `model_class`가 `BaseModel` 또는 `QuantileModel`인 checkpoint는 exact
+state-dict 복원이 성공할 때만 허용합니다. 현재 repository와 5090에서 발견된 2026-01-19 파일은
+당시 source schema를 재구성할 수 없어 fail-closed 대상입니다. 기본 `strict=False` 호출에서도
+부분 가중치 로드로 넘어가지 않습니다.
+
+## Legacy names
+
+- `patchmixer_original` -> `patchmixer`
+- `patchmixer_exogenous` -> `patchmixer_exo`
+- `PatchMixerOriginalModel` 및 `PatchMixerOriginalConfig`: Python pickle/checkpoint 호환용 hidden alias
+- `patchmixer_base`, `patchmixer_quantile`, `patchmixer_quantile_exogenous`: load-only artifact key
+
+Legacy alias는 기존 artifact를 읽기 위한 정책이며 신규 training result에 기록할 이름이 아닙니다.
 
 ## Code map
 
-- [model and exogenous paths](../PatchMixer.py)
-- [configuration](../common/configs.py)
-- [trainer integration](../../../training/model_trainers/patchmixer_train.py)
+- `PatchMixer.py`: paper wrapper, project core 및 load-only identity
+- `backbone.py`: paper backbone과 private legacy backbone
+- `variants.py`: active exogenous model boundary
+- `common/configs.py`: active configs와 hidden config aliases
+- `models/registry.py`: active와 load-only registry 분리
+- `model_builder.py`: active builders와 private load-only builders
+- `training/model_trainers/patchmixer_train.py`: point-only active trainer
 
-지원 경계는 registry, public validation, CPU point smoke, distribution restore, future-exogenous
-sensitivity 회귀 테스트로 고정합니다.
+수치 기준선과 RTX 검증은 [PatchMixerBaseline.md](PatchMixerBaseline.md), 재개 조건은
+[PatchMixerImprovementNeeds.md](PatchMixerImprovementNeeds.md)를 따릅니다.
