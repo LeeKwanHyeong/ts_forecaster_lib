@@ -29,6 +29,7 @@ def test_expand_training_targets_supports_family_and_artifact_keys():
     ]
     assert expand_training_targets(["timexer"]) == ["timexer_base"]
     assert expand_training_targets(["sellm"]) == ["sellm_base"]
+    assert expand_training_targets(["nhits"]) == ["nhits_base"]
 
 
 def test_expand_training_targets_preserves_single_artifact_requests():
@@ -39,6 +40,7 @@ def test_expand_training_targets_preserves_single_artifact_requests():
     assert expand_training_targets(["patchtst_quantile"]) == ["patchtst_quantile"]
     assert expand_training_targets(["timexer_base"]) == ["timexer_base"]
     assert expand_training_targets(["sellm_base"]) == ["sellm_base"]
+    assert expand_training_targets(["nhits_base"]) == ["nhits_base"]
     assert expand_training_targets(["patchtst_exogenous"]) == ["patchtst_exogenous"]
     assert expand_training_targets(["patchtst_quantile_exogenous"]) == [
         "patchtst_quantile_exogenous"
@@ -123,6 +125,7 @@ def test_infer_artifact_model_key_from_checkpoint_prefers_meta():
     ) == "patchmixer_quantile"
     assert infer_artifact_model_key_from_checkpoint({"model_class": "TitanLMMDist"}) == "titan_lmm"
     assert infer_artifact_model_key_from_checkpoint({"model_class": "SELLMModel"}) == "sellm_base"
+    assert infer_artifact_model_key_from_checkpoint({"model_class": "NHITSModel"}) == "nhits_base"
     assert infer_artifact_model_key_from_checkpoint(
         {"model_class": "PatchTSTExogenousModel"}
     ) == "patchtst_exogenous"
@@ -147,6 +150,16 @@ def test_explicit_exogenous_registry_contract(model_key, fusion_strategy):
     assert spec.exogenous_inputs == ("past_cont", "past_cat", "future_cont")
     assert spec.fusion_strategy == fusion_strategy
     assert spec.included_in_family is False
+
+
+def test_nhits_registry_contract_is_endogenous_point_only():
+    spec = get_model_spec("nhits_base")
+
+    assert spec.family == "nhits"
+    assert spec.exogenous_policy == "none"
+    assert spec.exogenous_inputs == ()
+    assert spec.fusion_strategy is None
+    assert spec.trainable is True
 
 
 def test_train_result_uses_canonical_model_keys(tmp_path):

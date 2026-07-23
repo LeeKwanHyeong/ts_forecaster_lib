@@ -19,6 +19,7 @@ from modeling_module.models.PatchMixer.common.configs import PatchMixerConfig
 from modeling_module.models.PatchMixer.common.configs import PatchMixerOriginalConfig
 from modeling_module.models.PatchTST.common.configs import PatchTSTConfig
 from modeling_module.models.PatchTST.self_supervised.PatchTST import PatchTSTPretrainModel
+from modeling_module.models.NHITS.configs import NHITSConfig
 from modeling_module.models.SELLM.configs import SELLMConfig
 from modeling_module.models.TimeXer.configs import TimeXerConfig
 from modeling_module.models.Titan.common.configs import TitanConfig
@@ -36,6 +37,7 @@ from modeling_module.models.model_builder import (
     build_patchTST_quantile,
     build_patchTST_quantile_exogenous,
     build_exotst,
+    build_nhits,
     build_timexer,
     build_sellm,
 )
@@ -54,6 +56,7 @@ from modeling_module.training.model_trainers.patchtst_pretrain import train_patc
 from modeling_module.training.model_trainers.patchtst_train import train_patchtst
 from modeling_module.training.model_trainers.sellm_train import train_sellm
 from modeling_module.training.model_trainers.timexer_train import train_timexer
+from modeling_module.training.model_trainers.nhits_train import train_nhits
 from modeling_module.training.model_trainers.titan_train import train_titan
 from .exotst_train import train_exotst
 from ...models.ExoTST.configs import ExoTSTConfig
@@ -523,6 +526,88 @@ def _infer_mode_and_dist(loss_obj) -> tuple[str, int, Optional[List[str]], Optio
 # =============================================================================
 # Model runners (Contract: exo dims are provided by exo_policy)
 # =============================================================================
+
+def _run_nhits(
+    *,
+    results: Dict[str, Dict],
+    freq: str,
+    train_loader,
+    val_loader,
+    point_train_cfg: TrainingConfig,
+    stages: List[StageConfig],
+    device: str,
+    lookback: int,
+    horizon: int,
+    use_exogenous_mode: bool,
+    save_root: Optional[Path] = None,
+    requested_artifact_keys: Optional[Iterable[str]] = None,
+    architecture_override: Optional[Mapping[str, Any]] = None,
+    **kwargs,
+):
+    """Run the public endogenous, point-only N-HiTS artifact."""
+
+    requested = _requested_target_set(requested_artifact_keys)
+    if not _wants_artifact(requested, "nhits_base"):
+        return
+    if use_exogenous_mode:
+        raise RuntimeError("[total_train] nhits_base supports endogenous inputs only.")
+
+    loss_obj = getattr(point_train_cfg, "loss", None)
+    mode = infer_supervised_mode(loss_obj)
+    if mode != "point":
+        raise NotImplementedError(
+            f"[total_train] nhits_base supports only point mode, got {mode!r}."
+        )
+
+    cfg_kwargs = asdict(point_train_cfg)
+    cfg_kwargs["loss"] = loss_obj
+    cfg_kwargs.update(y_dim=1, use_exogenous_mode=False)
+    if architecture_override:
+        cfg_kwargs.update(
+            {
+                key: value
+                for key, value in dict(architecture_override).items()
+                if value is not None
+            }
+        )
+
+    nhits_cfg = NHITSConfig(**cfg_kwargs)
+    nhits_model = build_nhits(nhits_cfg).to(device)
+    nhits_train_cfg = replace(point_train_cfg, use_exogenous_mode=False)
+
+    print(f"N-HiTS ({freq.capitalize()}) mode=point")
+    best = train_nhits(
+        model=nhits_model,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        stages=list(stages),
+        train_cfg=nhits_train_cfg,
+        device=device,
+    )
+
+    if save_root:
+        ckpt_path = _make_ckpt_path(
+            save_root,
+            freq,
+            "NHITSBase",
+            lookback,
+            horizon,
+        )
+        save_model(
+            nhits_model,
+            nhits_cfg,
+            ckpt_path,
+            extra_meta={"model_key": "nhits_base", "family_key": "nhits"},
+        )
+        best["ckpt_path"] = str(ckpt_path)
+
+    _store_result(
+        results,
+        result_name="N-HiTS",
+        best=best,
+        model_key="nhits_base",
+        family_key="nhits",
+    )
 
 def _run_exotst(
     *,
@@ -1627,6 +1712,7 @@ MODEL_REGISTRY: Dict[str, Callable] = {
     "titan": _run_titan,
     "patchmixer": _run_patchmixer,
     "exotst": _run_exotst,
+    "nhits": _run_nhits,
     "timexer": _run_timexer,
     "sellm": _run_sellm,
 }

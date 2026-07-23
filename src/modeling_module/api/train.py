@@ -207,6 +207,25 @@ class ExoTSTArchitectureConfig:
 
 
 @dataclass
+class NHITSArchitectureConfig:
+    """N-HiTS endogenous point-model architecture overrides."""
+
+    stack_types: Optional[Sequence[str]] = None
+    n_blocks: Optional[Sequence[int]] = None
+    n_layers: Optional[Sequence[int]] = None
+    n_theta_hidden: Optional[Sequence[Sequence[int]]] = None
+    n_pool_kernel_size: Optional[Sequence[int]] = None
+    n_freq_downsample: Optional[Sequence[int]] = None
+    pooling_mode: Optional[str] = None
+    interpolation_mode: Optional[str] = None
+    activation: Optional[str] = None
+    initialization: Optional[str] = None
+    batch_normalization: Optional[bool] = None
+    dropout_prob_theta: Optional[float] = None
+    shared_weights: Optional[bool] = None
+
+
+@dataclass
 class TimexerArchitectureConfig:
     """
     TimeXer family architecture overrides.
@@ -272,13 +291,14 @@ class ArchitectureConfig:
     - Overrides are applied per family. For example, `patchtst` settings affect
       both `patchtst_base` and `patchtst_quantile`.
     - Mapping-style input is also supported. Keys may be family names such as
-      `patchtst`, `patchmixer`, `titan`, `exotst`, or canonical artifact keys
+      `patchtst`, `patchmixer`, `titan`, `exotst`, `nhits`, or canonical artifact keys
       such as `titan_base`.
     """
     patchtst: Optional[PatchTSTArchitectureConfig | Mapping[str, Any]] = None
     titan: Optional[TitanArchitectureConfig | Mapping[str, Any]] = None
     patchmixer: Optional[PatchMixerArchitectureConfig | Mapping[str, Any]] = None
     exotst: Optional[ExoTSTArchitectureConfig | Mapping[str, Any]] = None
+    nhits: Optional[NHITSArchitectureConfig | Mapping[str, Any]] = None
     timexer: Optional[TimexerArchitectureConfig | Mapping[str, Any]] = None
     sellm: Optional[SELLMArchitectureConfig | Mapping[str, Any]] = None
 
@@ -500,6 +520,21 @@ _ARCHITECTURE_ALLOWED_KEYS: dict[str, set[str]] = {
         "use_revin",
         "subtract_last",
     },
+    "nhits": {
+        "stack_types",
+        "n_blocks",
+        "n_layers",
+        "n_theta_hidden",
+        "n_pool_kernel_size",
+        "n_freq_downsample",
+        "pooling_mode",
+        "interpolation_mode",
+        "activation",
+        "initialization",
+        "batch_normalization",
+        "dropout_prob_theta",
+        "shared_weights",
+    },
     "timexer": {
         "patch_len",
         "d_model",
@@ -551,6 +586,8 @@ def _family_from_training_target(name: str) -> str:
         return "titan"
     if canonical == "exotst" or canonical.startswith("exotst_"):
         return "exotst"
+    if canonical == "nhits" or canonical.startswith("nhits_"):
+        return "nhits"
     if canonical == "timexer" or canonical.startswith("timexer_"):
         return "timexer"
     if canonical == "sellm" or canonical.startswith("sellm_"):
@@ -996,6 +1033,10 @@ def _validate_checkpoint_safe_distribution_loss(payload: Mapping[str, Any]) -> N
             "patchmixer_original supports point loss only; distribution checkpoints "
             "are not part of the canonical upstream contract."
         )
+    if "nhits_base" in requested_models:
+        raise ValueError(
+            "nhits_base supports point loss only; distribution checkpoints are not supported."
+        )
 
     distribution = getattr(loss_obj, "distribution", None)
     if distribution is None or str(distribution) in _CHECKPOINT_SAFE_DISTRIBUTIONS:
@@ -1173,6 +1214,12 @@ def _validate_training_request(
                 "exogenous inputs. Encode them into continuous channels first."
             )
 
+    if "nhits_base" in requested_models and bool(payload.get("use_exogenous_mode", False)):
+        raise ValueError(
+            "Invalid training request for nhits_base: the public N-HiTS artifact "
+            "supports endogenous inputs only."
+        )
+
     if "exotst_base" not in requested_models:
         return
 
@@ -1192,7 +1239,6 @@ def _validate_training_request(
             "Invalid training request for exotst_base: ExoTST requires past continuous exogenous inputs. "
             "Provide `past_exo_cont_cols` (or a loader that emits `pe_cont`)."
         )
-
 
 def train(req: TrainRequest | Mapping[str, Any]) -> TrainResult:
     """
@@ -1300,6 +1346,7 @@ __all__ = [
     "ArtifactConfig",
     "ArchitectureConfig",
     "ExoTSTArchitectureConfig",
+    "NHITSArchitectureConfig",
     "PatchMixerArchitectureConfig",
     "PatchTSTArchitectureConfig",
     "RuntimeConfig",

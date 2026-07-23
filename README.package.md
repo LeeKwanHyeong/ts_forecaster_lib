@@ -31,7 +31,7 @@ from modeling_module import DistributionLoss, forecast, load_predictor, predict,
   `DataWindowConfig`, `DataColumnConfig`, `ExogenousConfig`, `LoaderConfig`,
   `ArchitectureConfig`, `PatchTSTArchitectureConfig`, `TitanArchitectureConfig`,
   `PatchMixerArchitectureConfig`, `ExoTSTArchitectureConfig`,
-  `TimexerArchitectureConfig`
+  `NHITSArchitectureConfig`, `TimexerArchitectureConfig`
 
 ## Installation
 
@@ -83,6 +83,7 @@ pip check
 | `titan` | `titan_lmm` | Deprecated | point, Normal, StudentT | past/future optional | 미지원 |
 | `titan` | `titan_seq2seq` | Deprecated | point, Normal, StudentT | past/future optional | 미지원 |
 | `exotst` | `exotst_base` | 지원 | point, Normal, StudentT | past/future 모두 필수 | 미지원 |
+| `nhits` | `nhits_base` | 지원 | point only | 미지원 | 미지원 |
 | `timexer` | `timexer_base` | 지원 | point only | past 필수, future 금지 | 미지원 |
 
 동작 규칙:
@@ -96,6 +97,8 @@ pip check
   checkpoint와 호출자 호환을 위해서만 유지합니다.
 - `models`를 생략하거나 빈 목록을 주면 `patchtst` family가 기본값이며
   `patchtst_base`, `patchtst_quantile` 순서로 확장됩니다.
+- `nhits_base`는 single-target endogenous point 전용이며 exogenous mode와 distribution 또는
+  quantile output을 지원하지 않습니다.
 - categorical past exogenous 입력은 현재 모든 public family에서 fail-fast합니다. 먼저 continuous
   feature로 인코딩해야 합니다.
 - public distribution checkpoint가 지원하는 분포는 `Normal`, `StudentT`입니다.

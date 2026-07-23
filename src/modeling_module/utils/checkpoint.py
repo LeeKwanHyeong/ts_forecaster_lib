@@ -20,6 +20,7 @@ from modeling_module.models.PatchTST.common.configs import (
     AttentionConfig,
 )
 from modeling_module.models.TimeXer.configs import TimeXerConfig
+from modeling_module.models.NHITS.configs import NHITSConfig
 from modeling_module.models.Titan.common.configs import TitanConfig
 from modeling_module.training.config import DecompositionConfig
 
@@ -60,6 +61,10 @@ def _rebuild_timexer(cfgd: dict):
     return TimeXerConfig(**cfgd)
 
 
+def _rebuild_nhits(cfgd: dict):
+    return NHITSConfig(**cfgd)
+
+
 _REBUILDERS_BY_CLS = {
     # PatchTST
     "PatchTSTConfig": _rebuild_patchtst,
@@ -72,6 +77,7 @@ _REBUILDERS_BY_CLS = {
     "TitanConfig": _rebuild_titan,
     # TimeXer
     "TimeXerConfig": _rebuild_timexer,
+    "NHITSConfig": _rebuild_nhits,
 }
 
 # -----------------------------

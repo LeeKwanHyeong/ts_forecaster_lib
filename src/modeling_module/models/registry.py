@@ -223,6 +223,17 @@ MODEL_SPECS: dict[str, ModelSpec] = {
         exogenous_inputs=("past_cont", "future_cont"),
         fusion_strategy="dedicated_exogenous_encoder",
     ),
+    "nhits_base": ModelSpec(
+        key="nhits_base",
+        family="nhits",
+        builder_module="modeling_module.models.model_builder",
+        builder_attr="build_nhits",
+        label="N-HiTS Base",
+        aliases=("nhits", "nhitsbase", "n-hits"),
+        class_names=("NHITSModel",),
+        checkpoint_aliases=("NHITSBase", "NHiTSBase"),
+        exogenous_policy="none",
+    ),
     "timexer_base": ModelSpec(
         key="timexer_base",
         family="timexer",
@@ -257,6 +268,7 @@ TRAINING_FAMILY_DEFAULTS: dict[str, tuple[str, ...]] = {
     "patchmixer": ("patchmixer_base", "patchmixer_quantile"),
     "titan": ("titan_base", "titan_lmm", "titan_seq2seq"),
     "exotst": ("exotst_base",),
+    "nhits": ("nhits_base",),
     "timexer": ("timexer_base",),
     "sellm": ("sellm_base",),
 }
@@ -312,6 +324,7 @@ TRAINING_FAMILY_ALIASES: dict[str, tuple[str, ...]] = {
     "patchmixer": ("patchmixer",),
     "titan": ("titan",),
     "exotst": ("exotst",),
+    "nhits": ("nhits", "n-hits"),
     "timexer": ("timexer",),
     "sellm": ("sellm", "se_llm"),
 }
