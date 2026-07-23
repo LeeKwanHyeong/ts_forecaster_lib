@@ -287,6 +287,12 @@ Production refit은 선정 epoch만큼 새로 학습하되 target `202544`까지
 [`docs/DSIO202545QualificationBaseline.md`](docs/DSIO202545QualificationBaseline.md)에
 고정합니다.
 
+PatchTST의 Small·Medium·Current seed-42 capacity 비교는 기존 Current
+checkpoint를 변경하지 않는 별도 실험입니다. 정확한 capacity, 수렴, checkpoint identity와
+승격 경계는
+[`docs/DSIO202545PatchTSTCapacitySweep.md`](docs/DSIO202545PatchTSTCapacitySweep.md)에
+기록합니다.
+
 ## Promotion order
 
 1. local `pytest`와 전체 canonical source `PREFLIGHT_ONLY=1`
