@@ -10,6 +10,11 @@ artifact directory와 `training_manifest.json`으로 분리합니다.
   사용합니다.
 - 기본 data root는 `<repo>/raw_data/master`입니다.
 - target data: `tb_master_target.parquet`
+- endogenous canonical schema는 `oper_part_no`, `demand_dt`(ISO `YYYYWW`),
+  `demand_qty`이며 `seq` 같은 추가 열은 학습 입력에서 제외합니다.
+- endogenous 기본 계약은 source 상한 `202544`, 실제 예측 원점 `202545`, 검증 원점
+  `202518`입니다. 검증 target은 `202518..202544`의 27주이고 학습 target은 최대
+  `202517`까지만 사용합니다.
 - exogenous data: `tb_master_target_exo.parquet` 우선, 없으면 `tb_master_exo.parquet`를 target과
   `(oper_part_no, demand_dt)`로 join합니다.
 - 기본 column은 `oper_part_no`, `demand_dt`, `demand_qty`입니다. `exo_future`는 runner 상단의
@@ -24,12 +29,15 @@ artifact directory와 `training_manifest.json`으로 분리합니다.
 
 | 항목 | Python runner | Linux wrapper |
 |---|---:|---:|
-| mode | `both` | `exo` |
-| endogenous models | `patchtst patchmixer` | 동일 |
+| mode | `both` | `endo` |
+| endogenous models | `patchtst patchmixer nhits timemixer` | 동일 |
 | exogenous models | `exotst timexer` | 동일 |
-| lookback / horizon | `104 / 27` | 동일 |
+| lookback / horizon | `52 / 27` | 동일 |
+| train end / forecast origin | `202544 / 202545` | 동일 |
+| validation origin / window stride | `202518 / 4` | 동일 |
+| endogenous loader | `indexed_temporal` | 동일 |
 | endogenous / exogenous batch | `1024 / 512` | 동일 |
-| warmup / spike epochs | `3 / 2` | 동일 |
+| warmup / spike epochs | `30 / 0` | 동일 |
 | SSL mode | `sl_only` | `sl_only` |
 | workers / prefetch | `8 / 4` | 동일 |
 | device | `auto` | 동일 |
@@ -37,7 +45,8 @@ artifact directory와 `training_manifest.json`으로 분리합니다.
 
 Family request는 public registry artifact로 확장됩니다.
 
-- `endo_only`: `patchtst_base` → `patchtst_quantile` → `patchmixer`
+- `endo_only`: `patchtst_base` → `patchtst_quantile` → `patchmixer` →
+  `nhits_base` → `timemixer`
 - `exo_future`: `exotst_base`; past와 future continuous exogenous가 모두 필요
 - `exo_past_only`: `timexer_base`; past continuous exogenous만 사용하고 future exogenous를 거부
 
@@ -47,6 +56,12 @@ CLI `--mode` 값은 `endo`, `exo`, `both`뿐입니다. 위 scenario 이름은 ou
 
 Titan은 deprecated이므로 기본 group과 5090 promotion 대상에서 제외합니다. 기존 registry key와
 지원 checkpoint load는 유지되며, Titan을 명시적으로 학습 요청하면 `FutureWarning`이 발생합니다.
+SELLM도 이번 endogenous batch에서 제외합니다.
+
+기본 `indexed_temporal` loader는 시리즈 값을 한 번만 보관하고 윈도우를 산술 인덱스로 계산합니다.
+랜덤 window split을 사용하지 않으며, 각 part의 마지막 27주를 동일한 last-origin 검증 구간으로
+고정합니다. `window_stride=4`는 최근 학습 window가 항상 `202517`에 끝나도록 역방향 정렬됩니다.
+`legacy` backend는 호환 확인용일 뿐 202545 운영 baseline에는 사용하지 않습니다.
 
 ## Smoke-first commands
 
@@ -66,7 +81,14 @@ src/model_test/total_train/run_dsio_total_running_linux.sh \
   --device cuda --endo-batch-size 32 \
   --warmup-epochs 1 --spike-epochs 0
 
-# 2. future-exogenous smoke
+# 2. 전체 source의 schema/calendar/window만 검사하고 종료
+ARTIFACT_ROOT="$PWD/artifacts/total_train_preflight" \
+MODE=endo \
+PREFLIGHT_ONLY=1 \
+src/model_test/total_train/run_dsio_total_running_linux.sh \
+  --device cuda
+
+# 3. future-exogenous smoke
 ARTIFACT_ROOT="$PWD/artifacts/total_train_smoke" \
 MODE=exo \
 EXO_MODELS="exotst_base" \
@@ -76,7 +98,7 @@ src/model_test/total_train/run_dsio_total_running_linux.sh \
   --device cuda --exo-batch-size 32 \
   --warmup-epochs 1 --spike-epochs 0
 
-# 3. TimeXer past-only smoke
+# 4. TimeXer past-only smoke
 ARTIFACT_ROOT="$PWD/artifacts/total_train_smoke" \
 MODE=exo \
 EXO_MODELS="timexer_base" \
@@ -106,7 +128,7 @@ Python CLI를 직접 사용할 수도 있습니다.
 
 ```bash
 python src/model_test/total_train/dsio_total_running.py \
-  --mode both \
+  --mode endo \
   --artifact-root "$PWD/artifacts/total_train_smoke" \
   --ssl-mode sl_only \
   --device cpu \
@@ -124,10 +146,16 @@ python src/model_test/total_train/dsio_total_running.py \
 | `PYTHON_BIN` | 실행할 Python; 5090에서는 승인된 project environment를 명시 |
 | `TS_FORECASTER_REPO_ROOT` | 전용 checkout root override |
 | `ARTIFACT_ROOT` | artifact root override |
+| `TARGET_SOURCE` | canonical target Parquet 경로 |
 | `MODE` | `endo`, `exo`, `both` |
 | `ENDO_MODELS` / `EXO_MODELS` | 공백으로 구분한 family 또는 canonical artifact key |
 | `SSL_MODE` | `sl_only`, `off`, `full`; `full`은 PatchTST request 전용 |
+| `LOOKBACK` / `HORIZON` | endogenous/exogenous window 길이 |
+| `TRAIN_END_WEEK` / `FORECAST_ORIGIN` | source 상한과 실제 예측 원점 |
+| `VALIDATION_ORIGIN` / `WINDOW_STRIDE` | last-origin 검증 시작과 학습 stride |
+| `WARMUP_EPOCHS` / `SPIKE_EPOCHS` | supervised stage epoch 수 |
 | `SAMPLE_PART_COUNT` | 관측 target이 충분한 part 중 deterministic sample 수 |
+| `PREFLIGHT_ONLY` | `1`이면 data manifest와 batch 검증 후 학습 없이 종료 |
 | `CLEAN_OUTPUT` | `1`이면 이번 scenario output directory를 먼저 삭제 |
 | `LOG_TO_FILE` / `LOG_DIR` / `RUN_TAG` | log 생성 제어 |
 
@@ -150,12 +178,12 @@ PYTHON_BIN=/path/to/project/python
 
 PYTHON_BIN="$PYTHON_BIN" \
 ARTIFACT_ROOT="$PWD/artifacts/total_train_smoke" \
-MODE=exo \
-EXO_MODELS="exotst_base" \
+MODE=endo \
+ENDO_MODELS="patchtst_base" \
 SAMPLE_PART_COUNT=8 \
 CLEAN_OUTPUT=1 \
 src/model_test/total_train/run_dsio_total_running_linux.sh \
-  --device cuda --exo-batch-size 32 \
+  --device cuda --endo-batch-size 32 \
   --warmup-epochs 1 --spike-epochs 0
 ```
 
@@ -180,13 +208,17 @@ resume 기능이 없습니다. `CLEAN_OUTPUT=0`은 기존 directory를 보존할
 
 | Artifact key | Scenario / checkpoint |
 |---|---|
-| `patchtst_base` | `endo_only/weekly_PatchTST_L104_H27.pt` |
-| `patchtst_quantile` | `endo_only/weekly_PatchTSTQuantile_L104_H27.pt` |
-| `patchmixer` | `endo_only/weekly_PatchMixer_L104_H27.pt` |
-| `exotst_base` | `exo_future/weekly_ExoTSTBase_L104_H27.pt` |
-| `timexer_base` | `exo_past_only/weekly_TimeXerBase_L104_H27.pt` |
+| `patchtst_base` | `endo_only/weekly_PatchTST_L52_H27.pt` |
+| `patchtst_quantile` | `endo_only/weekly_PatchTSTQuantile_L52_H27.pt` |
+| `patchmixer` | `endo_only/weekly_PatchMixer_L52_H27.pt` |
+| `nhits_base` | `endo_only/weekly_NHITSBase_L52_H27.pt` |
+| `timemixer` | `endo_only/weekly_TimeMixer_L52_H27.pt` |
+| `exotst_base` | `exo_future/weekly_ExoTSTBase_L52_H27.pt` |
+| `timexer_base` | `exo_past_only/weekly_TimeXerBase_L52_H27.pt` |
 
 PatchTST full SSL은 추가로 `endo_only/pretrain/patchtst_pretrain_best.pt`를 생성합니다.
+Endogenous run은 별도로 `endo_only/data_manifest.json`을 기록하며 source SHA-256, row/series 수,
+기간, temporal split, 윈도우 수와 요청 artifact 목록을 보존합니다.
 
 하나의 checkpoint만 다시 만들 때는 canonical key를 지정하고 `CLEAN_OUTPUT=0`을 사용합니다. 이
 방식도 학습 resume은 아니며 scenario manifest를 덮어씁니다. aggregate manifest 보존이 중요하면
@@ -206,11 +238,11 @@ src/model_test/total_train/run_dsio_total_running_linux.sh --device cuda
 
 ## Promotion order
 
-1. local `pytest`와 CPU artifact smoke
-2. 5090 전용 checkout에서 `SAMPLE_PART_COUNT=8` preflight
-3. PatchTST full SSL
-4. point family 순서: PatchTST → PatchMixer → ExoTST → TimeXer
-5. distribution/legacy restore와 fresh-process prediction
-6. 모든 sampled gate가 통과한 뒤에만 전체 part/model run
+1. local `pytest`와 전체 canonical source `PREFLIGHT_ONLY=1`
+2. 5090 전용 checkout에서 전체 source preflight
+3. 5090에서 각 endogenous artifact의 `SAMPLE_PART_COUNT` 1-epoch smoke
+4. qualification 순서: PatchTST base/quantile → PatchMixer → N-HiTS → TimeMixer
+5. checkpoint fresh-process load/predict
+6. qualification 결과로 epoch/model을 확정한 뒤 `202544` 전체 refit artifact 생성
 
 모든 run에서 commit, Python/Torch/CUDA version, command, log, artifact path를 함께 보존합니다.

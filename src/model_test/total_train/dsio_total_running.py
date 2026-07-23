@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import os
 import random
 import shutil
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
@@ -26,16 +29,22 @@ from modeling_module import (
     ExoTSTArchitectureConfig,
     ExogenousConfig,
     LoaderConfig,
+    NHITSArchitectureConfig,
     PatchMixerArchitectureConfig,
     PatchTSTArchitectureConfig,
     RuntimeConfig,
     SSLConfig,
+    TimeMixerArchitectureConfig,
     TimexerArchitectureConfig,
     TitanArchitectureConfig,
     TrainRequest,
     TrainerConfig,
     build_dataloader,
     train,
+)
+from modeling_module.data_loader.indexed_temporal_data_module import (
+    IndexedTemporalDataModule,
+    validate_weekly_forecast_calendar,
 )
 from modeling_module._internal.model_registry import expand_training_targets, family_for_artifact_key
 from modeling_module.utils.device import select_default_device
@@ -89,6 +98,8 @@ PAST_EXO_CAT_COLS: list[str] = []
 DEFAULT_ENDO_FAMILY_MODELS = [
     "patchtst",
     "patchmixer",
+    "nhits",
+    "timemixer",
 ]
 DEFAULT_EXO_FAMILY_MODELS = [
     # "patchtst",
@@ -125,6 +136,60 @@ def load_polars_table(source: Path, table_name: str) -> pl.DataFrame:
     if source.suffix.lower() in {".csv", ".txt"}:
         return pl.read_csv(source)
     raise ValueError(f"Unsupported file type for {table_name}: {source}")
+
+
+def sha256_file(source: Path) -> str:
+    digest = hashlib.sha256()
+    with source.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def write_endogenous_data_manifest(
+    *,
+    destination: Path,
+    source: Path,
+    data_summary: dict[str, int],
+    args: argparse.Namespace,
+    models: list[str],
+) -> Path:
+    payload = {
+        "schema_version": 1,
+        "created_at_utc": datetime.now(timezone.utc).isoformat(),
+        "source": {
+            "path": str(source),
+            "sha256": sha256_file(source),
+            "size_bytes": source.stat().st_size,
+        },
+        "schema": {
+            "id_col": ID_COL,
+            "date_col": DATE_COL,
+            "target_col": Y_COL,
+            "frequency": FREQ,
+        },
+        "temporal_contract": {
+            "train_end_week": args.train_end_week,
+            "forecast_origin": args.forecast_origin,
+            "validation_origin": args.validation_origin,
+            "lookback": args.lookback,
+            "horizon": args.horizon,
+            "window_stride": args.window_stride,
+        },
+        "selection": {
+            "sample_part_count": args.sample_part_count,
+            "seed": args.seed,
+        },
+        "dataset": data_summary,
+        "requested_models": models,
+        "artifact_models": expand_training_targets(models),
+    }
+    manifest_path = destination / "data_manifest.json"
+    manifest_path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    return manifest_path
 
 
 def assert_columns(df: pl.DataFrame, required: list[str], table_name: str) -> None:
@@ -302,6 +367,8 @@ def build_model_architecture(args: argparse.Namespace) -> ArchitectureConfig:
             final_nonneg=True,
             expander_n_harmonics=24,
         ),
+        nhits=NHITSArchitectureConfig(),
+        timemixer=TimeMixerArchitectureConfig(),
         titan=TitanArchitectureConfig(
             d_model=args.titan_d_model,
             n_layers=args.titan_layers,
@@ -450,6 +517,9 @@ def _run_exo_stage(
     if not args.skip_batch_check:
         batch = next(iter(build_dataloader(data_req)))
         describe_batch(batch, f"{label}/train")
+    if args.preflight_only:
+        print(f"[{label}] preflight complete; training was not started.")
+        return
 
     if args.clean_output:
         _clean_output_dirs(save_dir)
@@ -489,8 +559,12 @@ def run_endo(
     architecture: ArchitectureConfig,
     models: list[str],
 ) -> None:
-    min_obs = args.lookback + args.horizon
-    target_raw = load_polars_table(TARGET_SOURCE, "tb_master_target")
+    min_obs = (
+        args.lookback + 2 * args.horizon
+        if args.endo_loader_backend == "indexed_temporal"
+        else args.lookback + args.horizon
+    )
+    target_raw = load_polars_table(args.target_source, "tb_master_target")
     target_df = prepare_target_df(
         target_raw,
         id_col=ID_COL,
@@ -507,59 +581,146 @@ def run_endo(
     print("[ENDO] target_df shape :", target_df.shape)
     print("[ENDO] n_unique ids    :", target_df.select(ID_COL).n_unique())
 
-    data_req = DataRequest(
-        df=target_df,
-        window=DataWindowConfig(
+    save_dir = args.artifact_root / "endo_only"
+    if args.clean_output:
+        _clean_output_dirs(save_dir)
+    save_dir.mkdir(parents=True, exist_ok=True)
+
+    train_loader = None
+    val_loader = None
+    data_req = None
+    data_summary: dict[str, int]
+    if args.endo_loader_backend == "indexed_temporal":
+        datamodule = IndexedTemporalDataModule(
+            target_df,
             lookback=args.lookback,
             horizon=args.horizon,
-            freq=FREQ,
-        ),
-        columns=DataColumnConfig(
-            id_col=ID_COL,
+            train_end_week=args.train_end_week,
+            forecast_origin=args.forecast_origin,
+            validation_origin=args.validation_origin,
+            window_stride=args.window_stride,
+            seed=args.seed,
+            part_col=ID_COL,
             date_col=DATE_COL,
-            y_col=Y_COL,
-        ),
-        loader=build_loader_config(
+            qty_col=Y_COL,
+        )
+        data_summary = datamodule.summary
+        train_loader = datamodule.get_train_loader(
+            batch_size=args.endo_batch_size,
+            shuffle=not args.no_shuffle,
+            num_workers=args.num_workers,
+            pin_memory=args.pin_memory,
+            persistent_workers=args.persistent_workers,
+            prefetch_factor=args.prefetch_factor,
+            drop_last=data_summary["train_windows"] >= args.endo_batch_size,
+        )
+        val_loader = datamodule.get_val_loader(
             batch_size=args.endo_batch_size,
             num_workers=args.num_workers,
             pin_memory=args.pin_memory,
             persistent_workers=args.persistent_workers,
             prefetch_factor=args.prefetch_factor,
-            shuffle=not args.no_shuffle,
-        ),
-    )
-
-    if not args.skip_batch_check:
-        batch = next(iter(build_dataloader(data_req)))
-        describe_batch(batch, "ENDO/train")
-
-    save_dir = args.artifact_root / "endo_only"
-    if args.clean_output:
-        _clean_output_dirs(save_dir)
-    save_dir.mkdir(parents=True, exist_ok=True)
-    result = train(
-        TrainRequest(
-            data=data_req,
-            freq=FREQ,
-            models=models,
-            architecture=architecture,
-            trainer=TrainerConfig(
-                warmup_epochs=args.warmup_epochs,
-                spike_epochs=args.spike_epochs,
-                lr=args.lr,
+        )
+        print("[ENDO] loader backend   : indexed_temporal")
+        print("[ENDO] train_end_week   :", args.train_end_week)
+        print("[ENDO] forecast_origin  :", args.forecast_origin)
+        print("[ENDO] validation_origin:", args.validation_origin)
+        print("[ENDO] window_stride    :", args.window_stride)
+        print("[ENDO] train_windows    :", data_summary["train_windows"])
+        print("[ENDO] validation_windows:", data_summary["validation_windows"])
+        if not args.skip_batch_check:
+            batch = next(iter(val_loader))
+            describe_batch(batch, "ENDO/validation")
+    else:
+        validate_weekly_forecast_calendar(
+            train_end_week=args.train_end_week,
+            forecast_origin=args.forecast_origin,
+            validation_origin=args.validation_origin,
+            horizon=args.horizon,
+        )
+        source_max_week = int(target_df[DATE_COL].max())
+        if source_max_week != args.train_end_week:
+            raise ValueError(
+                "target data upper bound does not match train_end_week: "
+                f"source_max={source_max_week}, train_end_week={args.train_end_week}."
+            )
+        data_req = DataRequest(
+            df=target_df,
+            window=DataWindowConfig(
+                lookback=args.lookback,
+                horizon=args.horizon,
+                freq=FREQ,
             ),
-            ssl=SSLConfig(
-                mode=args.ssl_mode,
-                pretrain_epochs=args.ssl_pretrain_epochs,
-                mask_ratio=args.ssl_mask_ratio,
-                loss_type=args.ssl_loss_type,
+            columns=DataColumnConfig(
+                id_col=ID_COL,
+                date_col=DATE_COL,
+                y_col=Y_COL,
             ),
-            runtime=RuntimeConfig(device=device),
-            artifacts=ArtifactConfig(
-                save_dir=str(save_dir),
-                auto_save_dir=False,
+            loader=build_loader_config(
+                batch_size=args.endo_batch_size,
+                num_workers=args.num_workers,
+                pin_memory=args.pin_memory,
+                persistent_workers=args.persistent_workers,
+                prefetch_factor=args.prefetch_factor,
+                shuffle=not args.no_shuffle,
             ),
         )
+        data_summary = {
+            "row_count": target_df.height,
+            "series_count": target_df.select(ID_COL).n_unique(),
+            "source_min_week": int(target_df[DATE_COL].min()),
+            "source_max_week": source_max_week,
+        }
+        print("[ENDO] loader backend   : legacy_random_split")
+        if not args.skip_batch_check:
+            batch = next(iter(build_dataloader(data_req)))
+            describe_batch(batch, "ENDO/train")
+
+    data_manifest_path = write_endogenous_data_manifest(
+        destination=save_dir,
+        source=args.target_source,
+        data_summary=data_summary,
+        args=args,
+        models=models,
+    )
+    print("[ENDO] data_manifest    :", data_manifest_path)
+    if args.preflight_only:
+        print("[ENDO] preflight complete; training was not started.")
+        return
+
+    request_kwargs = {
+        "freq": FREQ,
+        "models": models,
+        "architecture": architecture,
+        "trainer": TrainerConfig(
+            warmup_epochs=args.warmup_epochs,
+            spike_epochs=args.spike_epochs,
+            lr=args.lr,
+        ),
+        "ssl": SSLConfig(
+            mode=args.ssl_mode,
+            pretrain_epochs=args.ssl_pretrain_epochs,
+            mask_ratio=args.ssl_mask_ratio,
+            loss_type=args.ssl_loss_type,
+        ),
+        "runtime": RuntimeConfig(device=device),
+        "artifacts": ArtifactConfig(
+            save_dir=str(save_dir),
+            auto_save_dir=False,
+        ),
+    }
+    if train_loader is not None and val_loader is not None:
+        request_kwargs.update(
+            train_loader=train_loader,
+            val_loader=val_loader,
+            lookback=args.lookback,
+            horizon=args.horizon,
+        )
+    else:
+        request_kwargs["data"] = data_req
+
+    result = train(
+        TrainRequest(**request_kwargs)
     )
     print_training_result(result, "ENDO")
 
@@ -572,7 +733,7 @@ def run_exo(
     models: list[str],
 ) -> None:
     min_obs = args.lookback + args.horizon
-    target_raw = load_polars_table(TARGET_SOURCE, "tb_master_target")
+    target_raw = load_polars_table(args.target_source, "tb_master_target")
     target_df = prepare_target_df(
         target_raw,
         id_col=ID_COL,
@@ -658,15 +819,25 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--mode", choices=["endo", "exo", "both"], default="both")
     parser.add_argument("--artifact-root", type=Path, default=REPO_ROOT / "artifacts" / "total_train")
+    parser.add_argument("--target-source", type=Path, default=TARGET_SOURCE)
     parser.add_argument("--models", nargs="+", default=None)
     parser.add_argument("--endo-models", nargs="+", default=list(DEFAULT_ENDO_FAMILY_MODELS))
     parser.add_argument("--exo-models", nargs="+", default=list(DEFAULT_EXO_FAMILY_MODELS))
-    parser.add_argument("--lookback", type=int, default=104)
+    parser.add_argument("--lookback", type=int, default=52)
     parser.add_argument("--horizon", type=int, default=27)
+    parser.add_argument(
+        "--endo-loader-backend",
+        choices=["indexed_temporal", "legacy"],
+        default="indexed_temporal",
+    )
+    parser.add_argument("--train-end-week", type=int, default=202544)
+    parser.add_argument("--forecast-origin", type=int, default=202545)
+    parser.add_argument("--validation-origin", type=int, default=202518)
+    parser.add_argument("--window-stride", type=int, default=4)
     parser.add_argument("--endo-batch-size", type=int, default=1024)
     parser.add_argument("--exo-batch-size", type=int, default=512)
-    parser.add_argument("--warmup-epochs", type=int, default=3)
-    parser.add_argument("--spike-epochs", type=int, default=2)
+    parser.add_argument("--warmup-epochs", type=int, default=30)
+    parser.add_argument("--spike-epochs", type=int, default=0)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument(
         "--ssl-mode",
@@ -689,6 +860,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-persistent-workers", action="store_false", dest="persistent_workers")
     parser.add_argument("--no-shuffle", action="store_true")
     parser.add_argument("--skip-batch-check", action="store_true")
+    parser.add_argument("--preflight-only", action="store_true")
     parser.add_argument("--clean-output", action="store_true")
     parser.add_argument("--use-id-sample", action="store_true")
     parser.add_argument("--max-ids", type=int, default=256)
@@ -742,6 +914,7 @@ def main() -> None:
 
     args.artifact_root = args.artifact_root.expanduser().resolve()
     args.artifact_root.mkdir(parents=True, exist_ok=True)
+    args.target_source = args.target_source.expanduser().resolve()
 
     set_global_seed(args.seed)
     default_device, device_note = configure_torch_runtime()
@@ -754,12 +927,17 @@ def main() -> None:
     print("DEVICE              :", device)
     if args.device == "auto" and device_note:
         print("DEVICE_NOTE         :", device_note)
-    print("TARGET_SOURCE       :", TARGET_SOURCE)
+    print("TARGET_SOURCE       :", args.target_source)
     print("TARGET_EXO_SOURCE   :", TARGET_EXO_SOURCE, "(exists=", TARGET_EXO_SOURCE.exists(), ")")
     print("EXO_SOURCE_FALLBACK :", EXO_SOURCE_FALLBACK, "(exists=", EXO_SOURCE_FALLBACK.exists(), ")")
     print("MODE                :", args.mode)
     print("LOOKBACK            :", args.lookback)
     print("HORIZON             :", args.horizon)
+    print("ENDO_LOADER_BACKEND :", args.endo_loader_backend)
+    print("TRAIN_END_WEEK      :", args.train_end_week)
+    print("FORECAST_ORIGIN     :", args.forecast_origin)
+    print("VALIDATION_ORIGIN   :", args.validation_origin)
+    print("WINDOW_STRIDE       :", args.window_stride)
     print("SAMPLE_PART_COUNT   :", args.sample_part_count)
     print("ENDO_BATCH_SIZE     :", args.endo_batch_size)
     print("EXO_BATCH_SIZE      :", args.exo_batch_size)
@@ -774,6 +952,7 @@ def main() -> None:
     print("ENDO_MODELS         :", endo_models)
     print("EXO_MODELS          :", exo_models)
     print("ARTIFACT_ROOT       :", args.artifact_root)
+    print("PREFLIGHT_ONLY      :", args.preflight_only)
     print("CLEAN_OUTPUT        :", args.clean_output)
     print("ARCHITECTURE        :", architecture)
 

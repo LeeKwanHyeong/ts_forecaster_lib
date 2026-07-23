@@ -29,9 +29,25 @@ def test_dsio_runner_defaults_match_executable_model_contracts():
 
     assert args.mode == "both"
     assert args.ssl_mode == "sl_only"
+    assert args.lookback == 52
+    assert args.horizon == 27
+    assert args.train_end_week == 202544
+    assert args.forecast_origin == 202545
+    assert args.validation_origin == 202518
+    assert args.window_stride == 4
+    assert args.endo_loader_backend == "indexed_temporal"
     assert args.endo_batch_size == 1024
     assert args.exo_batch_size == 512
-    assert endo_models == ["patchtst", "patchmixer"]
+    assert args.warmup_epochs == 30
+    assert args.spike_epochs == 0
+    assert endo_models == ["patchtst", "patchmixer", "nhits", "timemixer"]
+    assert runner.expand_training_targets(endo_models) == [
+        "patchtst_base",
+        "patchtst_quantile",
+        "patchmixer",
+        "nhits_base",
+        "timemixer",
+    ]
     assert exo_models == ["exotst", "timexer"]
     assert future_models == ["exotst_base"]
     assert past_only_models == ["timexer_base"]
@@ -42,5 +58,11 @@ def test_linux_wrapper_uses_the_same_non_deprecated_endo_defaults():
         ROOT / "src" / "model_test" / "total_train" / "run_dsio_total_running_linux.sh"
     ).read_text(encoding="utf-8")
 
-    assert 'ENDO_MODELS="${ENDO_MODELS:-patchtst patchmixer}"' in wrapper
+    assert 'MODE="${MODE:-endo}"' in wrapper
+    assert (
+        'ENDO_MODELS="${ENDO_MODELS:-patchtst patchmixer nhits timemixer}"'
+        in wrapper
+    )
     assert 'ENDO_MODELS="${ENDO_MODELS:-patchtst patchmixer titan}"' not in wrapper
+    assert 'TRAIN_END_WEEK="${TRAIN_END_WEEK:-202544}"' in wrapper
+    assert 'FORECAST_ORIGIN="${FORECAST_ORIGIN:-202545}"' in wrapper
