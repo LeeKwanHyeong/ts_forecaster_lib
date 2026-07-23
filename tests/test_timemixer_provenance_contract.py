@@ -21,6 +21,7 @@ from modeling_module.models.TimeMixer.provenance import (
 
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGE_DIR = ROOT / "src/modeling_module/models/TimeMixer"
+REFERENCE_DIR = ROOT / "tests/fixtures/timemixer_upstream"
 EXPECTED_UPSTREAM = {
     "repository": "https://github.com/kwuking/TimeMixer",
     "commit": "e24610583b36fdd8c76cc17a8df4e65759a5f460",
@@ -127,3 +128,14 @@ def test_timemixer_fixture_set_covers_only_reviewed_upstream_files() -> None:
         "layers/StandardNorm.py",
         "LICENSE",
     ]
+
+
+def test_timemixer_reference_sources_match_the_pinned_checksums() -> None:
+    for path, sha256, git_blob, byte_size, line_count in TIMEMIXER_UPSTREAM_FILES:
+        if path == "LICENSE":
+            continue
+        content = (REFERENCE_DIR / path).read_bytes()
+        assert len(content) == byte_size
+        assert content.count(b"\n") == line_count
+        assert hashlib.sha256(content).hexdigest() == sha256
+        assert _git_blob_hash(content) == git_blob

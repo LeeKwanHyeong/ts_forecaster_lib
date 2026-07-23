@@ -73,8 +73,42 @@ Pinned upstream의 channel-independent forecasting 경로에서 다음 모듈과
 - value/position/temporal embedding state와 projection layer
 
 DFT, max/conv downsampling, future temporal feature, channel-dependent 및 forecasting 외 task는
-생성 시 명시적으로 거부합니다. 현재 단계의 smoke는 `[2,16,1] -> [2,4,1]` finite forward만
-확인하며, exact output/gradient/state-dict parity는 다음 numerical identity gate에서 고정합니다.
+생성 시 명시적으로 거부합니다.
+
+### Numerical identity status
+
+Test-only reference는 pinned upstream source 4개를 byte-for-byte로 보존하며 매 실행에서
+manifest의 SHA-256과 Git blob을 검증합니다. seed `20260723`~`20260727`과 tiny reference config에서
+다음 계약을 machine-enforced baseline으로 고정했습니다.
+
+| Contract | Frozen value |
+|---|---|
+| Input/output | `[2,16,1] -> [2,4,1]` |
+| Parameters | `1,039` |
+| State-dict entries | `39` |
+| State schema SHA-256 | `0608244ebd2ea1076bc17ea546cadbb39758a2c1e146c280d9334ccd202974b4` |
+| Output parity | exact, `rtol=0`, `atol=0` |
+| Intermediate parity | decomposition, seasonal/trend mixing, PDM, predictors, projection exact |
+| Gradient parity | input과 35개 사용 parameter exact, finite, nonzero |
+
+Upstream 생성은 하지만 forecasting에서 사용하지 않는 PDM `layer_norm` 2개와 temporal embedding
+weight 1개도 양쪽에서 동일하게 gradient `None`임을 검증합니다. 정식 fixture는
+`tests/test_timemixer_upstream_parity.py`에 있습니다.
+
+### Configuration status
+
+`TimeMixerConfig`는 public `lookback`, `horizon`, `y_dim`을 소유하고 upstream 호환
+`seq_len`, `pred_len`, `enc_in`, `c_out`, `task_name`은 비직렬화 property로 제공합니다.
+scale 길이는 `lookback // window**i`로 한 곳에서 계산하며 다음 경계를 생성 전에 거부합니다.
+
+- 양수가 아닌 lookback, horizon, model width, layer count와 moving-average kernel
+- 짝수 moving-average kernel
+- 음수 scale count, 활성 downsampling에서 1 이하인 window, 길이 0으로 붕괴하는 coarsest scale
+- avg/moving-average 외 계산 방식과 channel-dependent 설정
+- future temporal 및 exogenous 설정
+
+`down_sampling_layers=0`은 단일-scale 경계로 지원합니다. positional state는 parity를 유지하면서
+odd `d_model`에서도 생성 가능하도록 마지막 cosine 열만 안전하게 절단합니다.
 
 ## Paper and upstream boundary
 

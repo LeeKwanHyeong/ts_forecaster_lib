@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-from types import SimpleNamespace
-
 import pytest
 import torch
 
+from modeling_module.models.TimeMixer import TimeMixerConfig
 from modeling_module.models.TimeMixer.backbone import TimeMixerBackbone
 from modeling_module.models.TimeMixer.provenance import (
     TIMEMIXER_UPSTREAM_COMMIT,
@@ -12,18 +11,15 @@ from modeling_module.models.TimeMixer.provenance import (
 )
 
 
-def _config(**overrides) -> SimpleNamespace:
+def _config(**overrides) -> TimeMixerConfig:
     values = {
-        "task_name": "long_term_forecast",
-        "seq_len": 16,
-        "label_len": 0,
-        "pred_len": 4,
+        "lookback": 16,
+        "horizon": 4,
         "down_sampling_window": 2,
-        "channel_independence": 1,
+        "channel_independence": True,
         "e_layers": 1,
         "moving_avg": 3,
-        "enc_in": 1,
-        "c_out": 1,
+        "y_dim": 1,
         "use_future_temporal_feature": False,
         "d_model": 4,
         "d_ff": 8,
@@ -36,7 +32,7 @@ def _config(**overrides) -> SimpleNamespace:
         "decomp_method": "moving_avg",
     }
     values.update(overrides)
-    return SimpleNamespace(**values)
+    return TimeMixerConfig(**values)
 
 
 def test_timemixer_forecasting_backbone_has_finite_upstream_shape() -> None:
@@ -68,12 +64,10 @@ def test_timemixer_backbone_supports_the_single_scale_boundary() -> None:
 @pytest.mark.parametrize(
     ("override", "message"),
     (
-        ({"task_name": "classification"}, "forecasting tasks only"),
-        ({"channel_independence": 0}, "channel_independence=1"),
-        ({"down_sampling_method": "conv"}, "average downsampling"),
-        ({"decomp_method": "dft_decomp"}, "moving-average decomposition"),
+        ({"channel_independence": False}, "channel_independence=True"),
+        ({"down_sampling_method": "conv"}, "down_sampling_method"),
+        ({"decomp_method": "dft_decomp"}, "decomp_method"),
         ({"use_future_temporal_feature": True}, "future temporal features"),
-        ({"c_out": 2}, "enc_in and c_out"),
     ),
 )
 def test_timemixer_backbone_rejects_out_of_scope_upstream_branches(
@@ -81,4 +75,4 @@ def test_timemixer_backbone_rejects_out_of_scope_upstream_branches(
     message: str,
 ) -> None:
     with pytest.raises(ValueError, match=message):
-        TimeMixerBackbone(_config(**override))
+        _config(**override)
