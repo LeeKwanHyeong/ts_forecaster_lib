@@ -79,6 +79,9 @@ include-package-data = false
 where = ["src"]
 include = ["modeling_module*"]
 
+[tool.setuptools.package-data]
+"modeling_module.models.TimeMixer" = ["LICENSE.upstream", "upstream_manifest.json"]
+
 [tool.setuptools.exclude-package-data]
 "*" = ["*.pyc", "*.pyo", ".DS_Store"]
 
