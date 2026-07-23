@@ -95,6 +95,53 @@ def test_refit_policy_uses_best_validation_epoch_and_checks_manifest(tmp_path):
         )
 
 
+def test_epoch_extension_analysis_detects_late_improvement():
+    histories = {
+        "stable": [
+            MODULE.EpochRecord("stable", 1, 4, 1e-3, 2.0, 1.0),
+            MODULE.EpochRecord("stable", 2, 4, 5e-4, 1.5, 0.8),
+            MODULE.EpochRecord("stable", 3, 4, 1e-4, 1.2, 0.9),
+            MODULE.EpochRecord("stable", 4, 4, 0.0, 1.1, 0.85),
+        ],
+        "improved": [
+            MODULE.EpochRecord("improved", 1, 4, 1e-3, 2.0, 1.0),
+            MODULE.EpochRecord("improved", 2, 4, 5e-4, 1.5, 0.8),
+            MODULE.EpochRecord("improved", 3, 4, 1e-4, 1.2, 0.75),
+            MODULE.EpochRecord("improved", 4, 4, 0.0, 1.1, 0.78),
+        ],
+    }
+
+    analyses = MODULE.build_epoch_extension_analysis(
+        histories=histories,
+        model_keys=["stable", "improved"],
+        baseline_max_epoch=2,
+    )
+
+    assert analyses[0]["extension_improved"] is False
+    assert analyses[0]["overall_best_epoch"] == 2
+    assert analyses[1]["extension_improved"] is True
+    assert analyses[1]["overall_best_epoch"] == 3
+    assert analyses[1]["extension_minus_baseline_validation_loss"] == pytest.approx(
+        -0.05
+    )
+
+
+def test_epoch_extension_analysis_requires_epochs_on_both_sides():
+    histories = {
+        "model": [
+            MODULE.EpochRecord("model", 1, 2, 1e-3, 2.0, 1.0),
+            MODULE.EpochRecord("model", 2, 2, 0.0, 1.0, 0.8),
+        ]
+    }
+
+    with pytest.raises(ValueError, match="no epoch after"):
+        MODULE.build_epoch_extension_analysis(
+            histories=histories,
+            model_keys=["model"],
+            baseline_max_epoch=2,
+        )
+
+
 def test_checkpoint_resolution_falls_back_to_portable_artifact_name(tmp_path):
     checkpoint = tmp_path / "weekly_PatchMixer_L52_H27.pt"
     checkpoint.write_bytes(b"checkpoint")
@@ -122,3 +169,16 @@ def test_parser_requires_artifact_directory_and_training_log():
     assert args.batch_size == 1024
     assert args.num_workers == 4
     assert args.pin_memory is True
+    assert args.baseline_max_epoch is None
+
+    extended = parser.parse_args(
+        [
+            "--artifact-dir",
+            "artifacts/qualification/endo_only",
+            "--training-log",
+            "logs/qualification.log",
+            "--baseline-max-epoch",
+            "30",
+        ]
+    )
+    assert extended.baseline_max_epoch == 30

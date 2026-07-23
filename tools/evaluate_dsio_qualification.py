@@ -183,6 +183,67 @@ def build_refit_policy(
     return policies
 
 
+def build_epoch_extension_analysis(
+    *,
+    histories: Mapping[str, Sequence[EpochRecord]],
+    model_keys: Sequence[str],
+    baseline_max_epoch: int,
+) -> list[dict[str, Any]]:
+    """Compare the original epoch window with its explicit extension."""
+
+    cutoff = int(baseline_max_epoch)
+    if cutoff <= 0:
+        raise ValueError("baseline_max_epoch must be positive.")
+
+    analyses: list[dict[str, Any]] = []
+    for model_key in model_keys:
+        records = list(histories.get(model_key, ()))
+        baseline = [record for record in records if record.epoch <= cutoff]
+        extension = [record for record in records if record.epoch > cutoff]
+        if not baseline:
+            raise ValueError(
+                f"{model_key} has no epoch at or before baseline cutoff {cutoff}."
+            )
+        if not extension:
+            raise ValueError(
+                f"{model_key} has no epoch after baseline cutoff {cutoff}."
+            )
+
+        baseline_best = min(
+            baseline,
+            key=lambda item: (item.validation_loss, item.epoch),
+        )
+        extension_best = min(
+            extension,
+            key=lambda item: (item.validation_loss, item.epoch),
+        )
+        overall_best = min(
+            records,
+            key=lambda item: (item.validation_loss, item.epoch),
+        )
+        delta = extension_best.validation_loss - baseline_best.validation_loss
+        analyses.append(
+            {
+                "model_key": model_key,
+                "baseline_epoch_start": min(record.epoch for record in baseline),
+                "baseline_epoch_end": cutoff,
+                "baseline_best_epoch": baseline_best.epoch,
+                "baseline_best_validation_loss": baseline_best.validation_loss,
+                "extension_epoch_start": min(
+                    record.epoch for record in extension
+                ),
+                "extension_epoch_end": max(record.epoch for record in extension),
+                "extension_best_epoch": extension_best.epoch,
+                "extension_best_validation_loss": extension_best.validation_loss,
+                "extension_minus_baseline_validation_loss": delta,
+                "extension_improved": delta < 0.0,
+                "overall_best_epoch": overall_best.epoch,
+                "overall_best_validation_loss": overall_best.validation_loss,
+            }
+        )
+    return analyses
+
+
 def metric_values(
     actual: np.ndarray,
     prediction: np.ndarray,
@@ -500,6 +561,13 @@ def run_evaluation(args: argparse.Namespace) -> dict[str, Any]:
         training_manifest=training_manifest,
         model_keys=model_keys,
     )
+    extension_analysis = None
+    if args.baseline_max_epoch is not None:
+        extension_analysis = build_epoch_extension_analysis(
+            histories=histories,
+            model_keys=model_keys,
+            baseline_max_epoch=args.baseline_max_epoch,
+        )
 
     columns = [
         str(schema["id_col"]),
@@ -605,6 +673,11 @@ def run_evaluation(args: argparse.Namespace) -> dict[str, Any]:
         json.dumps(refit_policy, indent=2, sort_keys=True),
         encoding="utf-8",
     )
+    if extension_analysis is not None:
+        (output_dir / "epoch_extension_analysis.json").write_text(
+            json.dumps(extension_analysis, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
 
     payload = {
         "schema_version": 1,
@@ -635,6 +708,7 @@ def run_evaluation(args: argparse.Namespace) -> dict[str, Any]:
         },
         "metrics": metrics,
         "production_refit_policy": refit_policy,
+        "epoch_extension_analysis": extension_analysis,
         "epoch_history": {
             key: [asdict(record) for record in histories[key]]
             for key in model_keys
@@ -647,6 +721,10 @@ def run_evaluation(args: argparse.Namespace) -> dict[str, Any]:
             "refit_epochs_json": "production_refit_epochs.json",
         },
     }
+    if extension_analysis is not None:
+        payload["outputs"][
+            "epoch_extension_analysis_json"
+        ] = "epoch_extension_analysis.json"
     (output_dir / "qualification_summary.json").write_text(
         json.dumps(payload, indent=2, sort_keys=True),
         encoding="utf-8",
@@ -690,6 +768,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--batch-size", type=int, default=1024)
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument(
+        "--baseline-max-epoch",
+        type=int,
+        default=None,
+        help=(
+            "compare the best validation epoch at or before this cutoff "
+            "against all later logged epochs"
+        ),
+    )
+    parser.add_argument(
         "--pin-memory",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -703,6 +790,8 @@ def main() -> None:
         raise ValueError("--batch-size must be positive.")
     if args.num_workers < 0:
         raise ValueError("--num-workers must be non-negative.")
+    if args.baseline_max_epoch is not None and args.baseline_max_epoch <= 0:
+        raise ValueError("--baseline-max-epoch must be positive.")
     run_evaluation(args)
 
 
