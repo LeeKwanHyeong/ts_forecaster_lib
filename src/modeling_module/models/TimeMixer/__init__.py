@@ -1,6 +1,7 @@
-"""Configuration and pinned provenance for the planned TimeMixer family."""
+"""Public model, configuration, and pinned provenance for TimeMixer."""
 
 from .configs import TimeMixerConfig
+from .TimeMixer import TimeMixerModel
 
 from .provenance import (
     TIMEMIXER_PAPER_TITLE,
@@ -18,6 +19,7 @@ from .provenance import (
 
 __all__ = [
     "TimeMixerConfig",
+    "TimeMixerModel",
     "TIMEMIXER_PAPER_TITLE",
     "TIMEMIXER_PAPER_URL",
     "TIMEMIXER_UPSTREAM_COMMIT",

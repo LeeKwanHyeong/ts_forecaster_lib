@@ -191,6 +191,18 @@ MODEL_SPECS: dict[str, ModelSpec] = {
         checkpoint_aliases=("NHITSBase", "NHiTSBase"),
         exogenous_policy="none",
     ),
+    "timemixer": ModelSpec(
+        key="timemixer",
+        family="timemixer",
+        builder_module="modeling_module.models.model_builder",
+        builder_attr="build_timemixer",
+        label="TimeMixer",
+        aliases=("timemixerbase", "timemixercanonical"),
+        class_names=("TimeMixerModel",),
+        checkpoint_aliases=("TimeMixer", "TimeMixerCanonical"),
+        trainable=False,
+        exogenous_policy="none",
+    ),
     "timexer_base": ModelSpec(
         key="timexer_base",
         family="timexer",

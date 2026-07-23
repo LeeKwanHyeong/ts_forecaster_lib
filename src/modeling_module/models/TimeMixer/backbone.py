@@ -595,8 +595,8 @@ class TimeMixerBackbone(nn.Module):
             decoded_list.append(decoded)
         return decoded_list
 
-    def forward(self, x_enc: torch.Tensor) -> torch.Tensor:
-        return self.forecast(x_enc)
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.forecast(x)
 
 
 __all__ = [

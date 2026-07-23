@@ -10,6 +10,7 @@ from modeling_module.models.PatchMixer.common.configs import (
 )
 from modeling_module.models.PatchTST.common.configs import PatchTSTConfig
 from modeling_module.models.SELLM.configs import SELLMConfig
+from modeling_module.models.TimeMixer.configs import TimeMixerConfig
 from modeling_module.models.TimeXer.configs import TimeXerConfig
 from modeling_module.models.Titan import TitanBaseModel, TitanLMMModel, TitanSeq2SeqModel
 from modeling_module.models.Titan.common.configs import TitanConfig
@@ -369,6 +370,27 @@ def build_nhits(cfg):
     from modeling_module.models.NHITS.NHITS import NHITSModel
 
     return NHITSModel.from_config(_ensure_nhits_config(cfg))
+
+
+def _ensure_timemixer_config(
+    cfg: Union[TimeMixerConfig, dict, Any],
+) -> TimeMixerConfig:
+    if isinstance(cfg, TimeMixerConfig):
+        return cfg
+    if isinstance(cfg, Mapping):
+        return TimeMixerConfig(**dict(cfg))
+    if is_dataclass(cfg):
+        return TimeMixerConfig(**asdict(cfg))
+    if hasattr(cfg, "__dict__"):
+        return TimeMixerConfig(**dict(vars(cfg)))
+    raise TypeError(f"Unsupported config type for TimeMixer: {type(cfg)}")
+
+
+def build_timemixer(cfg):
+    """Build the public endogenous TimeMixer point model."""
+    from modeling_module.models.TimeMixer.TimeMixer import TimeMixerModel
+
+    return TimeMixerModel.from_config(_ensure_timemixer_config(cfg))
 
 
 def _ensure_timexer_config(cfg: Union[TimeXerConfig, dict, Any]) -> TimeXerConfig:

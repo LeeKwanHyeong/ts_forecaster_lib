@@ -70,6 +70,7 @@ def test_public_api_exports_official_surface():
         "PatchMixerArchitectureConfig",
         "ExoTSTArchitectureConfig",
         "NHITSArchitectureConfig",
+        "TimeMixerArchitectureConfig",
         "TimexerArchitectureConfig",
         "DataWindowConfig",
         "DataColumnConfig",
