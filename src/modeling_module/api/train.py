@@ -24,6 +24,7 @@ from modeling_module._internal.model_registry import (
     resolve_training_request_key,
 )
 from modeling_module._internal.training_runtime import (
+    infer_future_cat_cardinalities_from_loader,
     infer_future_exo_spec_from_loader,
     infer_past_exo_dim_from_loader_for_exotst,
     get_freq_spec,
@@ -155,6 +156,7 @@ class PatchTSTArchitectureConfig:
     pe: Optional[str] = None
     learn_pe: Optional[bool] = None
     padding_patch: Optional[str] = None
+    future_exo_cat_embedding_dim: Optional[int] = None
     future_exo_fusion_dropout: Optional[float] = None
 
 
@@ -503,6 +505,7 @@ _ARCHITECTURE_ALLOWED_KEYS: dict[str, set[str]] = {
         "pe",
         "learn_pe",
         "padding_patch",
+        "future_exo_cat_embedding_dim",
         "future_exo_fusion_dropout",
     },
     "titan": {
@@ -850,6 +853,7 @@ def _merged_data_config(payload: Mapping[str, Any]) -> dict[str, Any]:
         "past_exo_cont_cols",
         "past_exo_cat_cols",
         "future_exo_cont_cols",
+        "future_exo_cat_cols",
         "fill_missing",
         "target_back_steps",
         "future_exo_cb",
@@ -857,6 +861,7 @@ def _merged_data_config(payload: Mapping[str, Any]) -> dict[str, Any]:
         "date_indexer",
         "build_cat_indexer_from",
         "cat_indexer_target_col",
+        "categorical_vocabulary_artifact",
         "split_mode",
         "path",
         "df",
@@ -1258,7 +1263,6 @@ def _validate_training_request(
         lookback=lookback_i,
         horizon=horizon_i,
     )
-
     explicit_exogenous_models = {
         "patchtst_exogenous",
         "patchtst_quantile_exogenous",
@@ -1268,13 +1272,23 @@ def _validate_training_request(
         explicit_exogenous_models.intersection(requested_models)
     )
     if requested_explicit_exogenous:
+        future_cat_cardinalities = infer_future_cat_cardinalities_from_loader(
+            train_loader
+        )
         requested = ", ".join(requested_explicit_exogenous)
         if not bool(payload.get("use_exogenous_mode", False)):
             raise ValueError(
                 f"Invalid training request for {requested}: explicit exogenous models require "
                 "use_exogenous_mode=True."
             )
-        if not any((int(past_cont_dim), int(past_cat_dim), int(future_exo_dim))):
+        if not any(
+            (
+                int(past_cont_dim),
+                int(past_cat_dim),
+                int(future_exo_dim),
+                len(future_cat_cardinalities),
+            )
+        ):
             raise ValueError(
                 f"Invalid training request for {requested}: at least one past or future "
                 "exogenous feature is required."

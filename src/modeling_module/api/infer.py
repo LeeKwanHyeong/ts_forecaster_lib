@@ -7,6 +7,7 @@ import torch
 
 from modeling_module._internal.checkpoint_runtime import (
     _drop_revin_buffers,
+    _extract_checkpoint_data_artifacts,
     _extract_cfg_obj,
     _extract_state_dict,
     _partial_load_with_shape_filter,
@@ -79,6 +80,30 @@ def _load_single_model(
             raise
         _partial_load_with_shape_filter(model, state_dict)
 
+    exogenous_schema, categorical_vocabulary = (
+        _extract_checkpoint_data_artifacts(ckpt)
+    )
+    if exogenous_schema is not None:
+        configured_cardinalities = tuple(
+            getattr(model, "future_exo_cat_cardinalities", ())
+        )
+        if (
+            configured_cardinalities
+            != exogenous_schema.future_cat_cardinalities
+        ):
+            raise ValueError(
+                "Checkpoint future categorical cardinalities do not match "
+                "the restored model config: "
+                f"{exogenous_schema.future_cat_cardinalities} != "
+                f"{configured_cardinalities}."
+            )
+        model.exogenous_schema = exogenous_schema
+    if categorical_vocabulary is not None:
+        model.categorical_vocabulary_artifact = categorical_vocabulary
+        model.categorical_vocabulary_fingerprint = (
+            categorical_vocabulary.fingerprint
+        )
+
     resolved_device = resolve_device(device)
     model.to(resolved_device).eval()
     return model, cfg_obj, model_key
@@ -94,6 +119,13 @@ def _normalize_predict_payload(batch: Any) -> dict[str, Any]:
             payload["x"] = payload.pop("x_init")
         if "future_exo_batch" not in payload and "future_exo" in payload:
             payload["future_exo_batch"] = payload.pop("future_exo")
+        if (
+            "future_exo_cat_batch" not in payload
+            and "future_exo_cat" in payload
+        ):
+            payload["future_exo_cat_batch"] = payload.pop(
+                "future_exo_cat"
+            )
         return payload
 
     if isinstance(batch, (tuple, list)):
@@ -102,6 +134,7 @@ def _normalize_predict_payload(batch: Any) -> dict[str, Any]:
             "x": unpacked["x"],
             "part_ids": unpacked["part_ids"],
             "future_exo_batch": unpacked["future_exo"],
+            "future_exo_cat_batch": unpacked["future_exo_cat"],
             "past_exo_cont": unpacked["past_exo_cont"],
             "past_exo_cat": unpacked["past_exo_cat"],
         }
@@ -134,6 +167,26 @@ class LoadedPredictor:
         if horizon is None:
             horizon = getattr(self.model, "horizon", None)
         return int(horizon) if horizon is not None else None
+
+    @property
+    def exogenous_schema(self):
+        return getattr(self.model, "exogenous_schema", None)
+
+    @property
+    def categorical_vocabulary_artifact(self):
+        return getattr(
+            self.model,
+            "categorical_vocabulary_artifact",
+            None,
+        )
+
+    @property
+    def categorical_vocabulary_fingerprint(self) -> str | None:
+        return getattr(
+            self.model,
+            "categorical_vocabulary_fingerprint",
+            None,
+        )
 
     def predict(self, batch: Any, **kwargs) -> Any:
         """
@@ -177,6 +230,10 @@ class LoadedPredictor:
         past_exo_cont = _resolve_forward_arg("past_exo_cont", None)
         past_exo_cat = _resolve_forward_arg("past_exo_cat", None)
         future_exo_batch = _resolve_forward_arg("future_exo_batch", None)
+        future_exo_cat_batch = _resolve_forward_arg(
+            "future_exo_cat_batch",
+            None,
+        )
         future_exo_cb = _resolve_forward_arg("future_exo_cb", None)
         extension_policy = _resolve_forward_arg("extension_policy", None)
         tail_model = _resolve_forward_arg("tail_model", "exp")
@@ -196,6 +253,7 @@ class LoadedPredictor:
             past_exo_cont=past_exo_cont,
             past_exo_cat=past_exo_cat,
             future_exo_batch=future_exo_batch,
+            future_exo_cat_batch=future_exo_cat_batch,
             future_exo_cb=future_exo_cb,
             extension_policy=extension_policy,
             tail_model=tail_model,

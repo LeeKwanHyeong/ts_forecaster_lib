@@ -26,6 +26,12 @@ from modeling_module.models.TimeMixer.configs import TimeMixerConfig
 from modeling_module.models.NHITS.configs import NHITSConfig
 from modeling_module.models.Titan.common.configs import TitanConfig
 from modeling_module.training.config import DecompositionConfig
+from modeling_module.data_loader.categorical_vocabulary import (
+    CategoricalVocabularyArtifact,
+)
+from modeling_module.data_loader.exogenous_contracts import (
+    ExogenousFeatureSchema,
+)
 
 
 # ------------------------------------------------------------------
@@ -401,11 +407,120 @@ def _build_output_spec(model: torch.nn.Module, cfg: Any) -> dict[str, Any]:
     return _sanitize(spec)
 
 
+def _coerce_exogenous_schema(
+    value: ExogenousFeatureSchema | Mapping[str, Any] | None,
+) -> ExogenousFeatureSchema | None:
+    if value is None:
+        return None
+    if isinstance(value, ExogenousFeatureSchema):
+        return value
+    if isinstance(value, Mapping):
+        return ExogenousFeatureSchema.from_dict(value)
+    raise TypeError(
+        "exogenous_schema must be an ExogenousFeatureSchema, mapping, or None."
+    )
+
+
+def _coerce_categorical_vocabulary_artifact(
+    value: CategoricalVocabularyArtifact | Mapping[str, Any] | None,
+) -> CategoricalVocabularyArtifact | None:
+    if value is None:
+        return None
+    if isinstance(value, CategoricalVocabularyArtifact):
+        return value
+    if isinstance(value, Mapping):
+        return CategoricalVocabularyArtifact.from_dict(value)
+    raise TypeError(
+        "categorical_vocabulary_artifact must be a "
+        "CategoricalVocabularyArtifact, mapping, or None."
+    )
+
+
+def _build_checkpoint_data_artifacts(
+    *,
+    exogenous_schema: ExogenousFeatureSchema | Mapping[str, Any] | None,
+    categorical_vocabulary_artifact: (
+        CategoricalVocabularyArtifact | Mapping[str, Any] | None
+    ),
+) -> dict[str, Any] | None:
+    schema = _coerce_exogenous_schema(exogenous_schema)
+    vocabulary = _coerce_categorical_vocabulary_artifact(
+        categorical_vocabulary_artifact
+    )
+    if schema is None and vocabulary is None:
+        return None
+    if vocabulary is not None:
+        if schema is None:
+            raise ValueError(
+                "A categorical vocabulary checkpoint artifact requires an "
+                "exogenous schema."
+            )
+        schema = vocabulary.bind_schema(schema)
+    return {
+        "version": 1,
+        "exogenous_schema": None if schema is None else schema.to_dict(),
+        "categorical_vocabulary": (
+            None if vocabulary is None else vocabulary.to_dict()
+        ),
+        "categorical_vocabulary_fingerprint": (
+            None if vocabulary is None else vocabulary.fingerprint
+        ),
+    }
+
+
+def _extract_checkpoint_data_artifacts(
+    checkpoint: Mapping[str, Any],
+) -> tuple[
+    ExogenousFeatureSchema | None,
+    CategoricalVocabularyArtifact | None,
+]:
+    payload = checkpoint.get("data_artifacts")
+    if payload is None:
+        return None, None
+    if not isinstance(payload, Mapping):
+        raise TypeError("Checkpoint data_artifacts must be a mapping.")
+    if int(payload.get("version", 0)) != 1:
+        raise ValueError(
+            "Unsupported checkpoint data_artifacts version: "
+            f"{payload.get('version')!r}."
+        )
+
+    schema = _coerce_exogenous_schema(payload.get("exogenous_schema"))
+    vocabulary = _coerce_categorical_vocabulary_artifact(
+        payload.get("categorical_vocabulary")
+    )
+    saved_fingerprint = payload.get(
+        "categorical_vocabulary_fingerprint"
+    )
+    if vocabulary is None:
+        if saved_fingerprint is not None:
+            raise ValueError(
+                "Checkpoint contains a categorical vocabulary fingerprint "
+                "without a vocabulary artifact."
+            )
+        return schema, None
+    if schema is None:
+        raise ValueError(
+            "Checkpoint categorical vocabulary is missing its exogenous schema."
+        )
+    if saved_fingerprint != vocabulary.fingerprint:
+        raise ValueError(
+            "Checkpoint categorical vocabulary fingerprint mismatch."
+        )
+    return vocabulary.bind_schema(schema), vocabulary
+
+
 def build_checkpoint_payload(
     model,
     cfg,
     *,
     extra_meta: Optional[Mapping[str, Any]] = None,
+    exogenous_schema: (
+        ExogenousFeatureSchema | Mapping[str, Any] | None
+    ) = None,
+    categorical_vocabulary_artifact: (
+        CategoricalVocabularyArtifact | Mapping[str, Any] | None
+    ) = None,
 ) -> dict[str, Any]:
     cfg_state, cfg_cls = _cfg_to_primitive_state(cfg)
 
@@ -426,7 +541,7 @@ def build_checkpoint_payload(
     if extra_meta:
         meta.update(_sanitize(dict(extra_meta)))
 
-    return {
+    payload = {
         "format_version": CHECKPOINT_FORMAT_VERSION,
         "config": cfg_state,
         "cfg_state": cfg_state,
@@ -436,13 +551,38 @@ def build_checkpoint_payload(
         "state_dict": model.state_dict(),
         "meta": meta,
     }
+    data_artifacts = _build_checkpoint_data_artifacts(
+        exogenous_schema=exogenous_schema,
+        categorical_vocabulary_artifact=categorical_vocabulary_artifact,
+    )
+    if data_artifacts is not None:
+        payload["data_artifacts"] = data_artifacts
+    return payload
 
 
-def save_model(model, cfg, path: str, *, extra_meta: Optional[Mapping[str, Any]] = None):
+def save_model(
+    model,
+    cfg,
+    path: str,
+    *,
+    extra_meta: Optional[Mapping[str, Any]] = None,
+    exogenous_schema: (
+        ExogenousFeatureSchema | Mapping[str, Any] | None
+    ) = None,
+    categorical_vocabulary_artifact: (
+        CategoricalVocabularyArtifact | Mapping[str, Any] | None
+    ) = None,
+):
     """
     안전한 단일 모델 저장.
     """
-    ckpt = build_checkpoint_payload(model, cfg, extra_meta=extra_meta)
+    ckpt = build_checkpoint_payload(
+        model,
+        cfg,
+        extra_meta=extra_meta,
+        exogenous_schema=exogenous_schema,
+        categorical_vocabulary_artifact=categorical_vocabulary_artifact,
+    )
 
     path_obj = Path(path)
     path_obj.parent.mkdir(parents=True, exist_ok=True)
@@ -1058,6 +1198,30 @@ def load_model_dict(
                 print(f"[warn][{selected_key}] skipped shape-mismatch keys (sample):")
                 for sk in skipped[:10]:
                     print("  -", sk)
+
+        exogenous_schema, categorical_vocabulary = (
+            _extract_checkpoint_data_artifacts(ckpt)
+        )
+        if exogenous_schema is not None:
+            configured_cardinalities = tuple(
+                getattr(model, "future_exo_cat_cardinalities", ())
+            )
+            if (
+                configured_cardinalities
+                != exogenous_schema.future_cat_cardinalities
+            ):
+                raise ValueError(
+                    "Checkpoint future categorical cardinalities do not "
+                    "match the restored model config."
+                )
+            model.exogenous_schema = exogenous_schema
+        if categorical_vocabulary is not None:
+            model.categorical_vocabulary_artifact = (
+                categorical_vocabulary
+            )
+            model.categorical_vocabulary_fingerprint = (
+                categorical_vocabulary.fingerprint
+            )
 
         model.to(device).eval()
         models[selected_key] = model

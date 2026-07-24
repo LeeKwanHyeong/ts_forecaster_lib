@@ -1,0 +1,465 @@
+{
+  "completed_at_utc": "2026-07-24T05:24:03.536299+00:00",
+  "environment": {
+    "compute_capability": [
+      12,
+      0
+    ],
+    "cuda_runtime": "13.0",
+    "cudnn": 92000,
+    "device": "NVIDIA GeForce RTX 5090",
+    "gpu_total_memory_mib": 32110.9375,
+    "hostname": "RTX5090-server",
+    "platform": "Linux-7.0.0-28-generic-x86_64-with-glibc2.39",
+    "python": "3.12.13",
+    "torch": "2.11.0+cu130"
+  },
+  "protocol": {
+    "batch_size": 128,
+    "cases": [
+      "continuous_only",
+      "continuous_and_categorical"
+    ],
+    "category_ids": "1..cardinality-1; ID 0 reserved for UNK",
+    "data": "deterministic synthetic series with continuous and categorical future effects",
+    "data_loader_included": false,
+    "execution_order": {
+      "11": [
+        "continuous_only",
+        "continuous_and_categorical"
+      ],
+      "22": [
+        "continuous_and_categorical",
+        "continuous_only"
+      ],
+      "33": [
+        "continuous_only",
+        "continuous_and_categorical"
+      ]
+    },
+    "future_categorical_cardinalities": [
+      5,
+      4
+    ],
+    "future_continuous_dim": 2,
+    "horizon": 27,
+    "host_to_device_transfer_included": false,
+    "lookback": 52,
+    "loss": "mae",
+    "lr": 0.001,
+    "measured_inference_steps": 200,
+    "measured_training_steps": 1000,
+    "optimizer": "AdamW",
+    "precision": "bf16",
+    "seeds": [
+      11,
+      22,
+      33
+    ],
+    "train_samples": 4096,
+    "validation_samples": 1024,
+    "warmup_steps": 100,
+    "weight_decay": 0.0001
+  },
+  "results": [
+    {
+      "accuracy": {
+        "mae": 1.0371254682540894,
+        "rmse": 1.2661914825439453,
+        "smape_pct": 20.51788330078125
+      },
+      "case": "continuous_only",
+      "inference": {
+        "memory_mib": {
+          "allocated_before_step": 20.509765625,
+          "peak_allocated": 28.37890625,
+          "peak_step_delta": 7.869140625
+        },
+        "throughput": {
+          "samples_per_second": 99385.51161789033,
+          "steps_per_second": 776.4493095147682
+        },
+        "timing_ms": {
+          "max": 1.3209279775619507,
+          "mean": 1.2879140824079514,
+          "median": 1.285215973854065,
+          "min": 1.2713279724121094,
+          "p95": 1.310271978378296,
+          "population_stddev": 0.010825077384772328,
+          "total": 257.58281648159027
+        }
+      },
+      "parameters": 606621,
+      "seed": 11,
+      "training": {
+        "loss": {
+          "first_measured": 1.0610467195510864,
+          "last_measured": 1.0196725130081177
+        },
+        "memory_mib": {
+          "allocated_before_step": 32.3193359375,
+          "peak_allocated": 82.87451171875,
+          "peak_step_delta": 50.55517578125
+        },
+        "throughput": {
+          "samples_per_second": 7892.3462901719695,
+          "steps_per_second": 61.65895539196851
+        },
+        "timing_ms": {
+          "max": 26.068960189819336,
+          "mean": 16.218244270324707,
+          "median": 17.949024200439453,
+          "min": 4.723936080932617,
+          "p95": 18.948223114013672,
+          "population_stddev": 4.228928560641183,
+          "total": 16218.244270324707
+        }
+      }
+    },
+    {
+      "accuracy": {
+        "mae": 0.7833738327026367,
+        "rmse": 1.095699667930603,
+        "smape_pct": 15.63911247253418
+      },
+      "case": "continuous_and_categorical",
+      "inference": {
+        "memory_mib": {
+          "allocated_before_step": 20.5185546875,
+          "peak_allocated": 28.625,
+          "peak_step_delta": 8.1064453125
+        },
+        "throughput": {
+          "samples_per_second": 90694.37202518189,
+          "steps_per_second": 708.5497814467335
+        },
+        "timing_ms": {
+          "max": 2.9504640102386475,
+          "mean": 1.4113334393501282,
+          "median": 1.3955680131912231,
+          "min": 1.3744319677352905,
+          "p95": 1.436576008796692,
+          "population_stddev": 0.11580280296800351,
+          "total": 282.26668787002563
+        }
+      },
+      "parameters": 608741,
+      "seed": 11,
+      "training": {
+        "loss": {
+          "first_measured": 1.0589277744293213,
+          "last_measured": 0.77437824010849
+        },
+        "memory_mib": {
+          "allocated_before_step": 32.3544921875,
+          "peak_allocated": 83.0634765625,
+          "peak_step_delta": 50.708984375
+        },
+        "throughput": {
+          "samples_per_second": 12057.158300163443,
+          "steps_per_second": 94.1965492200269
+        },
+        "timing_ms": {
+          "max": 23.326879501342773,
+          "mean": 10.616100146770478,
+          "median": 7.033968210220337,
+          "min": 5.017632007598877,
+          "p95": 18.348159790039062,
+          "population_stddev": 5.418763538627612,
+          "total": 10616.100146770477
+        }
+      }
+    },
+    {
+      "accuracy": {
+        "mae": 0.764572024345398,
+        "rmse": 1.0703309774398804,
+        "smape_pct": 14.731390953063965
+      },
+      "case": "continuous_and_categorical",
+      "inference": {
+        "memory_mib": {
+          "allocated_before_step": 20.5185546875,
+          "peak_allocated": 28.625,
+          "peak_step_delta": 8.1064453125
+        },
+        "throughput": {
+          "samples_per_second": 90814.47896672717,
+          "steps_per_second": 709.488116927556
+        },
+        "timing_ms": {
+          "max": 1.6866559982299805,
+          "mean": 1.4094668763875962,
+          "median": 1.404703974723816,
+          "min": 1.3839679956436157,
+          "p95": 1.4351359605789185,
+          "population_stddev": 0.027237467966964177,
+          "total": 281.8933752775192
+        }
+      },
+      "parameters": 608741,
+      "seed": 22,
+      "training": {
+        "loss": {
+          "first_measured": 1.0606781244277954,
+          "last_measured": 0.737379789352417
+        },
+        "memory_mib": {
+          "allocated_before_step": 32.3544921875,
+          "peak_allocated": 83.0634765625,
+          "peak_step_delta": 50.708984375
+        },
+        "throughput": {
+          "samples_per_second": 14037.374321943096,
+          "steps_per_second": 109.66698689018044
+        },
+        "timing_ms": {
+          "max": 27.021503448486328,
+          "mean": 9.118514407634736,
+          "median": 7.023216009140015,
+          "min": 5.210815906524658,
+          "p95": 18.328832626342773,
+          "population_stddev": 4.53908271633175,
+          "total": 9118.514407634735
+        }
+      }
+    },
+    {
+      "accuracy": {
+        "mae": 1.0552171468734741,
+        "rmse": 1.2913919687271118,
+        "smape_pct": 20.11037254333496
+      },
+      "case": "continuous_only",
+      "inference": {
+        "memory_mib": {
+          "allocated_before_step": 20.509765625,
+          "peak_allocated": 28.37890625,
+          "peak_step_delta": 7.869140625
+        },
+        "throughput": {
+          "samples_per_second": 99824.20978523616,
+          "steps_per_second": 779.8766389471574
+        },
+        "timing_ms": {
+          "max": 1.328287959098816,
+          "mean": 1.2822540771961213,
+          "median": 1.2797760367393494,
+          "min": 1.2630720138549805,
+          "p95": 1.3010879755020142,
+          "population_stddev": 0.011119383100382423,
+          "total": 256.45081543922424
+        }
+      },
+      "parameters": 606621,
+      "seed": 22,
+      "training": {
+        "loss": {
+          "first_measured": 1.0621050596237183,
+          "last_measured": 1.0213091373443604
+        },
+        "memory_mib": {
+          "allocated_before_step": 32.3193359375,
+          "peak_allocated": 82.87451171875,
+          "peak_step_delta": 50.55517578125
+        },
+        "throughput": {
+          "samples_per_second": 8521.07443159982,
+          "steps_per_second": 66.5708939968736
+        },
+        "timing_ms": {
+          "max": 22.2445125579834,
+          "mean": 15.021579852104187,
+          "median": 17.931008338928223,
+          "min": 4.909247875213623,
+          "p95": 18.957311630249023,
+          "population_stddev": 5.073819382394391,
+          "total": 15021.579852104187
+        }
+      }
+    },
+    {
+      "accuracy": {
+        "mae": 1.0394421815872192,
+        "rmse": 1.2713521718978882,
+        "smape_pct": 19.75440788269043
+      },
+      "case": "continuous_only",
+      "inference": {
+        "memory_mib": {
+          "allocated_before_step": 20.509765625,
+          "peak_allocated": 28.37890625,
+          "peak_step_delta": 7.869140625
+        },
+        "throughput": {
+          "samples_per_second": 99860.9058355811,
+          "steps_per_second": 780.1633268404775
+        },
+        "timing_ms": {
+          "max": 1.4561920166015625,
+          "mean": 1.2817828851938247,
+          "median": 1.277392029762268,
+          "min": 1.261504054069519,
+          "p95": 1.3027199506759644,
+          "population_stddev": 0.019485452809204502,
+          "total": 256.35657703876495
+        }
+      },
+      "parameters": 606621,
+      "seed": 33,
+      "training": {
+        "loss": {
+          "first_measured": 1.078936219215393,
+          "last_measured": 1.0096536874771118
+        },
+        "memory_mib": {
+          "allocated_before_step": 32.3193359375,
+          "peak_allocated": 82.87451171875,
+          "peak_step_delta": 50.55517578125
+        },
+        "throughput": {
+          "samples_per_second": 9570.555415372766,
+          "steps_per_second": 74.76996418259974
+        },
+        "timing_ms": {
+          "max": 63.728416442871094,
+          "mean": 13.374354407310486,
+          "median": 17.74628734588623,
+          "min": 4.699488162994385,
+          "p95": 18.751039505004883,
+          "population_stddev": 5.987196243951316,
+          "total": 13374.354407310486
+        }
+      }
+    },
+    {
+      "accuracy": {
+        "mae": 0.7634995579719543,
+        "rmse": 1.0827714204788208,
+        "smape_pct": 14.528130531311035
+      },
+      "case": "continuous_and_categorical",
+      "inference": {
+        "memory_mib": {
+          "allocated_before_step": 20.5185546875,
+          "peak_allocated": 28.625,
+          "peak_step_delta": 8.1064453125
+        },
+        "throughput": {
+          "samples_per_second": 10172.23165908273,
+          "steps_per_second": 79.47055983658383
+        },
+        "timing_ms": {
+          "max": 23.82655906677246,
+          "mean": 12.58327614724636,
+          "median": 17.98808002471924,
+          "min": 1.3880959749221802,
+          "p95": 17.995168685913086,
+          "population_stddev": 7.631583950585735,
+          "total": 2516.655229449272
+        }
+      },
+      "parameters": 608741,
+      "seed": 33,
+      "training": {
+        "loss": {
+          "first_measured": 1.0751577615737915,
+          "last_measured": 0.7422110438346863
+        },
+        "memory_mib": {
+          "allocated_before_step": 32.3544921875,
+          "peak_allocated": 83.0634765625,
+          "peak_step_delta": 50.708984375
+        },
+        "throughput": {
+          "samples_per_second": 12166.924213811399,
+          "steps_per_second": 95.05409542040154
+        },
+        "timing_ms": {
+          "max": 25.425535202026367,
+          "mean": 10.520325248241425,
+          "median": 8.041840076446533,
+          "min": 5.219935894012451,
+          "p95": 18.31862449645996,
+          "population_stddev": 4.934978699267742,
+          "total": 10520.325248241425
+        }
+      }
+    }
+  ],
+  "schema_version": 1,
+  "source": {
+    "git": {
+      "branch": "exogenous-models",
+      "commit": "846d3e2a1adfb453931a0e79850a9a9cd3b36865",
+      "working_tree_dirty": true
+    },
+    "python_snapshot_sha256": "1fd357f1b0bb9a9b97d54548d8bde5fbab85ec64f9e90fedb0ae02d6eedd0f9c"
+  },
+  "started_at_utc": "2026-07-24T05:22:36.514927+00:00",
+  "summary": {
+    "categorical_delta": {
+      "inference_peak_allocated_change_mib": 0.24609375,
+      "inference_step_time_change_pct": 10.066597911410986,
+      "mae_change_pct": -26.193989528122216,
+      "parameter_change": 2120,
+      "timing_delta_basis": "median of per-seed mean step times",
+      "training_peak_allocated_change_mib": 0.18896484375,
+      "training_step_time_change_pct": -29.96525430866872
+    },
+    "continuous_and_categorical": {
+      "accuracy": {
+        "mae": 0.770481805006663,
+        "rmse": 1.082934021949768,
+        "smape_pct": 14.966211318969727
+      },
+      "inference": {
+        "mean_step_ms": 5.134692154328028,
+        "median_seed_step_ms": 1.4113334393501282,
+        "peak_allocated_mib": 28.625,
+        "peak_step_delta_mib": 8.1064453125,
+        "samples_per_second": 63893.69421699727
+      },
+      "parameters": 608741,
+      "seeds": [
+        11,
+        22,
+        33
+      ],
+      "training": {
+        "mean_step_ms": 10.084979934215546,
+        "median_seed_step_ms": 10.520325248241425,
+        "peak_allocated_mib": 83.0634765625,
+        "peak_step_delta_mib": 50.708984375,
+        "samples_per_second": 12753.81894530598
+      }
+    },
+    "continuous_only": {
+      "accuracy": {
+        "mae": 1.0439282655715942,
+        "rmse": 1.2763118743896484,
+        "smape_pct": 20.127554575602215
+      },
+      "inference": {
+        "mean_step_ms": 1.283983681599299,
+        "median_seed_step_ms": 1.2822540771961213,
+        "peak_allocated_mib": 28.37890625,
+        "peak_step_delta_mib": 7.869140625,
+        "samples_per_second": 99690.2090795692
+      },
+      "parameters": 606621,
+      "seeds": [
+        11,
+        22,
+        33
+      ],
+      "training": {
+        "mean_step_ms": 14.87139284324646,
+        "median_seed_step_ms": 15.021579852104187,
+        "peak_allocated_mib": 82.87451171875,
+        "peak_step_delta_mib": 50.55517578125,
+        "samples_per_second": 8661.325379048185
+      }
+    }
+  }
+}

@@ -76,12 +76,24 @@ except Exception:  # pragma: no cover
 
 # exo_policy: prefer resolve_exogenous; fallback to resolve_future_exogenous for compatibility
 try:
-    from .exo_policy import ExoSpec, resolve_exogenous
+    from .exo_policy import (
+        ExoSpec,
+        infer_future_cat_cardinalities_from_loader,
+        resolve_exogenous,
+    )
 except Exception:  # pragma: no cover
     try:
-        from exo_policy import ExoSpec, resolve_exogenous  # type: ignore
+        from exo_policy import (  # type: ignore
+            ExoSpec,
+            infer_future_cat_cardinalities_from_loader,
+            resolve_exogenous,
+        )
     except Exception:  # pragma: no cover
-        from .exo_policy import ExoSpec, resolve_future_exogenous as resolve_exogenous  # type: ignore
+        from .exo_policy import (  # type: ignore
+            ExoSpec,
+            infer_future_cat_cardinalities_from_loader,
+            resolve_future_exogenous as resolve_exogenous,
+        )
 
 
 # =============================================================================
@@ -347,9 +359,18 @@ def save_model(
     path: Union[str, Path],
     *,
     extra_meta: Optional[Dict[str, Any]] = None,
+    exogenous_schema=None,
+    categorical_vocabulary_artifact=None,
 ) -> None:
     """학습기 내부 저장은 utils.checkpoint 포맷을 공식 포맷으로 사용한다."""
-    save_checkpoint(model, cfg, str(path), extra_meta=extra_meta)
+    save_checkpoint(
+        model,
+        cfg,
+        str(path),
+        extra_meta=extra_meta,
+        exogenous_schema=exogenous_schema,
+        categorical_vocabulary_artifact=categorical_vocabulary_artifact,
+    )
 
 
 def _training_checkpoint_meta(
@@ -1087,6 +1108,21 @@ def _run_patchtst(
         _wants_artifact(requested, "patchtst_quantile")
         or run_explicit_quantile_exogenous
     )
+    future_cat_cardinalities = (
+        infer_future_cat_cardinalities_from_loader(train_loader)
+        if use_exogenous_mode
+        else ()
+    )
+    checkpoint_exogenous_schema = getattr(
+        train_loader,
+        "exogenous_schema",
+        None,
+    )
+    checkpoint_categorical_vocabulary = getattr(
+        train_loader,
+        "categorical_vocabulary_artifact",
+        None,
+    )
 
     if requested is not None and {
         "patchtst_base",
@@ -1103,7 +1139,12 @@ def _run_patchtst(
     if (run_explicit_exogenous or run_explicit_quantile_exogenous) and not use_exogenous_mode:
         raise ValueError("Explicit PatchTST exogenous variants require use_exogenous_mode=True.")
     if (run_explicit_exogenous or run_explicit_quantile_exogenous) and not any(
-        (int(exo_dim), int(past_cont_dim), int(past_cat_dim))
+        (
+            int(exo_dim),
+            int(past_cont_dim),
+            int(past_cat_dim),
+            len(future_cat_cardinalities),
+        )
     ):
         raise ValueError("Explicit PatchTST exogenous variants require configured exogenous features.")
 
@@ -1138,6 +1179,7 @@ def _run_patchtst(
             dict(
                 past_exo_cont_dim=int(past_cont_dim),
                 past_exo_cat_dim=int(past_cat_dim),
+                future_exo_cat_cardinalities=future_cat_cardinalities,
                 # cat 미사용이면 []/0 유지
                 cat_cardinalities=[],
                 d_cat_emb=0,
@@ -1145,7 +1187,15 @@ def _run_patchtst(
         )
     else:
         # exo OFF 불변식
-        pt_kwargs.update(dict(past_exo_cont_dim=0, past_exo_cat_dim=0, cat_cardinalities=[], d_cat_emb=0))
+        pt_kwargs.update(
+            dict(
+                past_exo_cont_dim=0,
+                past_exo_cat_dim=0,
+                future_exo_cat_cardinalities=(),
+                cat_cardinalities=[],
+                d_cat_emb=0,
+            )
+        )
 
     # ------------------------------------------------------------
     # 2) external pretrained ckpt path(optional)
@@ -1167,6 +1217,7 @@ def _run_patchtst(
 
         pt_pre_kwargs = dict(pt_kwargs)
         pt_pre_kwargs["future_exo_dim"] = 0
+        pt_pre_kwargs["future_exo_cat_cardinalities"] = ()
         pt_pre_kwargs["past_exo_cont_dim"] = 0
         pt_pre_kwargs["past_exo_cat_dim"] = 0
 
@@ -1206,7 +1257,8 @@ def _run_patchtst(
     _fcb = future_exo_cb if use_exogenous_mode else None
     print(f"[PatchTST][EXO] use_exo={use_exogenous_mode} future_exo_dim={pt_kwargs.get('future_exo_dim')} "
           f"past_exo_cont_dim={pt_kwargs.get('past_exo_cont_dim')} future_cb={_fcb is not None} "
-          f"past_exo_cat_dim={pt_kwargs.get('past_exo_cat_dim')}")
+          f"past_exo_cat_dim={pt_kwargs.get('past_exo_cat_dim')} "
+          f"future_exo_cat_cardinalities={pt_kwargs.get('future_exo_cat_cardinalities')}")
 
     if run_base:
         point_model_key = "patchtst_exogenous" if run_explicit_exogenous else "patchtst_base"
@@ -1264,6 +1316,10 @@ def _run_patchtst(
                         best_pt_base,
                     ),
                 },
+                exogenous_schema=checkpoint_exogenous_schema,
+                categorical_vocabulary_artifact=(
+                    checkpoint_categorical_vocabulary
+                ),
             )
             best_pt_base["ckpt_path"] = str(ckpt_path)
             if (use_ssl_mode == "full") and (pretrain_ckpt_path is not None):
@@ -1347,6 +1403,10 @@ def _run_patchtst(
                         best_pt_q,
                     ),
                 },
+                exogenous_schema=checkpoint_exogenous_schema,
+                categorical_vocabulary_artifact=(
+                    checkpoint_categorical_vocabulary
+                ),
             )
             best_pt_q["ckpt_path"] = str(ckpt_path_q)
             if (use_ssl_mode == "full") and (pretrain_ckpt_path is not None):

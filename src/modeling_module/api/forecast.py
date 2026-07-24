@@ -160,6 +160,44 @@ def _validate_model_key(predictor: LoadedPredictor, expected_model_key: str | No
         )
 
 
+def _validate_checkpoint_exogenous_schema(
+    predictor: LoadedPredictor,
+    loader: Any,
+) -> None:
+    """Require inference feature roles and order to match the saved checkpoint."""
+    expected = getattr(predictor, "exogenous_schema", None)
+    if expected is None:
+        return
+
+    actual = getattr(loader, "exogenous_schema", None)
+    if actual is None:
+        raise ValueError(
+            "Forecast request did not produce an exogenous schema, but the "
+            "checkpoint requires one."
+        )
+
+    fields = (
+        "past_cont_names",
+        "past_cat_names",
+        "future_cont_names",
+        "future_cat_names",
+        "past_cat_cardinalities",
+        "future_cat_cardinalities",
+    )
+    mismatches = [
+        f"{field}: expected {getattr(expected, field)!r}, "
+        f"got {getattr(actual, field)!r}"
+        for field in fields
+        if getattr(expected, field) != getattr(actual, field)
+    ]
+    if mismatches:
+        raise ValueError(
+            "Forecast request exogenous schema does not match checkpoint "
+            "schema: "
+            + "; ".join(mismatches)
+        )
+
+
 def forecast(request: ForecastRequest) -> ForecastResult:
     """Run deterministic anchored inference without writing files.
 
@@ -199,7 +237,17 @@ def forecast(request: ForecastRequest) -> ForecastResult:
             "drop_last": False,
         }
     )
+    categorical_vocabulary_artifact = getattr(
+        predictor,
+        "categorical_vocabulary_artifact",
+        None,
+    )
+    if categorical_vocabulary_artifact is not None:
+        loader_payload["categorical_vocabulary_artifact"] = (
+            categorical_vocabulary_artifact
+        )
     loader = build_dataloader(loader_payload)
+    _validate_checkpoint_exogenous_schema(predictor, loader)
 
     rows: list[dict[str, Any]] = []
     series_ordinal = 0
@@ -217,6 +265,9 @@ def forecast(request: ForecastRequest) -> ForecastResult:
                 "x": unpacked["x"],
                 "part_ids": series_ids,
                 "future_exo_batch": unpacked.get("future_exo"),
+                "future_exo_cat_batch": unpacked.get(
+                    "future_exo_cat"
+                ),
                 "past_exo_cont": unpacked.get("past_exo_cont"),
                 "past_exo_cat": unpacked.get("past_exo_cat"),
             },

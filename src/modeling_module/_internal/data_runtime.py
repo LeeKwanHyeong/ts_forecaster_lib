@@ -8,9 +8,17 @@ from modeling_module.data_loader.exogenous_contracts import (
     ExogenousBatch,
     ExogenousFeatureSchema,
 )
+from modeling_module.data_loader.categorical_vocabulary import (
+    CATEGORICAL_UNK_ID,
+    CategoricalVocabulary,
+    CategoricalVocabularyArtifact,
+)
 from modeling_module.data_loader.temporal import normalize_period_key
 
 __all__ = [
+    "CATEGORICAL_UNK_ID",
+    "CategoricalVocabulary",
+    "CategoricalVocabularyArtifact",
     "ExogenousBatch",
     "ExogenousFeatureSchema",
     "MultiPartDataModule",

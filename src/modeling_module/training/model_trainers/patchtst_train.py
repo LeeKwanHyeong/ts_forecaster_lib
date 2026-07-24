@@ -9,7 +9,7 @@ from modeling_module.models.PatchTST.common.patching import compute_patch_num
 from modeling_module.models.PatchTST.heads.distribution_head import DistHeadWithExo
 from modeling_module.models.PatchTST.heads.point_head import PointHeadWithExo
 from modeling_module.models.PatchTST.heads.quantile_head import QuantileHeadWithExo
-from modeling_module.training.adapters import DefaultAdapter
+from modeling_module.training.adapters import PatchTSTAdapter
 from modeling_module.training.config import TrainingConfig, StageConfig, apply_stage
 from modeling_module.training.engine import CommonTrainer
 from modeling_module.training.model_trainers.amp_policy import amp_type_set
@@ -161,7 +161,7 @@ def train_patchtst(
     if not stages or len(stages) == 0:
         stages = [StageConfig(epochs=train_cfg.epochs, spike_enabled=train_cfg.spike_loss.enabled)]
 
-    adapter = DefaultAdapter()
+    adapter = PatchTSTAdapter()
 
     is_production_refit = (
         getattr(train_cfg, "training_mode", "qualification")
