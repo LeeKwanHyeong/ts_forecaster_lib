@@ -79,6 +79,34 @@ State schema hash는 정렬된 `name | shape | dtype` 목록의 SHA-256입니다
 - `architecture_variant`와 `exogenous_fusion_strategy` metadata는 explicit artifact에서 보존합니다.
 - Public restore가 지원하는 distribution은 `Normal`과 `StudentT`입니다.
 
+## Production sl_only baseline
+
+202545 운영 비교 기준은 `SSL_MODE=sl_only`로 학습한 endogenous
+`patchtst_base`입니다. 이 checkpoint는 full SSL qualification의 입력이나
+출력 경로로 재사용하지 않으며 덮어쓰지 않습니다.
+
+| Item | Frozen value |
+|---|---|
+| Data cutoff | `202544` |
+| Seed / epochs | `42 / 8` |
+| Capacity | `d_model=128`, `n_layers=2`, `d_ff=512` |
+| Parameters | `403,099` |
+| Checkpoint SHA-256 | `2674a5b01a882a7d3bf36af598d787136d2c15181879307989a8206a43fa2d78` |
+
+전체 machine-readable 계약은
+[`PatchTSTProductionSLOnlyBaseline.json`](PatchTSTProductionSLOnlyBaseline.json)에
+고정합니다. Full SSL 실험은 별도 artifact root를 사용하고 승격 결정 전에는
+이 baseline의 Demand Engine registry 항목을 변경하지 않습니다.
+Pretrain 입력, backbone 이식, 카테고리 누수 방지 경계는
+[`PatchTSTFullSSLContract.md`](PatchTSTFullSSLContract.md)에 정의합니다.
+
+2026-07-24 RTX 5090 seed 11/22/33 qualification에서 현재 `full` 경로는
+`sl_only` 대비 평균 MAE·WAPE가 `10.30%` 악화되고 학습 시간이 `24.73%`
+증가했습니다. 따라서 운영 전략은 `sl_only`를 유지합니다. 세부 결과와
+겹치는 Pretrain patch의 shortcut 분석은
+[`PatchTSTSSL5090Qualification.md`](PatchTSTSSL5090Qualification.md)에
+고정합니다.
+
 ## Accuracy status
 
 이 기준선은 구조 및 호환성을 고정한 것이며 정확도 승격 근거가 아닙니다. PatchTST의 기본 모델

@@ -10,6 +10,14 @@ from modeling_module.training.config import TrainingConfig, StageConfig
 from modeling_module.training.model_trainers.patchtst_train import train_patchtst
 
 
+PATCHTST_PRETRAIN_TRANSFER_PREFIXES = ("backbone.",)
+PATCHTST_SUPERVISED_ONLY_PREFIXES = (
+    "head.",
+    "future_cat_embedding.",
+    "future_fuser.",
+)
+
+
 def _sinusoidal_pos_emb(n: int, d: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
     """
     [1, n, d] 형태의 사인파 위치 임베딩(Sinusoidal Positional Embedding) 생성.
@@ -300,17 +308,22 @@ def _select_loadable_keys(
         state: Dict[str, torch.Tensor],
         model_state: Dict[str, torch.Tensor],
         *,
-        allow_prefixes: Tuple[str, ...] = ("backbone.", "revin_layer."),
+        allow_prefixes: Tuple[str, ...] = PATCHTST_PRETRAIN_TRANSFER_PREFIXES,
 ) -> Dict[str, torch.Tensor]:
     """
-    타겟 모델에 존재하고 허용된 접두사를 가진 키만 선별.
+    타겟 모델에 존재하고 shape가 같은 허용 prefix의 키만 선별.
     """
     model_keys = set(model_state.keys())
     out: Dict[str, torch.Tensor] = {}
     for k, v in state.items():
         if not k.startswith(allow_prefixes):
             continue
-        if k in model_keys:
+        if not torch.is_tensor(v):
+            continue
+        if (
+            k in model_keys
+            and tuple(v.shape) == tuple(model_state[k].shape)
+        ):
             out[k] = v
     return out
 
@@ -325,6 +338,110 @@ def _report_match_stats(loaded: Dict[str, torch.Tensor], model_state: Dict[str, 
     print(f"[Finetune] missing: {len(missing)} / total: {len(mkeys)} ratio={len(missing) / max(1, len(mkeys)):.3f}")
     if missing:
         print("[Finetune] missing sample (first 30):", missing[:30])
+
+
+def load_patchtst_pretrained_backbone(
+        model,
+        pretrain_ckpt_path: str,
+        *,
+        load_strict: bool = False,
+) -> Dict[str, Any]:
+    """Load only compatible PatchTST backbone weights from an SSL checkpoint."""
+    if not os.path.exists(pretrain_ckpt_path):
+        raise FileNotFoundError(pretrain_ckpt_path)
+
+    raw_state, meta = _load_pretrain_blob(pretrain_ckpt_path)
+    raw_state = _strip_common_prefixes(raw_state)
+    raw_state = _drop_revin_stats(raw_state)
+
+    model_state = model.state_dict()
+    d_model, n_layers = _infer_supervised_encoder_spec(model)
+
+    state = raw_state
+    if _looks_like_torch_transformer_encoder(raw_state):
+        state = _convert_torch_transformer_to_tst(
+            raw_state,
+            d_model=d_model,
+            n_layers=n_layers,
+        )
+    state = _map_patch_embed_to_input_proj(state)
+
+    pretrain_weight = state.get("backbone.patch_embed.weight")
+    pretrain_bias = state.get("backbone.patch_embed.bias")
+    target_weight = model_state.get("backbone.input_proj.weight")
+    target_bias = model_state.get("backbone.input_proj.bias")
+
+    if pretrain_weight is not None and target_weight is not None:
+        if pretrain_weight.shape == target_weight.shape:
+            state["backbone.input_proj.weight"] = pretrain_weight
+        else:
+            merged_weight = target_weight.clone()
+            columns = min(
+                pretrain_weight.shape[1],
+                merged_weight.shape[1],
+            )
+            merged_weight[:, :columns] = pretrain_weight[:, :columns]
+            state["backbone.input_proj.weight"] = merged_weight
+
+    if (
+        pretrain_bias is not None
+        and target_bias is not None
+        and pretrain_bias.shape == target_bias.shape
+    ):
+        state["backbone.input_proj.bias"] = pretrain_bias
+
+    transferred = _select_loadable_keys(state, model_state)
+    if not transferred:
+        raise RuntimeError(
+            "Pretrain checkpoint contains no compatible PatchTST backbone "
+            f"weights: {pretrain_ckpt_path}"
+        )
+    filtered = _maybe_add_sinusoidal_pos_enc(
+        transferred,
+        model_state,
+    )
+    initialized_backbone_keys = sorted(
+        set(filtered).difference(transferred)
+    )
+    if any(
+        not key.startswith(PATCHTST_PRETRAIN_TRANSFER_PREFIXES)
+        for key in filtered
+    ):
+        raise RuntimeError(
+            "PatchTST pretrain transfer attempted to load a non-backbone key."
+        )
+
+    print("[Finetune] loaded pretrain ckpt:", pretrain_ckpt_path)
+    if meta:
+        print("[Finetune] ckpt meta keys:", list(meta.keys()))
+    _report_match_stats(filtered, model_state)
+
+    missing, unexpected = model.load_state_dict(
+        filtered,
+        strict=load_strict,
+    )
+    print(f"[Finetune] load_strict={load_strict}")
+    print(
+        "[Finetune] load_state_dict -> "
+        f"missing_keys={len(missing)} unexpected_keys={len(unexpected)}"
+    )
+    if missing:
+        print("  - missing (first 30):", missing[:30])
+    if unexpected:
+        print("  - unexpected (first 30):", unexpected[:30])
+
+    return {
+        "checkpoint_path": str(pretrain_ckpt_path),
+        "transfer_scope": "backbone_only",
+        "transferred_key_count": len(transferred),
+        "transferred_keys": sorted(transferred),
+        "initialized_backbone_keys": initialized_backbone_keys,
+        "supervised_only_prefixes": list(
+            PATCHTST_SUPERVISED_ONLY_PREFIXES
+        ),
+        "missing_key_count": len(missing),
+        "unexpected_key_count": len(unexpected),
+    }
 
 
 # ---------------------------------------------------------------------
@@ -387,64 +504,14 @@ def train_patchtst_finetune(
     assert train_cfg is not None, "train_cfg는 필수입니다."
     exo_is_normalized = getattr(train_cfg, "exo_is_normalized", True)
 
-
     # 1) 사전학습 체크포인트 로드 (존재 시)
+    pretrain_load_report = None
     if pretrain_ckpt_path is not None:
-        if not os.path.exists(pretrain_ckpt_path):
-            raise FileNotFoundError(pretrain_ckpt_path)
-
-        raw_state, meta = _load_pretrain_blob(pretrain_ckpt_path)
-        raw_state = _strip_common_prefixes(raw_state)
-        raw_state = _drop_revin_stats(raw_state)
-
-        # 가중치 변환 (TransformerEncoder -> TSTEncoder)
-        model_state = model.state_dict()
-        d_model, n_layers = _infer_supervised_encoder_spec(model)
-
-        state = raw_state
-        if _looks_like_torch_transformer_encoder(raw_state):
-            state = _convert_torch_transformer_to_tst(raw_state, d_model=d_model, n_layers=n_layers)
-
-        # SSL patch_embed -> Supervised input_proj 매핑
-        state = _map_patch_embed_to_input_proj(state)
-
-        w = state.get("backbone.patch_embed.weight")
-        b = state.get("backbone.patch_embed.bias")
-
-        tgt_w = model_state.get("backbone.input_proj.weight")
-        tgt_b = model_state.get("backbone.input_proj.bias")
-
-        if (w is not None) and (tgt_w is not None):
-            if w.shape == tgt_w.shape:
-                state["backbone.input_proj.weight"] = w
-            else:
-                new_w = tgt_w.clone()
-                cols = min(w.shape[1], new_w.shape[1])
-                new_w[:, :cols] = w[:, :cols]
-                state["backbone.input_proj.weight"] = new_w
-
-        if (b is not None) and (tgt_b is not None) and (b.shape == tgt_b.shape):
-            state["backbone.input_proj.bias"] = b
-
-        # 로드 가능한 키 선별 및 위치 인코딩 보정
-        filtered = _select_loadable_keys(state, model_state)
-        filtered = _maybe_add_sinusoidal_pos_enc(filtered, model_state)
-
-        # 매칭 통계 출력 및 로드 실행
-        print("[Finetune] loaded pretrain ckpt:", pretrain_ckpt_path)
-        if meta:
-            print("[Finetune] ckpt meta keys:", list(meta.keys()))
-        _report_match_stats(filtered, model_state)
-
-        missing, unexpected = model.load_state_dict(filtered, strict=load_strict)
-
-        # 로드 결과 요약
-        print(f"[Finetune] load_strict={load_strict}")
-        print(f"[Finetune] load_state_dict -> missing_keys={len(missing)} unexpected_keys={len(unexpected)}")
-        if missing:
-            print("  - missing (first 30):", missing[:30])
-        if unexpected:
-            print("  - unexpected (first 30):", unexpected[:30])
+        pretrain_load_report = load_patchtst_pretrained_backbone(
+            model,
+            pretrain_ckpt_path,
+            load_strict=load_strict,
+        )
 
     # 2) 파인튜닝 전 인코더 동결 (옵션)
     if freeze_encoder_before_ft:
@@ -461,6 +528,8 @@ def train_patchtst_finetune(
         train_cfg=train_cfg,
         future_exo_cb=future_exo_cb,
     )
+    if pretrain_load_report is not None:
+        out["pretrain_load_report"] = pretrain_load_report
 
     # 4) 학습 후 동결 해제 (옵션)
     if freeze_encoder_before_ft and unfreeze_after_stage0:
