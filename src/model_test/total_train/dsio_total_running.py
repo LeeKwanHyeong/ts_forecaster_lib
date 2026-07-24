@@ -194,6 +194,13 @@ def write_endogenous_data_manifest(
                 else "final_epoch"
             ),
             "configured_epochs": args.warmup_epochs + args.spike_epochs,
+            "ssl": {
+                "mode": args.ssl_mode,
+                "pretrain_epochs": args.ssl_pretrain_epochs,
+                "pretrain_stride": args.ssl_pretrain_stride,
+                "mask_ratio": args.ssl_mask_ratio,
+                "loss_type": args.ssl_loss_type,
+            },
         },
         "selection": {
             "sample_part_count": args.sample_part_count,
@@ -558,6 +565,7 @@ def _run_exo_stage(
             ssl=SSLConfig(
                 mode=args.ssl_mode,
                 pretrain_epochs=args.ssl_pretrain_epochs,
+                pretrain_stride=args.ssl_pretrain_stride,
                 mask_ratio=args.ssl_mask_ratio,
                 loss_type=args.ssl_loss_type,
             ),
@@ -772,6 +780,7 @@ def run_endo(
         "ssl": SSLConfig(
             mode=args.ssl_mode,
             pretrain_epochs=args.ssl_pretrain_epochs,
+            pretrain_stride=args.ssl_pretrain_stride,
             mask_ratio=args.ssl_mask_ratio,
             loss_type=args.ssl_loss_type,
         ),
@@ -932,6 +941,15 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--ssl-pretrain-epochs", type=int, default=2)
+    parser.add_argument(
+        "--ssl-pretrain-stride",
+        type=int,
+        default=None,
+        help=(
+            "Patch stride used only by SSL pretraining. Omit to reuse the "
+            "supervised PatchTST stride."
+        ),
+    )
     parser.add_argument("--ssl-mask-ratio", type=float, default=0.3)
     parser.add_argument("--ssl-loss-type", type=str, default="mse")
     parser.add_argument("--device", type=str, default="auto")
@@ -1047,6 +1065,8 @@ def main() -> None:
     print("SPIKE_EPOCHS        :", args.spike_epochs)
     print("SSL_MODE            :", args.ssl_mode)
     print("SSL_PRETRAIN_EPOCHS :", args.ssl_pretrain_epochs)
+    print("SSL_PRETRAIN_STRIDE :", args.ssl_pretrain_stride)
+    print("SSL_MASK_RATIO      :", args.ssl_mask_ratio)
     print("ENDO_MODELS         :", endo_models)
     print("EXO_MODELS          :", exo_models)
     print("ARTIFACT_ROOT       :", args.artifact_root)

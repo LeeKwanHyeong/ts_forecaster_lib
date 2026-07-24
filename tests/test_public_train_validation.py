@@ -115,6 +115,75 @@ def test_train_allows_sl_only_without_artifact_directory(monkeypatch):
     assert exc_info.value is marker
 
 
+@pytest.mark.parametrize(
+    ("ssl_kwargs", "message"),
+    [
+        ({"pretrain_epochs": 0}, "ssl.pretrain_epochs"),
+        ({"pretrain_stride": 0}, "ssl.pretrain_stride"),
+        ({"mask_ratio": 0.0}, "ssl.mask_ratio"),
+        ({"mask_ratio": 1.1}, "ssl.mask_ratio"),
+    ],
+)
+def test_train_rejects_invalid_active_ssl_options_before_data_resolution(
+    monkeypatch,
+    tmp_path,
+    ssl_kwargs,
+    message,
+):
+    train_module = importlib.import_module("modeling_module.api.train")
+    reached_data_resolution = False
+
+    def unexpected_resolve_loaders(payload):
+        nonlocal reached_data_resolution
+        reached_data_resolution = True
+        raise AssertionError("data resolution must not run")
+
+    monkeypatch.setattr(
+        train_module,
+        "_resolve_loaders",
+        unexpected_resolve_loaders,
+    )
+
+    request = TrainRequest(
+        models=["patchtst_base"],
+        ssl=SSLConfig(mode="full", **ssl_kwargs),
+        artifacts=ArtifactConfig(
+            save_dir=str(tmp_path),
+            auto_save_dir=False,
+        ),
+    )
+
+    with pytest.raises(ValueError, match=message):
+        train(request)
+
+    assert reached_data_resolution is False
+
+
+def test_train_ignores_legacy_zero_pretrain_epochs_when_ssl_is_off(
+    monkeypatch,
+):
+    train_module = importlib.import_module("modeling_module.api.train")
+    marker = RuntimeError("data-resolution-reached")
+
+    def stop_at_data_resolution(payload):
+        raise marker
+
+    monkeypatch.setattr(
+        train_module,
+        "_resolve_loaders",
+        stop_at_data_resolution,
+    )
+
+    request = TrainRequest(
+        models=["patchtst_base"],
+        ssl=SSLConfig(mode="off", pretrain_epochs=0),
+        artifacts=ArtifactConfig(save_dir=None, auto_save_dir=False),
+    )
+
+    with pytest.raises(RuntimeError, match="data-resolution-reached"):
+        train(request)
+
+
 @pytest.mark.parametrize("ssl_mode", ["full", "ssl_only"])
 def test_train_rejects_patchtst_ssl_mode_for_non_patchtst_request_before_data_resolution(
     monkeypatch,

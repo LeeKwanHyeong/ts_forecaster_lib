@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -184,6 +185,8 @@ def test_runner_command_fixes_data_split_and_capacity(tmp_path: Path) -> None:
         mode="full",
         seed=33,
         pretrain_epochs=12,
+        pretrain_stride=13,
+        mask_ratio=0.4,
         supervised_epochs=40,
         batch_size=1024,
         num_workers=8,
@@ -198,6 +201,10 @@ def test_runner_command_fixes_data_split_and_capacity(tmp_path: Path) -> None:
     assert "--patchtst-layers 2" in joined
     assert "--patchtst-d-ff 512" in joined
     assert "--ssl-pretrain-epochs 12" in joined
+    assert "--ssl-pretrain-stride 13" in joined
+    assert "--ssl-mask-ratio 0.4" in joined
+    assert "--patch-len 13" in joined
+    assert "--stride 6" in joined
     assert "--warmup-epochs 40" in joined
 
 
@@ -216,6 +223,8 @@ def test_common_case_kwargs_preserve_virtualenv_python_symlink(
             python=venv_python,
             target_source=target,
             pretrain_epochs=12,
+            pretrain_stride=13,
+            mask_ratio=0.4,
             supervised_epochs=40,
             batch_size=1024,
             num_workers=8,
@@ -227,3 +236,56 @@ def test_common_case_kwargs_preserve_virtualenv_python_symlink(
 
     assert kwargs["python"] == venv_python.absolute()
     assert kwargs["python"] != real_python.resolve()
+    assert kwargs["pretrain_stride"] == 13
+    assert kwargs["mask_ratio"] == 0.4
+
+
+def test_resume_rejects_completed_case_with_old_overlap_contract(
+    tmp_path: Path,
+) -> None:
+    phase_root = tmp_path / "comparison"
+    case_root = phase_root / "full" / "seed_11"
+    case_root.mkdir(parents=True)
+    conditions = MODULE._case_conditions(
+        mode="full",
+        pretrain_epochs=12,
+        pretrain_stride=13,
+        mask_ratio=0.4,
+        supervised_epochs=40,
+        batch_size=1024,
+        num_workers=8,
+    )
+    conditions["pretrain_stride"] = 6
+    conditions["mask_ratio"] = 0.3
+    (case_root / "benchmark_runtime.json").write_text(
+        json.dumps(
+            {
+                "status": "complete",
+                "conditions": conditions,
+            }
+        ),
+        encoding="utf-8",
+    )
+    target = tmp_path / "target.parquet"
+    target.write_text("", encoding="utf-8")
+
+    with pytest.raises(
+        RuntimeError,
+        match="does not match the requested SSL patching contract",
+    ):
+        MODULE.run_case(
+            phase_root=phase_root,
+            python=Path("/venv/bin/python"),
+            target_source=target,
+            mode="full",
+            seed=11,
+            pretrain_epochs=12,
+            pretrain_stride=13,
+            mask_ratio=0.4,
+            supervised_epochs=40,
+            batch_size=1024,
+            num_workers=8,
+            prefetch_factor=4,
+            poll_seconds=0.25,
+            resume=True,
+        )

@@ -107,6 +107,25 @@ zero-demand 비율과 결합하면 reconstruction objective가 너무 쉽게
 [`patch_len=12`, `stride=12`, `mask_ratio=0.4`, Pretrain 10 epochs](https://github.com/yuqinie98/PatchTST/blob/main/PatchTST_self_supervised/patchtst_pretrain.py)입니다.
 현재 설정은 이 기본 Pretrain 계약과 다릅니다.
 
+## Next Qualification Candidate
+
+다음 5090 비교 후보는 supervised 설정을 유지한 채 Pretrain patching만
+분리합니다.
+
+| Item | Frozen baseline | Next candidate |
+|---|---:|---:|
+| `patch_len` | `13` | `13` |
+| supervised `stride` | `6` | `6` |
+| Pretrain `stride` | `6` | `13` |
+| `mask_ratio` | `0.3` | `0.4` |
+| Pretrain patch count | `7` | `4` |
+
+후보 경로는 versioned Pretrain checkpoint 계약과 backbone restore
+검증까지 구현됐습니다. 정확도·속도·VRAM은 아직 측정하지 않았으므로 이
+문서의 기존 `sl_only` 대 `full` 결과와 섞지 않습니다. 다음 실험은 동일
+split·capacity·seed 11/22/33 조건에서 새 후보를 다시 qualification해야
+합니다.
+
 ## Artifacts
 
 - [Pilot curve and overlap diagnostic](PatchTSTSSL5090Pilot-20260724.json)

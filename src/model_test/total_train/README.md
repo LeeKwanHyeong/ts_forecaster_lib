@@ -122,7 +122,10 @@ SAMPLE_PART_COUNT=8 \
 CLEAN_OUTPUT=1 \
 src/model_test/total_train/run_dsio_total_running_linux.sh \
   --device cuda --endo-batch-size 32 \
-  --ssl-pretrain-epochs 1 --warmup-epochs 1 --spike-epochs 0
+  --ssl-pretrain-epochs 1 \
+  --ssl-pretrain-stride 13 \
+  --ssl-mask-ratio 0.4 \
+  --warmup-epochs 1 --spike-epochs 0
 ```
 
 Python CLI를 직접 사용할 수도 있습니다.
@@ -151,6 +154,9 @@ python src/model_test/total_train/dsio_total_running.py \
 | `MODE` | `endo`, `exo`, `both` |
 | `ENDO_MODELS` / `EXO_MODELS` | 공백으로 구분한 family 또는 canonical artifact key |
 | `SSL_MODE` | `sl_only`, `off`, `full`; `full`은 PatchTST request 전용 |
+| `SSL_PRETRAIN_EPOCHS` | PatchTST SSL Pretrain epoch 수 |
+| `SSL_PRETRAIN_STRIDE` | SSL 전용 patch stride; 비우면 supervised stride 재사용 |
+| `SSL_MASK_RATIO` | SSL patch mask 비율 |
 | `LOOKBACK` / `HORIZON` | endogenous/exogenous window 길이 |
 | `TRAIN_END_WEEK` / `FORECAST_ORIGIN` | source 상한과 실제 예측 원점 |
 | `VALIDATION_ORIGIN` / `WINDOW_STRIDE` | last-origin 검증 시작과 학습 stride |

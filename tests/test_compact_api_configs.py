@@ -109,7 +109,12 @@ def test_train_accepts_compact_nested_configs(monkeypatch, tmp_path):
         ),
         models=["patchtst_base"],
         trainer=TrainerConfig(epochs=1, lr=1e-3),
-        ssl=SSLConfig(mode="full", pretrain_epochs=2, mask_ratio=0.4),
+        ssl=SSLConfig(
+            mode="full",
+            pretrain_epochs=2,
+            pretrain_stride=13,
+            mask_ratio=0.4,
+        ),
         runtime=RuntimeConfig(device="cpu"),
         artifacts=ArtifactConfig(save_dir=str(tmp_path), auto_save_dir=False),
     )
@@ -122,6 +127,7 @@ def test_train_accepts_compact_nested_configs(monkeypatch, tmp_path):
     assert captured["device"] == "cpu"
     assert captured["use_ssl_mode"] == "full"
     assert captured["ssl_pretrain_epochs"] == 2
+    assert captured["ssl_pretrain_stride"] == 13
     assert captured["ssl_mask_ratio"] == 0.4
     assert result.requested_models == ("patchtst_base",)
     assert result.ckpt_paths["patchtst_base"].endswith("patchtst.pt")

@@ -2,11 +2,14 @@
 from __future__ import annotations
 
 import os
-from typing import Optional, Callable, Dict, Any, Tuple
+from typing import Optional, Callable, Dict, Any, Mapping, Tuple
 
 import torch
 
 from modeling_module.training.config import TrainingConfig, StageConfig
+from modeling_module.training.model_trainers.patchtst_pretrain import (
+    PATCHTST_PRETRAIN_CONTRACT_VERSION,
+)
 from modeling_module.training.model_trainers.patchtst_train import train_patchtst
 
 
@@ -340,6 +343,176 @@ def _report_match_stats(loaded: Dict[str, torch.Tensor], model_state: Dict[str, 
         print("[Finetune] missing sample (first 30):", missing[:30])
 
 
+def _supervised_patching_contract(model) -> Dict[str, Any]:
+    cfg = getattr(model, "cfg", None)
+    if cfg is None:
+        raise ValueError(
+            "PatchTST supervised model must expose `cfg` for SSL restore."
+        )
+    patch_count = getattr(getattr(model, "backbone", None), "patch_num", None)
+    return {
+        "lookback": int(getattr(cfg, "lookback")),
+        "patch_len": int(getattr(cfg, "patch_len")),
+        "stride": int(getattr(cfg, "stride")),
+        "input_channels": int(getattr(cfg, "c_in", 1)),
+        "patch_count": (
+            None if patch_count is None else int(patch_count)
+        ),
+        "padding_patch": getattr(cfg, "padding_patch", None),
+    }
+
+
+def _validate_pretrain_contract(
+        meta: Mapping[str, Any],
+        model,
+) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any], Dict[str, Any]]:
+    target = _supervised_patching_contract(model)
+    raw_contract = meta.get("pretrain_contract")
+    if raw_contract is None:
+        return (
+            None,
+            target,
+            {
+                "validation": "legacy_shape_only",
+                "patch_len_match": None,
+                "input_channels_match": None,
+                "stride_match": None,
+                "patch_count_match": None,
+                "source_to_target_stride_change_allowed": True,
+            },
+        )
+    if not isinstance(raw_contract, Mapping):
+        raise ValueError(
+            "PatchTST pretrain checkpoint has an invalid `pretrain_contract`."
+        )
+
+    contract = dict(raw_contract)
+    if contract.get("format_version") != PATCHTST_PRETRAIN_CONTRACT_VERSION:
+        raise ValueError(
+            "Unsupported PatchTST pretrain contract version: "
+            f"{contract.get('format_version')!r}."
+        )
+    if contract.get("model_family") != "patchtst":
+        raise ValueError(
+            "PatchTST pretrain checkpoint model_family must be 'patchtst'."
+        )
+    if contract.get("input_scope") != "target_history_only":
+        raise ValueError(
+            "PatchTST pretrain checkpoint input_scope must be "
+            "'target_history_only'."
+        )
+
+    patching = contract.get("patching")
+    masking = contract.get("masking")
+    transfer_target = contract.get("transfer_target")
+    if (
+        not isinstance(patching, Mapping)
+        or not isinstance(masking, Mapping)
+        or not isinstance(transfer_target, Mapping)
+    ):
+        raise ValueError(
+            "PatchTST pretrain contract is missing patching, masking or "
+            "transfer_target."
+        )
+    try:
+        source_lookback = int(patching["lookback"])
+        source_patch_len = int(patching["patch_len"])
+        source_stride = int(patching["stride"])
+        source_input_channels = int(patching["input_channels"])
+        source_patch_count = int(patching["patch_count"])
+        intended_patch_len = int(transfer_target["patch_len"])
+        mask_ratio = float(masking["mask_ratio"])
+        loss_type = str(masking["loss_type"]).strip().lower()
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(
+            "PatchTST pretrain contract contains invalid patch metadata."
+        ) from exc
+
+    if (
+        source_lookback <= 0
+        or source_patch_len <= 0
+        or source_stride <= 0
+        or source_input_channels <= 0
+        or source_patch_count <= 0
+    ):
+        raise ValueError(
+            "PatchTST pretrain contract patch metadata must be positive."
+        )
+    expected_patch_count = (
+        1
+        if source_lookback < source_patch_len
+        else (
+            (source_lookback - source_patch_len) // source_stride
+        ) + 1
+    )
+    if source_patch_count != expected_patch_count:
+        raise ValueError(
+            "PatchTST pretrain contract patch_count is inconsistent with "
+            "lookback, patch_len and stride."
+        )
+    if (
+        masking.get("unit") != "patch"
+        or not 0.0 < mask_ratio <= 1.0
+        or loss_type not in {"mse", "mae"}
+    ):
+        raise ValueError(
+            "PatchTST pretrain contract contains invalid masking metadata."
+        )
+    if source_patch_len != intended_patch_len:
+        raise ValueError(
+            "PatchTST pretrain contract patch_len is internally inconsistent."
+        )
+    if source_patch_len != target["patch_len"]:
+        raise ValueError(
+            "PatchTST pretrain/supervised patch_len mismatch: "
+            f"pretrain={source_patch_len}, supervised={target['patch_len']}."
+        )
+    if source_input_channels != target["input_channels"]:
+        raise ValueError(
+            "PatchTST pretrain/supervised input channel mismatch: "
+            f"pretrain={source_input_channels}, "
+            f"supervised={target['input_channels']}."
+        )
+
+    intended_supervised_stride = transfer_target.get(
+        "supervised_stride"
+    )
+    if intended_supervised_stride is not None:
+        try:
+            intended_supervised_stride = int(intended_supervised_stride)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "PatchTST pretrain contract has an invalid supervised stride."
+            ) from exc
+        if intended_supervised_stride <= 0:
+            raise ValueError(
+                "PatchTST pretrain contract supervised stride must be positive."
+            )
+        if intended_supervised_stride != target["stride"]:
+            raise ValueError(
+                "PatchTST pretrain checkpoint was created for supervised "
+                f"stride={intended_supervised_stride}, but target stride="
+                f"{target['stride']}."
+            )
+
+    return (
+        contract,
+        target,
+        {
+            "validation": "versioned_contract",
+            "patch_len_match": True,
+            "input_channels_match": True,
+            "stride_match": source_stride == target["stride"],
+            "patch_count_match": (
+                None
+                if target["patch_count"] is None
+                else source_patch_count == target["patch_count"]
+            ),
+            "source_to_target_stride_change_allowed": True,
+        },
+    )
+
+
 def load_patchtst_pretrained_backbone(
         model,
         pretrain_ckpt_path: str,
@@ -353,6 +526,11 @@ def load_patchtst_pretrained_backbone(
     raw_state, meta = _load_pretrain_blob(pretrain_ckpt_path)
     raw_state = _strip_common_prefixes(raw_state)
     raw_state = _drop_revin_stats(raw_state)
+    (
+        pretrain_contract,
+        target_patching,
+        patching_compatibility,
+    ) = _validate_pretrain_contract(meta, model)
 
     model_state = model.state_dict()
     d_model, n_layers = _infer_supervised_encoder_spec(model)
@@ -433,6 +611,9 @@ def load_patchtst_pretrained_backbone(
     return {
         "checkpoint_path": str(pretrain_ckpt_path),
         "transfer_scope": "backbone_only",
+        "pretrain_contract": pretrain_contract,
+        "target_patching": target_patching,
+        "patching_compatibility": patching_compatibility,
         "transferred_key_count": len(transferred),
         "transferred_keys": sorted(transferred),
         "initialized_backbone_keys": initialized_backbone_keys,

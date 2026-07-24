@@ -32,6 +32,8 @@ def test_dsio_runner_defaults_match_executable_model_contracts():
     assert args.mode == "both"
     assert args.training_mode == "qualification"
     assert args.ssl_mode == "sl_only"
+    assert args.ssl_pretrain_stride is None
+    assert args.ssl_mask_ratio == 0.3
     assert args.lookback == 52
     assert args.horizon == 27
     assert args.train_end_week == 202544
@@ -79,6 +81,8 @@ def test_linux_wrapper_uses_the_same_non_deprecated_endo_defaults():
     assert 'TRAIN_END_WEEK="${TRAIN_END_WEEK:-202544}"' in wrapper
     assert 'FORECAST_ORIGIN="${FORECAST_ORIGIN:-202545}"' in wrapper
     assert 'SEED="${SEED:-42}"' in wrapper
+    assert 'SSL_PRETRAIN_STRIDE="${SSL_PRETRAIN_STRIDE:-}"' in wrapper
+    assert '--ssl-pretrain-stride "$SSL_PRETRAIN_STRIDE"' in wrapper
 
 
 def test_dsio_runner_can_reproduce_the_previous_patchtst_capacity():
