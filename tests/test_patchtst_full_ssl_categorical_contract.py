@@ -131,6 +131,7 @@ def _full_training_request(
         ssl=SSLConfig(
             mode="full",
             pretrain_epochs=1,
+            pretrain_stride=2,
             mask_ratio=1.0,
             loss_type="mse",
             freeze_encoder_before_ft=False,
@@ -230,6 +231,15 @@ def test_pretrain_transfer_changes_only_supervised_backbone(
     )
 
     assert report["transfer_scope"] == "backbone_only"
+    assert report["pretrain_contract"] is None
+    assert report["patching_compatibility"] == {
+        "validation": "legacy_shape_only",
+        "patch_len_match": None,
+        "input_channels_match": None,
+        "stride_match": None,
+        "patch_count_match": None,
+        "source_to_target_stride_change_allowed": True,
+    }
     assert report["transferred_key_count"] > 0
     assert all(
         key.startswith("backbone.")
@@ -428,6 +438,43 @@ def test_public_full_ssl_categorical_train_save_load_forecast_has_no_leakage(
         pretrain_checkpoint["validation_mask_seed"],
         int,
     )
+    assert pretrain_checkpoint["pretrain_contract"] == {
+        "format_version": "patchtst.ssl.pretrain.v1",
+        "model_family": "patchtst",
+        "input_scope": "target_history_only",
+        "patching": {
+            "lookback": 4,
+            "patch_len": 2,
+            "stride": 2,
+            "input_channels": 1,
+            "patch_count": 2,
+            "padding": "none",
+            "coverage_mode": "non_overlapping_contiguous",
+            "uncovered_tail": 0,
+        },
+        "masking": {
+            "unit": "patch",
+            "mask_ratio": 1.0,
+            "loss_type": "mse",
+        },
+        "transfer_target": {
+            "patch_len": 2,
+            "supervised_stride": 1,
+        },
+    }
+    assert load_report["pretrain_contract"] == pretrain_checkpoint[
+        "pretrain_contract"
+    ]
+    assert load_report["target_patching"]["stride"] == 1
+    assert load_report["target_patching"]["input_channels"] == 1
+    assert load_report["patching_compatibility"] == {
+        "validation": "versioned_contract",
+        "patch_len_match": True,
+        "input_channels_match": True,
+        "stride_match": False,
+        "patch_count_match": False,
+        "source_to_target_stride_change_allowed": True,
+    }
     assert not any(
         key.startswith(
             (
@@ -457,6 +504,18 @@ def test_public_full_ssl_categorical_train_save_load_forecast_has_no_leakage(
         ]
         == vocabulary_artifact.fingerprint
     )
+    assert (
+        final_checkpoint["meta"]["ssl_pretrain_contract"]
+        == pretrain_checkpoint["pretrain_contract"]
+    )
+    assert final_checkpoint["meta"]["ssl_backbone_transfer"][
+        "patching_compatibility"
+    ] == load_report["patching_compatibility"]
+
+    manifest = json.loads(
+        Path(result.manifest_path).read_text(encoding="utf-8")
+    )
+    assert manifest["request"]["ssl_pretrain_stride"] == 2
 
     predictor = load_predictor(
         result.primary_ckpt_path,

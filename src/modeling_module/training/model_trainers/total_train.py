@@ -397,6 +397,39 @@ def _training_checkpoint_meta(
     return meta
 
 
+def _patchtst_ssl_checkpoint_meta(
+    *,
+    use_ssl_mode: str,
+    pretrain_ckpt_path: Optional[str],
+    result: Mapping[str, Any],
+) -> Dict[str, Any]:
+    if use_ssl_mode != "full" or pretrain_ckpt_path is None:
+        return {}
+
+    meta: Dict[str, Any] = {
+        "ssl_mode": "full",
+        "ssl_pretrain_checkpoint": str(pretrain_ckpt_path),
+    }
+    report = result.get("pretrain_load_report")
+    if not isinstance(report, Mapping):
+        return meta
+
+    contract = report.get("pretrain_contract")
+    if contract is not None:
+        meta["ssl_pretrain_contract"] = contract
+    meta["ssl_backbone_transfer"] = {
+        key: report.get(key)
+        for key in (
+            "transfer_scope",
+            "transferred_key_count",
+            "initialized_backbone_keys",
+            "target_patching",
+            "patching_compatibility",
+        )
+    }
+    return meta
+
+
 def _make_ckpt_path(save_dir: Path, freq: str, model_name: str, lookback: int, horizon: int) -> Path:
     save_dir.mkdir(parents=True, exist_ok=True)
     fname = f"{freq}_{model_name}_L{lookback}_H{horizon}.pt"
@@ -1080,6 +1113,7 @@ def _run_patchtst(
     use_exogenous_mode: bool = True,
     use_ssl_mode: SSLMode = "sl_only",
     ssl_pretrain_epochs: int = 10,
+    ssl_pretrain_stride: Optional[int] = None,
     ssl_mask_ratio: float = 0.3,
     ssl_loss_type: str = "mse",
     ssl_freeze_encoder_before_ft: bool = False,
@@ -1174,6 +1208,15 @@ def _run_patchtst(
     if architecture_override:
         pt_kwargs.update({key: value for key, value in dict(architecture_override).items() if value is not None})
 
+    supervised_stride = int(pt_kwargs["stride"])
+    pretrain_stride = (
+        supervised_stride
+        if ssl_pretrain_stride is None or use_ssl_mode == "sl_only"
+        else int(ssl_pretrain_stride)
+    )
+    if use_ssl_mode in ("ssl_only", "full") and pretrain_stride <= 0:
+        raise ValueError("ssl_pretrain_stride must be positive.")
+
     if use_exogenous_mode:
         pt_kwargs.update(
             dict(
@@ -1210,6 +1253,7 @@ def _run_patchtst(
     # ------------------------------------------------------------
     # 3) SSL pretrain (Optional)
     # ------------------------------------------------------------
+    pretrain_result = None
     if (use_ssl_mode in ("ssl_only", "full")) and (pretrain_ckpt_path is None) and (save_root is not None):
         pretrain_dir = Path(save_root) / "pretrain"
         pretrain_dir.mkdir(parents=True, exist_ok=True)
@@ -1220,14 +1264,21 @@ def _run_patchtst(
         pt_pre_kwargs["future_exo_cat_cardinalities"] = ()
         pt_pre_kwargs["past_exo_cont_dim"] = 0
         pt_pre_kwargs["past_exo_cat_dim"] = 0
+        pt_pre_kwargs["stride"] = pretrain_stride
 
         pt_pre_cfg = PatchTSTConfig(**pt_pre_kwargs)
         pre_model = PatchTSTPretrainModel(cfg=pt_pre_cfg)
 
         pre_stages = [StageConfig(epochs=int(ssl_pretrain_epochs), lr=float(point_train_cfg.lr), spike_enabled=False)]
-        print(f"[SSL] PatchTST Pretrain ({freq.capitalize()}) -> {pretrain_ckpt_path}")
+        print(
+            f"[SSL] PatchTST Pretrain ({freq.capitalize()}) "
+            f"patch_len={pt_pre_cfg.patch_len} "
+            f"pretrain_stride={pt_pre_cfg.stride} "
+            f"supervised_stride={supervised_stride} "
+            f"mask_ratio={ssl_mask_ratio} -> {pretrain_ckpt_path}"
+        )
 
-        _ = train_patchtst_pretrain(
+        pretrain_result = train_patchtst_pretrain(
             pre_model,
             train_loader,
             val_loader,
@@ -1238,11 +1289,17 @@ def _run_patchtst(
             save_dir=str(pretrain_dir),
             ckpt_name="patchtst_pretrain_best.pt",
             device=device,
+            supervised_stride=supervised_stride,
         )
 
     if use_ssl_mode == "ssl_only":
         results["PatchTST SSL"] = {
             "pretrain_ckpt_path": pretrain_ckpt_path,
+            "pretrain_contract": (
+                None
+                if pretrain_result is None
+                else pretrain_result.get("pretrain_contract")
+            ),
             "note": "use_ssl_mode='ssl_only' 이므로 supervised(point/dist/quantile) 학습은 수행하지 않음",
         }
         return
@@ -1314,6 +1371,11 @@ def _run_patchtst(
                         point_train_cfg,
                         stages,
                         best_pt_base,
+                    ),
+                    **_patchtst_ssl_checkpoint_meta(
+                        use_ssl_mode=use_ssl_mode,
+                        pretrain_ckpt_path=pretrain_ckpt_path,
+                        result=best_pt_base,
                     ),
                 },
                 exogenous_schema=checkpoint_exogenous_schema,
@@ -1401,6 +1463,11 @@ def _run_patchtst(
                         quantile_train_cfg,
                         stages,
                         best_pt_q,
+                    ),
+                    **_patchtst_ssl_checkpoint_meta(
+                        use_ssl_mode=use_ssl_mode,
+                        pretrain_ckpt_path=pretrain_ckpt_path,
+                        result=best_pt_q,
                     ),
                 },
                 exogenous_schema=checkpoint_exogenous_schema,
@@ -1947,6 +2014,7 @@ def run_total_train(
     # PatchTST SSL
     use_ssl_mode: SSLMode = "sl_only",
     ssl_pretrain_epochs: int = 10,
+    ssl_pretrain_stride: Optional[int] = None,
     ssl_mask_ratio: float = 0.3,
     ssl_loss_type: str = "mse",
     ssl_freeze_encoder_before_ft: bool = False,
@@ -1989,6 +2057,15 @@ def run_total_train(
 
     use_ssl_mode = _validate_ssl_mode(use_ssl_mode)
     if use_ssl_mode in ("ssl_only", "full"):
+        if int(ssl_pretrain_epochs) <= 0:
+            raise ValueError("ssl_pretrain_epochs must be positive.")
+        if (
+            ssl_pretrain_stride is not None
+            and int(ssl_pretrain_stride) <= 0
+        ):
+            raise ValueError("ssl_pretrain_stride must be positive.")
+        if not 0.0 < float(ssl_mask_ratio) <= 1.0:
+            raise ValueError("ssl_mask_ratio must be in (0, 1].")
         if "patchtst" not in selected_families:
             requested = ", ".join(selected_artifact_keys)
             raise ValueError(
@@ -2081,6 +2158,7 @@ def run_total_train(
                     stride=freq_spec.stride,
                     use_ssl_mode=use_ssl_mode,
                     ssl_pretrain_epochs=ssl_pretrain_epochs,
+                    ssl_pretrain_stride=ssl_pretrain_stride,
                     ssl_mask_ratio=ssl_mask_ratio,
                     ssl_loss_type=ssl_loss_type,
                     ssl_freeze_encoder_before_ft=ssl_freeze_encoder_before_ft,
@@ -2144,6 +2222,7 @@ def run_total_train_weekly(
     loss: Optional[nn.Module] = None,
     use_ssl_mode: SSLMode = "sl_only",
     ssl_pretrain_epochs: int = 10,
+    ssl_pretrain_stride: Optional[int] = None,
     ssl_mask_ratio: float = 0.3,
     ssl_loss_type: str = "mse",
     ssl_freeze_encoder_before_ft: bool = False,
@@ -2172,6 +2251,7 @@ def run_total_train_weekly(
         loss=loss,
         use_ssl_mode=use_ssl_mode,
         ssl_pretrain_epochs=ssl_pretrain_epochs,
+        ssl_pretrain_stride=ssl_pretrain_stride,
         ssl_mask_ratio=ssl_mask_ratio,
         ssl_loss_type=ssl_loss_type,
         ssl_freeze_encoder_before_ft=ssl_freeze_encoder_before_ft,
@@ -2202,6 +2282,7 @@ def run_total_train_monthly(
     loss: Optional[nn.Module] = None,
     use_ssl_mode: SSLMode = "sl_only",
     ssl_pretrain_epochs: int = 2,
+    ssl_pretrain_stride: Optional[int] = None,
     ssl_mask_ratio: float = 0.3,
     ssl_loss_type: str = "mse",
     ssl_freeze_encoder_before_ft: bool = False,
@@ -2230,6 +2311,7 @@ def run_total_train_monthly(
         loss=loss,
         use_ssl_mode=use_ssl_mode,
         ssl_pretrain_epochs=ssl_pretrain_epochs,
+        ssl_pretrain_stride=ssl_pretrain_stride,
         ssl_mask_ratio=ssl_mask_ratio,
         ssl_loss_type=ssl_loss_type,
         ssl_freeze_encoder_before_ft=ssl_freeze_encoder_before_ft,
@@ -2260,6 +2342,7 @@ def run_total_train_daily(
     loss: Optional[nn.Module] = None,
     use_ssl_mode: SSLMode = "sl_only",
     ssl_pretrain_epochs: int = 10,
+    ssl_pretrain_stride: Optional[int] = None,
     ssl_mask_ratio: float = 0.3,
     ssl_loss_type: str = "mse",
     ssl_freeze_encoder_before_ft: bool = False,
@@ -2288,6 +2371,7 @@ def run_total_train_daily(
         loss=loss,
         use_ssl_mode=use_ssl_mode,
         ssl_pretrain_epochs=ssl_pretrain_epochs,
+        ssl_pretrain_stride=ssl_pretrain_stride,
         ssl_mask_ratio=ssl_mask_ratio,
         ssl_loss_type=ssl_loss_type,
         ssl_freeze_encoder_before_ft=ssl_freeze_encoder_before_ft,
@@ -2318,6 +2402,7 @@ def run_total_train_hourly(
     loss: Optional[nn.Module] = None,
     use_ssl_mode: SSLMode = "sl_only",
     ssl_pretrain_epochs: int = 10,
+    ssl_pretrain_stride: Optional[int] = None,
     ssl_mask_ratio: float = 0.3,
     ssl_loss_type: str = "mse",
     ssl_freeze_encoder_before_ft: bool = False,
@@ -2346,6 +2431,7 @@ def run_total_train_hourly(
         loss=loss,
         use_ssl_mode=use_ssl_mode,
         ssl_pretrain_epochs=ssl_pretrain_epochs,
+        ssl_pretrain_stride=ssl_pretrain_stride,
         ssl_mask_ratio=ssl_mask_ratio,
         ssl_loss_type=ssl_loss_type,
         ssl_freeze_encoder_before_ft=ssl_freeze_encoder_before_ft,

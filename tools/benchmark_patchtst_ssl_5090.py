@@ -24,6 +24,8 @@ RUNNER = ROOT / "src/model_test/total_train/dsio_total_running.py"
 EVALUATOR = ROOT / "tools/evaluate_dsio_qualification.py"
 MODEL_KEY = "patchtst_base"
 MODES = ("sl_only", "full")
+PATCH_LEN = 13
+SUPERVISED_STRIDE = 6
 
 
 def _utc_now() -> str:
@@ -168,6 +170,8 @@ def _runner_command(
     mode: str,
     seed: int,
     pretrain_epochs: int,
+    pretrain_stride: int,
+    mask_ratio: float,
     supervised_epochs: int,
     batch_size: int,
     num_workers: int,
@@ -188,6 +192,10 @@ def _runner_command(
         mode,
         "--ssl-pretrain-epochs",
         str(pretrain_epochs),
+        "--ssl-pretrain-stride",
+        str(pretrain_stride),
+        "--ssl-mask-ratio",
+        str(mask_ratio),
         "--lookback",
         "52",
         "--horizon",
@@ -223,6 +231,10 @@ def _runner_command(
         "2",
         "--patchtst-d-ff",
         "512",
+        "--patch-len",
+        str(PATCH_LEN),
+        "--stride",
+        str(SUPERVISED_STRIDE),
     ]
 
 
@@ -318,7 +330,43 @@ def _read_pretrain_metadata(case_root: Path) -> dict[str, Any] | None:
         "best_epoch": checkpoint.get("best_epoch"),
         "best_validation_loss": checkpoint.get("best_val"),
         "validation_mask_seed": checkpoint.get("validation_mask_seed"),
+        "pretrain_contract": checkpoint.get("pretrain_contract"),
         "history": checkpoint.get("history", []),
+    }
+
+
+def _case_conditions(
+    *,
+    mode: str,
+    pretrain_epochs: int,
+    pretrain_stride: int,
+    mask_ratio: float,
+    supervised_epochs: int,
+    batch_size: int,
+    num_workers: int,
+) -> dict[str, Any]:
+    return {
+        "lookback": 52,
+        "horizon": 27,
+        "train_end_week": 202544,
+        "forecast_origin": 202545,
+        "validation_origin": 202518,
+        "window_stride": 4,
+        "supervised_epochs": supervised_epochs,
+        "pretrain_epochs": pretrain_epochs if mode == "full" else 0,
+        "patch_len": PATCH_LEN,
+        "supervised_stride": SUPERVISED_STRIDE,
+        "pretrain_stride": (
+            pretrain_stride if mode == "full" else None
+        ),
+        "mask_ratio": mask_ratio if mode == "full" else None,
+        "batch_size": batch_size,
+        "num_workers": num_workers,
+        "patchtst_capacity": {
+            "d_model": 128,
+            "n_layers": 2,
+            "d_ff": 512,
+        },
     }
 
 
@@ -330,6 +378,8 @@ def run_case(
     mode: str,
     seed: int,
     pretrain_epochs: int,
+    pretrain_stride: int,
+    mask_ratio: float,
     supervised_epochs: int,
     batch_size: int,
     num_workers: int,
@@ -339,11 +389,26 @@ def run_case(
 ) -> dict[str, Any]:
     if mode not in MODES:
         raise ValueError(f"Unsupported mode: {mode}")
+    expected_conditions = _case_conditions(
+        mode=mode,
+        pretrain_epochs=pretrain_epochs,
+        pretrain_stride=pretrain_stride,
+        mask_ratio=mask_ratio,
+        supervised_epochs=supervised_epochs,
+        batch_size=batch_size,
+        num_workers=num_workers,
+    )
     case_root = phase_root / mode / f"seed_{seed}"
     record_path = case_root / "benchmark_runtime.json"
     if resume and record_path.is_file():
         record = _read_json(record_path)
         if record.get("status") == "complete":
+            if record.get("conditions") != expected_conditions:
+                raise RuntimeError(
+                    "Completed benchmark case does not match the requested "
+                    "SSL patching contract. Use a new artifact root or rerun "
+                    "with --no-resume."
+                )
             if "supervised_selection" not in record:
                 record["supervised_selection"] = (
                     _read_supervised_selection(case_root)
@@ -366,6 +431,8 @@ def run_case(
             mode=mode,
             seed=seed,
             pretrain_epochs=pretrain_epochs,
+            pretrain_stride=pretrain_stride,
+            mask_ratio=mask_ratio,
             supervised_epochs=supervised_epochs,
             batch_size=batch_size,
             num_workers=num_workers,
@@ -399,23 +466,7 @@ def run_case(
         "status": "complete",
         "mode": mode,
         "seed": seed,
-        "conditions": {
-            "lookback": 52,
-            "horizon": 27,
-            "train_end_week": 202544,
-            "forecast_origin": 202545,
-            "validation_origin": 202518,
-            "window_stride": 4,
-            "supervised_epochs": supervised_epochs,
-            "pretrain_epochs": pretrain_epochs if mode == "full" else 0,
-            "batch_size": batch_size,
-            "num_workers": num_workers,
-            "patchtst_capacity": {
-                "d_model": 128,
-                "n_layers": 2,
-                "d_ff": 512,
-            },
-        },
+        "conditions": expected_conditions,
         "training": training,
         "evaluation": evaluation,
         "metrics": _read_qualification_metric(case_root),
@@ -707,7 +758,11 @@ def _write_case_csv(records: Sequence[Mapping[str, Any]], path: Path) -> None:
         "checkpoint_sha256",
     ]
     with path.open("w", newline="", encoding="utf-8") as stream:
-        writer = csv.DictWriter(stream, fieldnames=fieldnames)
+        writer = csv.DictWriter(
+            stream,
+            fieldnames=fieldnames,
+            lineterminator="\n",
+        )
         writer.writeheader()
         for record in records:
             writer.writerow(
@@ -756,6 +811,8 @@ def _add_common_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--target-source", type=Path, required=True)
     parser.add_argument("--artifact-root", type=Path, required=True)
     parser.add_argument("--pretrain-epochs", type=int, required=True)
+    parser.add_argument("--pretrain-stride", type=int, default=13)
+    parser.add_argument("--mask-ratio", type=float, default=0.4)
     parser.add_argument("--supervised-epochs", type=int, required=True)
     parser.add_argument("--batch-size", type=int, default=1024)
     parser.add_argument("--num-workers", type=int, default=8)
@@ -791,6 +848,10 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise FileNotFoundError(args.target_source)
     if args.pretrain_epochs <= 0:
         raise ValueError("--pretrain-epochs must be positive.")
+    if args.pretrain_stride <= 0:
+        raise ValueError("--pretrain-stride must be positive.")
+    if not 0.0 < args.mask_ratio <= 1.0:
+        raise ValueError("--mask-ratio must be in (0, 1].")
     if args.supervised_epochs <= 0:
         raise ValueError("--supervised-epochs must be positive.")
     if args.batch_size <= 0:
@@ -810,6 +871,8 @@ def _common_case_kwargs(args: argparse.Namespace) -> dict[str, Any]:
         "python": args.python.absolute(),
         "target_source": args.target_source.resolve(),
         "pretrain_epochs": args.pretrain_epochs,
+        "pretrain_stride": args.pretrain_stride,
+        "mask_ratio": args.mask_ratio,
         "supervised_epochs": args.supervised_epochs,
         "batch_size": args.batch_size,
         "num_workers": args.num_workers,
@@ -850,10 +913,10 @@ def run_pilot(args: argparse.Namespace) -> dict[str, Any]:
             if key != "history"
         },
         "overlap_exposure_diagnostic": calculate_overlap_exposure(
-            patch_len=13,
-            stride=6,
-            patch_count=((52 - 13) // 6) + 1,
-            mask_ratio=0.3,
+            patch_len=PATCH_LEN,
+            stride=args.pretrain_stride,
+            patch_count=((52 - PATCH_LEN) // args.pretrain_stride) + 1,
+            mask_ratio=args.mask_ratio,
         ),
         "analysis": analysis,
     }
@@ -889,6 +952,8 @@ def run_comparison(args: argparse.Namespace) -> dict[str, Any]:
             "experiment": {
                 "seeds": list(args.seeds),
                 "pretrain_epochs": args.pretrain_epochs,
+                "pretrain_stride": args.pretrain_stride,
+                "mask_ratio": args.mask_ratio,
                 "supervised_epochs": args.supervised_epochs,
                 "execution_order": (
                     "alternating sl_only/full by seed index"

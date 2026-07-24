@@ -95,6 +95,9 @@ class SSLConfig:
       `ssl_only` runs only SSL pretraining.
       `full` runs SSL pretraining and then supervised finetuning.
     - `pretrain_epochs`: Number of SSL pretraining epochs.
+    - `pretrain_stride`: Optional PatchTST patch stride used only during SSL
+      pretraining. If omitted, the supervised model stride is reused for
+      backward compatibility.
     - `mask_ratio`: Masking ratio used by PatchTST pretraining.
     - `loss_type`: Reconstruction loss type for SSL pretraining.
     - `freeze_encoder_before_ft`: Optionally freeze encoder blocks at the beginning of finetuning.
@@ -105,6 +108,7 @@ class SSLConfig:
     """
     mode: Optional[str] = None
     pretrain_epochs: Optional[int] = None
+    pretrain_stride: Optional[int] = None
     mask_ratio: Optional[float] = None
     loss_type: Optional[str] = None
     freeze_encoder_before_ft: Optional[bool] = None
@@ -363,8 +367,9 @@ class TrainRequest:
     - `save_dir`, `auto_save_dir`
     - `use_exogenous_mode`, `use_past_exogenous`, `use_future_exogenous`
     - `loss`, `loss_point`, `loss_quantile`
-    - `use_ssl_mode`, `ssl_pretrain_epochs`, `ssl_mask_ratio`, `ssl_loss_type`,
-      `ssl_freeze_encoder_before_ft`, `ssl_pretrained_ckpt_path`
+    - `use_ssl_mode`, `ssl_pretrain_epochs`, `ssl_pretrain_stride`,
+      `ssl_mask_ratio`, `ssl_loss_type`, `ssl_freeze_encoder_before_ft`,
+      `ssl_pretrained_ckpt_path`
     - `use_intermittent`, `val_use_weights`
     """
     config_path: Optional[str] = None
@@ -406,6 +411,7 @@ class TrainRequest:
 
     use_ssl_mode: Optional[str] = None
     ssl_pretrain_epochs: Optional[int] = None
+    ssl_pretrain_stride: Optional[int] = None
     ssl_mask_ratio: Optional[float] = None
     ssl_loss_type: Optional[str] = None
     ssl_freeze_encoder_before_ft: Optional[bool] = None
@@ -750,6 +756,8 @@ def _normalize_payload(raw: Mapping[str, Any]) -> dict[str, Any]:
             "use_ssl_mode": "use_ssl_mode",
             "pretrain_epochs": "ssl_pretrain_epochs",
             "ssl_pretrain_epochs": "ssl_pretrain_epochs",
+            "pretrain_stride": "ssl_pretrain_stride",
+            "ssl_pretrain_stride": "ssl_pretrain_stride",
             "mask_ratio": "ssl_mask_ratio",
             "ssl_mask_ratio": "ssl_mask_ratio",
             "loss_type": "ssl_loss_type",
@@ -1153,8 +1161,21 @@ def _validate_ssl_artifact_precondition(payload: Mapping[str, Any]) -> None:
             "`ssl.mode` must be one of: 'sl_only', 'ssl_only', 'full', or 'off'. "
             f"Got {payload.get('use_ssl_mode')!r}."
         )
+
     if ssl_mode not in _SSL_ARTIFACT_MODES:
         return
+
+    pretrain_epochs = payload.get("ssl_pretrain_epochs")
+    if pretrain_epochs is not None and int(pretrain_epochs) <= 0:
+        raise ValueError("`ssl.pretrain_epochs` must be a positive integer.")
+
+    pretrain_stride = payload.get("ssl_pretrain_stride")
+    if pretrain_stride is not None and int(pretrain_stride) <= 0:
+        raise ValueError("`ssl.pretrain_stride` must be a positive integer.")
+
+    mask_ratio = payload.get("ssl_mask_ratio")
+    if mask_ratio is not None and not 0.0 < float(mask_ratio) <= 1.0:
+        raise ValueError("`ssl.mask_ratio` must be in the interval (0, 1].")
 
     requested_models = payload.get("models_to_run") or expand_training_targets(None)
     if not any(_family_from_training_target(model) == "patchtst" for model in requested_models):
@@ -1435,6 +1456,7 @@ def train(req: TrainRequest | Mapping[str, Any]) -> TrainResult:
     )
     use_ssl_mode = payload.get("use_ssl_mode") or "sl_only"
     ssl_pretrain_epochs = payload.get("ssl_pretrain_epochs")
+    ssl_pretrain_stride = payload.get("ssl_pretrain_stride")
     ssl_mask_ratio = payload.get("ssl_mask_ratio")
     ssl_loss_type = payload.get("ssl_loss_type")
     ssl_freeze_encoder_before_ft = payload.get("ssl_freeze_encoder_before_ft")
@@ -1462,6 +1484,11 @@ def train(req: TrainRequest | Mapping[str, Any]) -> TrainResult:
         loss=payload.get("loss"),
         use_ssl_mode=str(use_ssl_mode),
         ssl_pretrain_epochs=int(ssl_pretrain_epochs if ssl_pretrain_epochs is not None else 10),
+        ssl_pretrain_stride=(
+            None
+            if ssl_pretrain_stride is None
+            else int(ssl_pretrain_stride)
+        ),
         ssl_mask_ratio=float(ssl_mask_ratio if ssl_mask_ratio is not None else 0.3),
         ssl_loss_type=str(ssl_loss_type or "mse"),
         ssl_freeze_encoder_before_ft=bool(

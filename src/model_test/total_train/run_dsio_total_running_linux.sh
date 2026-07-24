@@ -12,6 +12,9 @@ TRAINING_MODE="${TRAINING_MODE:-qualification}"
 ENDO_MODELS="${ENDO_MODELS:-patchtst patchmixer nhits timemixer}"
 EXO_MODELS="${EXO_MODELS:-exotst timexer}"
 SSL_MODE="${SSL_MODE:-sl_only}"
+SSL_PRETRAIN_EPOCHS="${SSL_PRETRAIN_EPOCHS:-2}"
+SSL_PRETRAIN_STRIDE="${SSL_PRETRAIN_STRIDE:-}"
+SSL_MASK_RATIO="${SSL_MASK_RATIO:-0.3}"
 LOOKBACK="${LOOKBACK:-52}"
 HORIZON="${HORIZON:-27}"
 TRAIN_END_WEEK="${TRAIN_END_WEEK:-202544}"
@@ -40,6 +43,8 @@ CMD=(
   --artifact-root "$ARTIFACT_ROOT"
   --target-source "$TARGET_SOURCE"
   --ssl-mode "$SSL_MODE"
+  --ssl-pretrain-epochs "$SSL_PRETRAIN_EPOCHS"
+  --ssl-mask-ratio "$SSL_MASK_RATIO"
   --lookback "$LOOKBACK"
   --horizon "$HORIZON"
   --train-end-week "$TRAIN_END_WEEK"
@@ -50,6 +55,10 @@ CMD=(
   --spike-epochs "$SPIKE_EPOCHS"
   --seed "$SEED"
 )
+
+if [[ -n "$SSL_PRETRAIN_STRIDE" ]]; then
+  CMD+=(--ssl-pretrain-stride "$SSL_PRETRAIN_STRIDE")
+fi
 
 if [[ ${#ENDO_MODELS_ARR[@]} -gt 0 ]]; then
   CMD+=(--endo-models "${ENDO_MODELS_ARR[@]}")
@@ -84,6 +93,9 @@ echo "[run] TRAINING_MODE=$TRAINING_MODE"
 echo "[run] ENDO_MODELS=$ENDO_MODELS"
 echo "[run] EXO_MODELS=$EXO_MODELS"
 echo "[run] SSL_MODE=$SSL_MODE"
+echo "[run] SSL_PRETRAIN_EPOCHS=$SSL_PRETRAIN_EPOCHS"
+echo "[run] SSL_PRETRAIN_STRIDE=$SSL_PRETRAIN_STRIDE"
+echo "[run] SSL_MASK_RATIO=$SSL_MASK_RATIO"
 echo "[run] LOOKBACK=$LOOKBACK"
 echo "[run] HORIZON=$HORIZON"
 echo "[run] TRAIN_END_WEEK=$TRAIN_END_WEEK"

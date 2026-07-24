@@ -69,7 +69,13 @@ class PatchTSTPretrainModel(nn.Module):
     def __init__(self, cfg: PatchTSTConfig, attn_core=None):
         super().__init__()
         self.cfg = cfg
-        self.n_vars = int(getattr(cfg, "n_vars", getattr(cfg, "enc_in", 1)))
+        self.n_vars = int(
+            getattr(
+                cfg,
+                "n_vars",
+                getattr(cfg, "enc_in", getattr(cfg, "c_in", 1)),
+            )
+        )
         self.patch_len = int(getattr(cfg, "patch_len", 16))
         self.stride = int(getattr(cfg, "stride", self.patch_len))
 
