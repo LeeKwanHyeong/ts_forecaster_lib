@@ -121,12 +121,54 @@ def _lookup_float_sequence(
     return output
 
 
+def _lookup_int_sequence(
+    query_dates: Sequence[int],
+    value_map: Dict[int, int],
+    *,
+    unk_id: int,
+    fill_missing: str,
+    target_back_steps: int,
+    freq: str,
+    earliest: int,
+) -> np.ndarray:
+    """Resolve categorical IDs using UNK for values that cannot be found."""
+    output = np.empty(len(query_dates), dtype=np.int64)
+    for index, current_date in enumerate(query_dates):
+        normalized_date = int(current_date)
+        if normalized_date in value_map:
+            output[index] = np.int64(value_map[normalized_date])
+            continue
+        if fill_missing in {"zero", "nan"}:
+            output[index] = np.int64(unk_id)
+            continue
+
+        previous = normalized_date
+        found = False
+        for _ in range(target_back_steps):
+            previous = _add_time(previous, -1, freq)
+            if previous < earliest:
+                break
+            if previous in value_map:
+                output[index] = np.int64(value_map[previous])
+                found = True
+                break
+        if not found:
+            output[index] = np.int64(unk_id)
+    return output
+
+
 # ============================================================
 # 1) Training Dataset (index_map 기반)
 # ============================================================
 class MultiPartExoTrainingDataset(Dataset):
     """
     슬라이딩 윈도우(Sliding Window) 학습용 Dataset.
+
+    Sample contract:
+      - Without future categorical features:
+        ``(x, y, uid, future_cont_or_start, past_cont, past_cat)``
+      - With future categorical features, ``future_cat[H, E_cat]`` is appended
+        as the seventh value.
 
     성능 최적화 포인트:
       - __init__에서 dtype을 확정(float32/int64) → __getitem__에서 .to(dtype) 호출 제거
@@ -147,6 +189,7 @@ class MultiPartExoTrainingDataset(Dataset):
         past_exo_cont_cols: Optional[Sequence[str]] = None,
         past_exo_cat_cols: Optional[Sequence[str]] = None,
         future_exo_cont_cols: Optional[Sequence[str]] = None,
+        future_exo_cat_cols: Optional[Sequence[str]] = None,
         future_exo_cb: Optional[Callable] = None,  # kept for signature compatibility
         date_indexer: Optional[Callable[[int], int]] = None,
         cat_indexers: Optional[Dict[str, Any]] = None,
@@ -162,6 +205,7 @@ class MultiPartExoTrainingDataset(Dataset):
         self.past_exo_cont_cols = list(past_exo_cont_cols) if past_exo_cont_cols else []
         self.past_exo_cat_cols = list(past_exo_cat_cols) if past_exo_cat_cols else []
         self.future_exo_cont_cols = list(future_exo_cont_cols) if future_exo_cont_cols else []
+        self.future_exo_cat_cols = list(future_exo_cat_cols) if future_exo_cat_cols else []
 
         self.future_exo_cb = future_exo_cb
         self.date_indexer = date_indexer or identity_date_indexer
@@ -229,12 +273,46 @@ class MultiPartExoTrainingDataset(Dataset):
                 if cat_list else np.zeros((T, 0), dtype=np.int64)
             )
 
+            future_cat_list: List[np.ndarray] = []
+            for col in self.future_exo_cat_cols:
+                if col not in g.columns:
+                    continue
+                series = g[col]
+                if series.dtype in (
+                    pl.Int8,
+                    pl.Int16,
+                    pl.Int32,
+                    pl.Int64,
+                    pl.UInt8,
+                    pl.UInt16,
+                    pl.UInt32,
+                    pl.UInt64,
+                ):
+                    encoded = _to_numpy(series).astype(np.int64, copy=False)
+                else:
+                    if col not in self.cat_indexers:
+                        raise TypeError(
+                            f"Categorical '{col}' needs a categorical vocabulary "
+                            "or integer IDs."
+                        )
+                    encoded = self.cat_indexers[col].map_series(series)
+                future_cat_list.append(
+                    _to_numpy(encoded).astype(np.int64, copy=False)
+                )
+
+            future_exo_cat = (
+                np.stack(future_cat_list, axis=-1).astype(np.int64, copy=False)
+                if future_cat_list
+                else np.zeros((T, 0), dtype=np.int64)
+            )
+
             self.series[uid] = {
                 "y": y_all,
                 "d": d_all,
                 "exo_cont": exo_cont,
                 "exo_cat": exo_cat,
                 "future_exo_cont": future_exo_cont,
+                "future_exo_cat": future_exo_cat,
             }
 
             n_windows = T - self.lookback - self.horizon + 1
@@ -252,6 +330,36 @@ class MultiPartExoTrainingDataset(Dataset):
     def __len__(self) -> int:
         return len(self.index_map)
 
+    def source_row_positions_for_windows(
+        self,
+        indices: Sequence[int],
+    ) -> Dict[str, Tuple[int, ...]]:
+        """Return source-row offsets referenced by selected training windows.
+
+        Each selected window contributes both its lookback rows and forecast
+        horizon rows because future categorical inputs come from the latter.
+        Offsets refer to each series after temporal normalization and sorting.
+        """
+        masks: Dict[str, np.ndarray] = {}
+        window_width = self.lookback + self.horizon
+        for raw_index in indices:
+            index = int(raw_index)
+            if index < 0 or index >= len(self.index_map):
+                raise IndexError(
+                    f"Window index {index} is outside [0, {len(self.index_map) - 1}]."
+                )
+            uid, start = self.index_map[index]
+            mask = masks.setdefault(
+                uid,
+                np.zeros(len(self.series[uid]["y"]), dtype=np.bool_),
+            )
+            mask[start:start + window_width] = True
+
+        return {
+            uid: tuple(int(position) for position in np.flatnonzero(mask))
+            for uid, mask in masks.items()
+        }
+
     def __getitem__(self, idx: int):
         uid, i = self.index_map[idx]
         pack = self.series[uid]
@@ -261,6 +369,7 @@ class MultiPartExoTrainingDataset(Dataset):
         exo_cont: np.ndarray = pack["exo_cont"] # float32, (T, E_cont)
         exo_cat: np.ndarray = pack["exo_cat"]   # int64,   (T, E_cat)
         future_exo_cont: np.ndarray = pack["future_exo_cont"]
+        future_exo_cat: np.ndarray = pack["future_exo_cat"]
 
         L = self.lookback
         H = self.horizon
@@ -270,6 +379,7 @@ class MultiPartExoTrainingDataset(Dataset):
         pe_cont = exo_cont[i:i + L]          # (L, E_cont) float32
         pe_cat = exo_cat[i:i + L]            # (L, E_cat)  int64
         fe_cont = future_exo_cont[i + L:i + L + H]
+        fe_cat = future_exo_cat[i + L:i + L + H]
 
         last_dt = int(d_all[i + L - 1])
         next_dt = _add_time(last_dt, 1, self.freq)
@@ -279,10 +389,21 @@ class MultiPartExoTrainingDataset(Dataset):
         y = torch.from_numpy(y_win)                    # float32
         pe_cont_t = torch.from_numpy(pe_cont)          # float32
         pe_cat_t = torch.from_numpy(pe_cat)            # int64 == torch.long
+        future_cat_t = torch.from_numpy(fe_cat)         # int64 == torch.long
 
         future_payload: int | torch.Tensor = start_idx
         if fe_cont.shape[-1] > 0:
             future_payload = torch.from_numpy(fe_cont)
+        if self.future_exo_cat_cols:
+            return (
+                x,
+                y,
+                uid,
+                future_payload,
+                pe_cont_t,
+                pe_cat_t,
+                future_cat_t,
+            )
         return x, y, uid, future_payload, pe_cont_t, pe_cat_t
 
 
@@ -292,6 +413,9 @@ class MultiPartExoTrainingDataset(Dataset):
 class MultiPartExoAnchoredInferenceDataset(Dataset):
     """
     특정 시점(plan_dt)을 기준으로 과거 데이터를 조회하여 추론 입력을 생성하는 Dataset.
+
+    The sample contract matches ``MultiPartExoTrainingDataset`` and appends
+    ``future_cat[H, E_cat]`` only when future categorical columns are configured.
 
     성능 최적화 포인트:
       - __init__에서 numpy dtype을 확정(float32/int64) 후 저장
@@ -313,6 +437,7 @@ class MultiPartExoAnchoredInferenceDataset(Dataset):
         past_exo_cont_cols: Optional[Sequence[str]] = None,
         past_exo_cat_cols: Optional[Sequence[str]] = None,
         future_exo_cont_cols: Optional[Sequence[str]] = None,
+        future_exo_cat_cols: Optional[Sequence[str]] = None,
         series_ids: Optional[Sequence[str]] = None,
         unknown_series_policy: Literal["error", "ignore"] = "error",
         fill_missing: str = "ffill",
@@ -333,6 +458,7 @@ class MultiPartExoAnchoredInferenceDataset(Dataset):
         self.past_exo_cont_cols = list(past_exo_cont_cols) if past_exo_cont_cols else []
         self.past_exo_cat_cols = list(past_exo_cat_cols) if past_exo_cat_cols else []
         self.future_exo_cont_cols = list(future_exo_cont_cols) if future_exo_cont_cols else []
+        self.future_exo_cat_cols = list(future_exo_cat_cols) if future_exo_cat_cols else []
 
         self.fill_missing = fill_missing
         self.target_back_steps = int(target_back_steps)
@@ -348,6 +474,7 @@ class MultiPartExoAnchoredInferenceDataset(Dataset):
         self.past_exo_conts: List[np.ndarray] = []
         self.past_exo_cats: List[np.ndarray] = []
         self.future_exo_conts: List[np.ndarray] = []
+        self.future_exo_cats: List[np.ndarray] = []
 
         normalized_df = normalize_temporal_frame(df, self.date_col, self.freq)
         selected_df = _select_series_frame(
@@ -519,10 +646,57 @@ class MultiPartExoAnchoredInferenceDataset(Dataset):
                 if future_cont_list else np.zeros((self.horizon, 0), dtype=np.float32)
             )
 
+            future_cat_list: List[np.ndarray] = []
+            for col in self.future_exo_cat_cols:
+                if col not in g.columns:
+                    continue
+                series = g[col]
+                if series.dtype in (
+                    pl.Int8,
+                    pl.Int16,
+                    pl.Int32,
+                    pl.Int64,
+                    pl.UInt8,
+                    pl.UInt16,
+                    pl.UInt32,
+                    pl.UInt64,
+                ):
+                    encoded = _to_numpy(series).astype(np.int64, copy=False)
+                    unk_id = 0
+                else:
+                    indexer = self.cat_indexers.get(col)
+                    if indexer is None:
+                        encoded = np.zeros(len(series), dtype=np.int64)
+                        unk_id = 0
+                    else:
+                        encoded = indexer.map_series(series)
+                        unk_id = int(getattr(indexer, "unk_id", 0))
+                value_map = {
+                    int(dt): int(value)
+                    for dt, value in zip(dts, encoded)
+                }
+                future_cat_list.append(
+                    _lookup_int_sequence(
+                        future_dates,
+                        value_map,
+                        unk_id=unk_id,
+                        fill_missing=self.fill_missing,
+                        target_back_steps=self.target_back_steps,
+                        freq=self.freq,
+                        earliest=earliest,
+                    )
+                )
+            fe_cat = (
+                np.stack(future_cat_list, axis=-1).astype(np.int64, copy=False)
+                if future_cat_list
+                else np.zeros((self.horizon, 0), dtype=np.int64)
+            )
+
             self.inputs.append(x.astype(np.float32, copy=False))
             self.past_exo_conts.append(pe_cont_mat)
             self.past_exo_cats.append(pe_cat_mat)
             self.future_exo_conts.append(fe.astype(np.float32, copy=False))
+            self.future_exo_cats.append(fe_cat)
             self.ids.append(uid)
 
     def __len__(self) -> int:
@@ -539,4 +713,7 @@ class MultiPartExoAnchoredInferenceDataset(Dataset):
 
         fe = torch.from_numpy(self.future_exo_conts[idx])
         future_payload: int | torch.Tensor = fe if fe.shape[-1] > 0 else start_idx
+        if self.future_exo_cat_cols:
+            future_cat = torch.from_numpy(self.future_exo_cats[idx])
+            return x, y_dummy, uid, future_payload, peC, peK, future_cat
         return x, y_dummy, uid, future_payload, peC, peK

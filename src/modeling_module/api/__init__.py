@@ -1,4 +1,7 @@
 from .data import (
+    CATEGORICAL_UNK_ID,
+    CategoricalVocabulary,
+    CategoricalVocabularyArtifact,
     DataColumnConfig,
     DataRequest,
     DataWindowConfig,
@@ -35,6 +38,9 @@ from .train import (
 __all__ = [
     "ArtifactConfig",
     "ArchitectureConfig",
+    "CATEGORICAL_UNK_ID",
+    "CategoricalVocabulary",
+    "CategoricalVocabularyArtifact",
     "DataColumnConfig",
     "DataRequest",
     "DataWindowConfig",

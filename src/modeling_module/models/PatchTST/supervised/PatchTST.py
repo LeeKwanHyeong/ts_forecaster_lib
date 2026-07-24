@@ -3,12 +3,17 @@ from torch import nn
 import torch.nn.functional as F
 
 from modeling_module.models.PatchTST.common import compute_patch_num
-from modeling_module.models.PatchTST.common.configs import PatchTSTConfig
+from modeling_module.models.PatchTST.common.configs import (
+    PatchTSTConfig,
+    validate_patchtst_future_categorical_config,
+)
 from modeling_module.models.PatchTST.heads.distribution_head import DistHeadWithExo
 from modeling_module.models.PatchTST.heads.point_head import PointHeadWithExo
 from modeling_module.models.PatchTST.heads.quantile_head import QuantileHeadWithExo
 from modeling_module.models.PatchTST.supervised.backbone import SupervisedBackbone
 from modeling_module.models.common_layers.RevIN import RevIN
+
+from .future_categorical import FutureCategoricalEmbedding
 
 
 def _validate_future_exo_contract(
@@ -59,6 +64,109 @@ def _validate_future_exo_contract(
         )
 
 
+def _bind_future_categorical_config(model: nn.Module, cfg: PatchTSTConfig) -> None:
+    cardinalities, embedding_dim = validate_patchtst_future_categorical_config(
+        cfg
+    )
+    model.future_exo_cat_cardinalities = cardinalities
+    model.future_exo_cat_dim = len(cardinalities)
+    model.future_exo_cat_embedding_dim = embedding_dim
+    model.future_exo_token_dim = int(
+        getattr(cfg, "future_exo_dim", getattr(cfg, "d_future", 0))
+    ) + len(cardinalities) * embedding_dim
+    model.future_cat_embedding = (
+        FutureCategoricalEmbedding(
+            cardinalities=cardinalities,
+            embedding_dim=embedding_dim,
+            horizon=int(cfg.horizon),
+        )
+        if cardinalities
+        else None
+    )
+
+
+def _encode_future_categorical(
+    model: nn.Module,
+    future_exo_cat: torch.Tensor | None,
+    *,
+    batch_size: int | None = None,
+) -> torch.Tensor | None:
+    embedding = model.future_cat_embedding
+    if embedding is None:
+        if future_exo_cat is not None:
+            raise RuntimeError(
+                "[PatchTST] future_exo_cat is not accepted when no future "
+                "categorical cardinalities are configured."
+            )
+        return None
+    if future_exo_cat is None:
+        raise RuntimeError(
+            "[PatchTST] future_exo_cat is required when future categorical "
+            f"width={model.future_exo_cat_dim}; expected shape "
+            f"({batch_size or 'B'}, {embedding.horizon}, "
+            f"{model.future_exo_cat_dim})."
+        )
+    return embedding(future_exo_cat, batch_size=batch_size)
+
+
+def _build_future_exogenous_tokens(
+    model: nn.Module,
+    future_exo: torch.Tensor | None,
+    future_exo_cat: torch.Tensor | None,
+    *,
+    batch_size: int,
+) -> torch.Tensor | None:
+    _validate_future_exo_contract(
+        future_exo,
+        batch_size=batch_size,
+        horizon=model.horizon,
+        expected_dim=model.d_future,
+    )
+    if (
+        future_exo is not None
+        and model.d_future > 0
+        and not torch.is_floating_point(future_exo)
+    ):
+        raise TypeError(
+            "[PatchTST] future_exo must use a floating dtype, "
+            f"got {future_exo.dtype}."
+        )
+
+    future_cat_embedding = _encode_future_categorical(
+        model,
+        future_exo_cat,
+        batch_size=batch_size,
+    )
+    token_parts: list[torch.Tensor] = []
+    if model.d_future > 0:
+        if future_exo is None:  # guarded by _validate_future_exo_contract
+            raise RuntimeError("[PatchTST] future_exo validation did not resolve an input.")
+        token_parts.append(future_exo)
+    if future_cat_embedding is not None:
+        token_parts.append(future_cat_embedding)
+
+    if not token_parts:
+        return None
+    if len(token_parts) == 1:
+        tokens = token_parts[0]
+    else:
+        devices = {part.device for part in token_parts}
+        if len(devices) != 1:
+            raise ValueError(
+                "future_exo and future_exo_cat embeddings must share one "
+                f"device, got {sorted(map(str, devices))}."
+            )
+        tokens = torch.cat(token_parts, dim=-1)
+
+    if int(tokens.shape[-1]) != int(model.future_exo_token_dim):
+        raise RuntimeError(
+            "[PatchTST] combined future token width mismatch: "
+            f"got {int(tokens.shape[-1])}, "
+            f"expected {int(model.future_exo_token_dim)}."
+        )
+    return tokens
+
+
 class FutureExoTokenFusion(nn.Module):
     """
     Token-wise future exogenous fusion for PatchTST.
@@ -78,9 +186,10 @@ class FutureExoTokenFusion(nn.Module):
         dropout: float = 0.1,
     ):
         super().__init__()
-        self.d_future = int(d_future)
+        self.input_dim = int(d_future)
+        self.d_future = self.input_dim
         self.horizon = int(horizon)
-        self.future_proj = nn.Linear(self.d_future, int(d_model))
+        self.future_proj = nn.Linear(self.input_dim, int(d_model))
         self.future_pos = nn.Parameter(torch.zeros(1, self.horizon, int(d_model)))
         nn.init.normal_(self.future_pos, mean=0.0, std=0.02)
 
@@ -107,7 +216,7 @@ class FutureExoTokenFusion(nn.Module):
         self.ff_gate = nn.Parameter(torch.tensor(-2.0))
 
     def forward(self, z: torch.Tensor, future_exo: torch.Tensor | None) -> torch.Tensor:
-        if self.d_future <= 0 or future_exo is None:
+        if self.input_dim <= 0 or future_exo is None:
             return z
 
         if future_exo.dim() == 2:
@@ -123,8 +232,11 @@ class FutureExoTokenFusion(nn.Module):
             raise RuntimeError(f"[PatchTST-FutureFusion] batch mismatch: {b2} != {z.size(0)}")
         if H != self.horizon:
             raise RuntimeError(f"[PatchTST-FutureFusion] horizon mismatch: {H} != {self.horizon}")
-        if D != self.d_future:
-            raise RuntimeError(f"[PatchTST-FutureFusion] future_exo dim mismatch: {D} != {self.d_future}")
+        if D != self.input_dim:
+            raise RuntimeError(
+                "[PatchTST-FutureFusion] future token dim mismatch: "
+                f"{D} != {self.input_dim}"
+            )
 
         exo_tokens = self.future_proj(future_exo) + self.future_pos[:, :H, :]
         exo_tokens = self.memory_norm(self.dropout(exo_tokens))
@@ -174,7 +286,7 @@ class PatchTSTModel(nn.Module):
         super().__init__()
         self.model_name = 'PatchTSTModel'
         self.cfg = cfg
-
+        _bind_future_categorical_config(self, cfg)
 
         self.attn_type = getattr(cfg.attn.attn_core, "type", "full").lower()
         self.lookback = int(getattr(cfg, 'lookback', 52))
@@ -236,10 +348,11 @@ class PatchTSTModel(nn.Module):
 
     def _rebuild_future_exo_path(self, d_future: int) -> None:
         self.d_future = int(d_future)
-        if self.d_future > 0:
+        fusion_input_dim = int(self.future_exo_token_dim)
+        if fusion_input_dim > 0:
             self.future_fuser = FutureExoTokenFusion(
                 d_model=self.d_model,
-                d_future=self.d_future,
+                d_future=fusion_input_dim,
                 horizon=self.horizon,
                 n_heads=int(getattr(self.cfg.attn, 'n_heads', 8)),
                 dropout=_resolve_future_exo_fusion_dropout(self.cfg),
@@ -247,21 +360,47 @@ class PatchTSTModel(nn.Module):
         else:
             self.future_fuser = None
 
+    def encode_future_categorical(
+        self,
+        future_exo_cat: torch.Tensor | None,
+        *,
+        batch_size: int | None = None,
+    ) -> torch.Tensor | None:
+        return _encode_future_categorical(
+            self,
+            future_exo_cat,
+            batch_size=batch_size,
+        )
+
+    def build_future_exogenous_tokens(
+        self,
+        future_exo: torch.Tensor | None,
+        future_exo_cat: torch.Tensor | None,
+        *,
+        batch_size: int,
+    ) -> torch.Tensor | None:
+        return _build_future_exogenous_tokens(
+            self,
+            future_exo,
+            future_exo_cat,
+            batch_size=batch_size,
+        )
+
     def forward(
             self,
             x: torch.Tensor,
             future_exo: torch.Tensor | None = None,
+            future_exo_cat: torch.Tensor | None = None,
             past_exo_cont: torch.Tensor | None = None,
             past_exo_cat: torch.Tensor | None = None,
             # part_ids = None,
             # mode: str | None = None,
             **kwargs
     ):
-        _validate_future_exo_contract(
+        future_tokens = self.build_future_exogenous_tokens(
             future_exo,
+            future_exo_cat,
             batch_size=x.size(0),
-            horizon=self.horizon,
-            expected_dim=self.d_future,
         )
 
         # 1) 입력 정규화
@@ -272,7 +411,7 @@ class PatchTSTModel(nn.Module):
 
         # 2.5) Token-wise future exo fusion before the head
         if self.future_fuser is not None:
-            z = self.future_fuser(z, future_exo)
+            z = self.future_fuser(z, future_tokens)
 
         # 3) Head Forecasting (Inject Future Exogenous)
         head_future_exo = future_exo if self._head_future_dim() > 0 else None
@@ -343,6 +482,7 @@ class PatchTSTQuantileModel(nn.Module):
     def __init__(self, cfg, attn_core=None):
         super().__init__()
         self.cfg = cfg
+        _bind_future_categorical_config(self, cfg)
         # 백본 초기화
         self.attn_type = getattr(cfg.attn.attn_core, "type", "full").lower()
         self.backbone = SupervisedBackbone(cfg, self.attn_type)
@@ -375,10 +515,11 @@ class PatchTSTQuantileModel(nn.Module):
 
     def _rebuild_future_exo_path(self, d_future: int) -> None:
         self.d_future = int(d_future)
-        if self.d_future > 0:
+        fusion_input_dim = int(self.future_exo_token_dim)
+        if fusion_input_dim > 0:
             self.future_fuser = FutureExoTokenFusion(
                 d_model=int(self.cfg.d_model),
-                d_future=self.d_future,
+                d_future=fusion_input_dim,
                 horizon=int(self.cfg.horizon),
                 n_heads=int(getattr(self.cfg.attn, 'n_heads', 8)),
                 dropout=_resolve_future_exo_fusion_dropout(self.cfg),
@@ -386,10 +527,37 @@ class PatchTSTQuantileModel(nn.Module):
         else:
             self.future_fuser = None
 
+    def encode_future_categorical(
+        self,
+        future_exo_cat: torch.Tensor | None,
+        *,
+        batch_size: int | None = None,
+    ) -> torch.Tensor | None:
+        return _encode_future_categorical(
+            self,
+            future_exo_cat,
+            batch_size=batch_size,
+        )
+
+    def build_future_exogenous_tokens(
+        self,
+        future_exo: torch.Tensor | None,
+        future_exo_cat: torch.Tensor | None,
+        *,
+        batch_size: int,
+    ) -> torch.Tensor | None:
+        return _build_future_exogenous_tokens(
+            self,
+            future_exo,
+            future_exo_cat,
+            batch_size=batch_size,
+        )
+
     def forward(
             self,
             x: torch.Tensor,
             future_exo: torch.Tensor | None = None,
+            future_exo_cat: torch.Tensor | None = None,
             past_exo_cont: torch.Tensor | None = None,
             past_exo_cat: torch.Tensor | None = None,
             part_ids=None,
@@ -401,13 +569,11 @@ class PatchTSTQuantileModel(nn.Module):
         Returns:
             {"q": [B, H, Quantiles]} 딕셔너리 반환.
         """
-        _validate_future_exo_contract(
+        future_tokens = self.build_future_exogenous_tokens(
             future_exo,
+            future_exo_cat,
             batch_size=x.size(0),
-            horizon=self.horizon,
-            expected_dim=self.d_future,
         )
-
         use_revin = getattr(self.cfg, "use_revin", True)
 
         # 1) 입력 정규화
@@ -417,7 +583,7 @@ class PatchTSTQuantileModel(nn.Module):
         z = self.backbone(x_n, past_exo_cont=past_exo_cont, past_exo_cat=past_exo_cat)  # [B, N, d_model]
 
         if self.future_fuser is not None:
-            z = self.future_fuser(z, future_exo)
+            z = self.future_fuser(z, future_tokens)
 
         # 3) 헤드 예측 -> [B, H, Q]
         head_future_exo = future_exo if self._head_future_dim() > 0 else None

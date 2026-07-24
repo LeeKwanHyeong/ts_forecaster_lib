@@ -559,7 +559,14 @@ def test_train_rejects_explicit_exogenous_models_without_features(
 
 @pytest.mark.parametrize(
     "model_key",
-    ["patchtst_base", "patchmixer_exo", "titan_base", "exotst_base"],
+    [
+        "patchtst_base",
+        "patchtst_exogenous",
+        "patchtst_quantile_exogenous",
+        "patchmixer_exo",
+        "titan_base",
+        "exotst_base",
+    ],
 )
 def test_train_rejects_categorical_exogenous_inputs_before_model_construction(
     monkeypatch,
@@ -605,3 +612,50 @@ def test_train_rejects_categorical_exogenous_inputs_before_model_construction(
         )
 
     assert reached_training is False
+
+
+def test_train_allows_future_categorical_columns_to_reach_training_runtime(
+    monkeypatch,
+    tmp_path,
+):
+    train_module = importlib.import_module("modeling_module.api.train")
+    reached_training = False
+
+    class TrainingRuntimeReached(RuntimeError):
+        pass
+
+    def expected_training(*args, **kwargs):
+        nonlocal reached_training
+        reached_training = True
+        raise TrainingRuntimeReached
+
+    monkeypatch.setattr(train_module, "run_total_train", expected_training)
+
+    with pytest.raises(
+        TrainingRuntimeReached,
+    ):
+        train(
+            {
+                "data": {
+                    "df": _make_daily_df_with_categorical_exo(),
+                    "lookback": 14,
+                    "horizon": 2,
+                    "freq": "daily",
+                    "batch_size": 2,
+                    "pin_memory": False,
+                    "past_exo_cont_cols": ["exo_hist"],
+                    "future_exo_cont_cols": ["promo_flag"],
+                    "future_exo_cat_cols": ["segment_id"],
+                },
+                "models": ["patchtst_exogenous"],
+                "use_exogenous_mode": True,
+                "use_past_exogenous": True,
+                "use_future_exogenous": True,
+                "trainer": {"epochs": 1, "lr": 1e-3},
+                "device": "cpu",
+                "save_dir": str(tmp_path / "patchtst-future-cat"),
+                "auto_save_dir": False,
+            }
+        )
+
+    assert reached_training is True

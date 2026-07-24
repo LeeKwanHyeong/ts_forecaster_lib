@@ -1,7 +1,69 @@
-from typing import Optional, Literal, Tuple, List
+from numbers import Integral
+from typing import Any, Optional, Literal, Tuple, List
 from dataclasses import dataclass, field
 
 from modeling_module.training.config import TrainingConfig, DecompositionConfig
+
+
+def validate_patchtst_future_categorical_config(
+    config: Any,
+) -> tuple[tuple[int, ...], int]:
+    """Normalize and validate PatchTST future-categorical architecture metadata."""
+    raw_cardinalities = getattr(
+        config,
+        "future_exo_cat_cardinalities",
+        (),
+    )
+    if raw_cardinalities is None:
+        raw_cardinalities = ()
+    if isinstance(raw_cardinalities, (str, bytes)):
+        raise ValueError(
+            "future_exo_cat_cardinalities must be a sequence of positive integers."
+        )
+
+    try:
+        cardinality_values = tuple(raw_cardinalities)
+    except TypeError as exc:
+        raise ValueError(
+            "future_exo_cat_cardinalities must be a sequence of positive integers."
+        ) from exc
+
+    cardinalities: list[int] = []
+    for value in cardinality_values:
+        if isinstance(value, bool) or not isinstance(value, Integral):
+            raise ValueError(
+                "future_exo_cat_cardinalities must contain positive integers; "
+                f"got {value!r}."
+            )
+        normalized = int(value)
+        if normalized <= 0:
+            raise ValueError(
+                "future_exo_cat_cardinalities must contain positive integers; "
+                f"got {normalized}."
+            )
+        cardinalities.append(normalized)
+
+    raw_embedding_dim = getattr(
+        config,
+        "future_exo_cat_embedding_dim",
+        8,
+    )
+    if isinstance(raw_embedding_dim, bool) or not isinstance(
+        raw_embedding_dim,
+        Integral,
+    ):
+        raise ValueError(
+            "future_exo_cat_embedding_dim must be a positive integer; "
+            f"got {raw_embedding_dim!r}."
+        )
+    embedding_dim = int(raw_embedding_dim)
+    if embedding_dim <= 0:
+        raise ValueError(
+            "future_exo_cat_embedding_dim must be positive; "
+            f"got {embedding_dim}."
+        )
+
+    return tuple(cardinalities), embedding_dim
 
 
 # =========================
@@ -81,6 +143,8 @@ class PatchTSTConfig(TrainingConfig):
 
     # ---------- 미래 외생 변수 (Future Exogenous) ----------
     future_exo_dim: int = 0  # 미래 연속형 외생 변수 개수 (토큰 단위 cross-attention으로 결합)
+    future_exo_cat_cardinalities: Tuple[int, ...] = ()
+    future_exo_cat_embedding_dim: int = 8
     future_exo_fusion_dropout: float = 0.1
 
     # ---------- 인코더(백본) 구조 설정 ----------
@@ -106,6 +170,17 @@ class PatchTSTConfig(TrainingConfig):
     attn: AttentionConfig = field(default_factory=AttentionConfig)
     head: HeadConfig = field(default_factory=HeadConfig)
     decomp: DecompositionConfig = field(default_factory=DecompositionConfig)
+
+    def __post_init__(self) -> None:
+        cardinalities, embedding_dim = validate_patchtst_future_categorical_config(
+            self
+        )
+        self.future_exo_cat_cardinalities = cardinalities
+        self.future_exo_cat_embedding_dim = embedding_dim
+
+    @property
+    def future_exo_cat_dim(self) -> int:
+        return len(self.future_exo_cat_cardinalities)
 
 
 # =========================

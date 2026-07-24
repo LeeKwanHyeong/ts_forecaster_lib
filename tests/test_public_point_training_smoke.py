@@ -696,7 +696,15 @@ FUTURE_EXOGENOUS_SENSITIVITY_CASES = [
         2,
         4,
         "point",
-        id="patchtst-point",
+        id="patchtst-point-legacy-routing",
+    ),
+    pytest.param(
+        "patchtst_exogenous",
+        _tiny_patchtst_architecture(),
+        2,
+        4,
+        "point",
+        id="patchtst-exogenous-point",
     ),
     pytest.param(
         "patchmixer_exo",
@@ -720,7 +728,15 @@ FUTURE_EXOGENOUS_SENSITIVITY_CASES = [
         2,
         4,
         "q50",
-        id="patchtst-quantile",
+        id="patchtst-quantile-legacy-routing",
+    ),
+    pytest.param(
+        "patchtst_quantile_exogenous",
+        _tiny_patchtst_architecture(),
+        2,
+        4,
+        "q50",
+        id="patchtst-quantile-exogenous",
     ),
 ]
 

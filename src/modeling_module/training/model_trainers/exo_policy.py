@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Optional, Callable, Tuple
 
 import torch
+from modeling_module.data_loader.exogenous_contracts import ExogenousFeatureSchema
 from modeling_module.utils.exogenous_utils import compose_exo_calendar_cb
 
 try:
@@ -37,8 +38,18 @@ def infer_exo_batch_index(batch, *, lookback: Optional[int] = None, horizon: Opt
     # ------------------------------------------------------------------
     # (0) MultiPartExoDataModule 확정 레이아웃 (가장 우선)
     #   - train/val loader: (x, y, uid_list, fe, pe_cont, pe_cat)  len=6
+    #   - with future categorical: (..., pe_cat, fe_cat)            len=7
     #   - inference loader: (x, id, fe, pe_cont, pe_cat)          len=5
     # ------------------------------------------------------------------
+    if n == 7:
+        if (
+            torch.is_tensor(batch[0])
+            and torch.is_tensor(batch[1])
+            and isinstance(batch[2], list)
+            and all(torch.is_tensor(batch[i]) for i in (3, 4, 5, 6))
+        ):
+            return ExoBatchIndex(idx_fe=3, idx_pe_cont=4, idx_pe_cat=5)
+
     if n == 6:
         # TrainCollateWithFutureExo.__call__의 반환 형식 그대로
         # x: Tensor[B,L,1], y: Tensor[B,H], uid_list: list[str], fe: Tensor[B,H,E], pe_cont: Tensor[B,L,E], pe_cat: Tensor[B,L,K]
@@ -99,7 +110,13 @@ def infer_exo_batch_index(batch, *, lookback: Optional[int] = None, horizon: Opt
         if not torch.is_tensor(v) or v.ndim != 3:
             continue
         t = int(v.shape[1])
-        if horizon is not None and t == int(horizon) and idx_fe is None and v.shape[-1] > 0:
+        if (
+            horizon is not None
+            and t == int(horizon)
+            and idx_fe is None
+            and v.shape[-1] > 0
+            and v.dtype not in (torch.int32, torch.int64)
+        ):
             idx_fe = i
         if lookback is not None and t == int(lookback):
             if v.dtype in (torch.int32, torch.int64):
@@ -110,6 +127,27 @@ def infer_exo_batch_index(batch, *, lookback: Optional[int] = None, horizon: Opt
                     idx_pe_cont = i
 
     return ExoBatchIndex(idx_fe, idx_pe_cont, idx_pe_cat)
+
+
+def infer_future_cat_cardinalities_from_loader(loader) -> tuple[int, ...]:
+    """Read fitted future-category cardinalities from a loader schema."""
+    schema = getattr(loader, "exogenous_schema", None)
+    if schema is None:
+        schema = getattr(getattr(loader, "dataset", None), "exogenous_schema", None)
+    if schema is None:
+        return ()
+    if not isinstance(schema, ExogenousFeatureSchema):
+        raise TypeError(
+            "loader.exogenous_schema must be an ExogenousFeatureSchema."
+        )
+    if not schema.future_cat_names:
+        return ()
+    if len(schema.future_cat_cardinalities) != len(schema.future_cat_names):
+        raise ValueError(
+            "Future categorical features require one fitted cardinality per "
+            "feature before model configuration."
+        )
+    return tuple(schema.future_cat_cardinalities)
 
 
 # -----------------------------
@@ -239,6 +277,10 @@ def resolve_exogenous(
     - allow_past_only=True는 legacy compat 용도이며, future가 없을 때 callback fallback 없이 past-only 유지
     """
     has_fe, fe_dim = infer_future_exo_spec_from_loader(train_loader, lookback=lookback, horizon=horizon)
+    future_cat_cardinalities = infer_future_cat_cardinalities_from_loader(
+        train_loader
+    )
+    has_future_cat = bool(future_cat_cardinalities)
     d_past_cont, d_past_cat = infer_past_exo_dim_from_loader_for_exotst(train_loader, lookback=lookback, horizon=horizon)
     has_past = bool(d_past_cont > 0 or d_past_cat > 0)
 
@@ -246,7 +288,8 @@ def resolve_exogenous(
         f"[exo_policy] use_exo={use_exogenous_mode}, "
         f"use_past={use_past_exogenous}, "
         f"use_future={use_future_exogenous} | "
-        f"future(has={has_fe}, dim={fe_dim}) | "
+        f"future(has={has_fe}, dim={fe_dim}, "
+        f"cat={future_cat_cardinalities}) | "
         f"past(cont={d_past_cont}, cat={d_past_cat})"
     )
 
@@ -311,6 +354,19 @@ def resolve_exogenous(
             exo_dim=int(fe_dim),
             future_exo_cb=None,
             source="loader",
+            past_cont_dim=effective_past_cont_dim,
+            past_cat_dim=effective_past_cat_dim,
+            has_loader_past_exo=effective_has_past,
+        )
+
+    if has_future_cat:
+        return ExoSpec(
+            use_exogenous_mode=True,
+            has_loader_future_exo=True,
+            loader_exo_dim=0,
+            exo_dim=0,
+            future_exo_cb=None,
+            source="loader_categorical",
             past_cont_dim=effective_past_cont_dim,
             past_cat_dim=effective_past_cat_dim,
             has_loader_past_exo=effective_has_past,

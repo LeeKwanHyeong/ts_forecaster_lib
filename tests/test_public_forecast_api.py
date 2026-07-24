@@ -9,17 +9,23 @@ from typing import Any
 import numpy as np
 import polars as pl
 import pytest
+import torch
 from polars.testing import assert_frame_equal
 
 from modeling_module import (
     DataRequest,
+    ExogenousConfig,
     ForecastRequest,
     ForecastResult,
     ForecastRuntimeConfig,
     forecast,
 )
 from modeling_module.models.PatchTST.common.configs import AttentionConfig, PatchTSTConfig
-from modeling_module.models.model_builder import build_patchTST, build_patchTST_quantile
+from modeling_module.models.model_builder import (
+    build_patchTST,
+    build_patchTST_exogenous,
+    build_patchTST_quantile,
+)
 from modeling_module.utils.checkpoint import save_model
 
 
@@ -114,6 +120,88 @@ def _make_quantile_checkpoint(path: Path) -> None:
     )
 
 
+def _make_exogenous_point_checkpoint(path: Path) -> None:
+    """Write a deterministic PatchTST checkpoint with both continuous exo paths."""
+    torch.manual_seed(20260724)
+    config = PatchTSTConfig(
+        lookback=8,
+        horizon=2,
+        patch_len=4,
+        stride=2,
+        d_model=16,
+        d_ff=32,
+        n_layers=1,
+        dropout=0.0,
+        future_exo_dim=1,
+        future_exo_fusion_dropout=0.0,
+        past_exo_cont_dim=1,
+        past_exo_cat_dim=0,
+        use_exogenous_mode=True,
+        use_revin=False,
+        attn=AttentionConfig(
+            n_heads=4,
+            d_model=16,
+            attn_dropout=0.0,
+            proj_dropout=0.0,
+        ),
+    )
+    model = build_patchTST_exogenous(config)
+    save_model(
+        model,
+        config,
+        str(path),
+        extra_meta={
+            "model_key": "patchtst_exogenous",
+            "family_key": "patchtst",
+        },
+    )
+
+
+def _exogenous_point_request(
+    checkpoint_path: Path,
+    *,
+    future_values: tuple[float, float],
+) -> ForecastRequest:
+    rows = [
+        {
+            "unique_id": "A",
+            "date": 20240100 + day,
+            "y": float(day),
+            "exo_known": (
+                0.25
+                if day <= 8
+                else float(future_values[day - 9])
+            ),
+        }
+        for day in range(1, 11)
+    ]
+    return ForecastRequest(
+        checkpoint_path=checkpoint_path,
+        expected_model_key="patchtst_exogenous",
+        data=DataRequest(
+            df=pl.DataFrame(rows),
+            lookback=8,
+            horizon=2,
+            freq="daily",
+            exogenous=ExogenousConfig(
+                use_exogenous_mode=True,
+                use_past_exogenous=True,
+                use_future_exogenous=True,
+                past_exo_cont_cols=["exo_known"],
+                future_exo_cont_cols=["exo_known"],
+            ),
+        ),
+        series_ids=["A"],
+        forecast_origin=20240109,
+        runtime=ForecastRuntimeConfig(
+            batch_size=1,
+            num_workers=0,
+            device="cpu",
+            pin_memory=False,
+        ),
+    )
+
+
 def _point_request(
     checkpoint_path: Path,
     *,
@@ -173,6 +261,37 @@ def test_forecast_row_identity_and_values_are_batch_size_independent(tmp_path: P
     two = forecast(_point_request(checkpoint_path, batch_size=2)).predictions
 
     assert_frame_equal(one, two, check_exact=False, rtol=1e-6, atol=1e-6)
+
+
+def test_forecast_patchtst_continuous_future_exogenous_values_are_active(
+    tmp_path: Path,
+) -> None:
+    checkpoint_path = tmp_path / "patchtst-exogenous.pt"
+    _make_exogenous_point_checkpoint(checkpoint_path)
+
+    low = forecast(
+        _exogenous_point_request(
+            checkpoint_path,
+            future_values=(0.0, 0.0),
+        )
+    ).predictions
+    low_repeat = forecast(
+        _exogenous_point_request(
+            checkpoint_path,
+            future_values=(0.0, 0.0),
+        )
+    ).predictions
+    high = forecast(
+        _exogenous_point_request(
+            checkpoint_path,
+            future_values=(1.0, -0.5),
+        )
+    ).predictions
+
+    assert low.schema == high.schema == EXPECTED_SCHEMA
+    assert low["model_key"].to_list() == ["patchtst_exogenous"] * 2
+    np.testing.assert_array_equal(low["point"].to_numpy(), low_repeat["point"].to_numpy())
+    assert float(np.max(np.abs(low["point"].to_numpy() - high["point"].to_numpy()))) > 1e-6
 
 
 def test_forecast_rejects_checkpoint_model_key_mismatch(tmp_path: Path) -> None:

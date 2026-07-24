@@ -187,6 +187,44 @@ def test_explicit_exogenous_fusion_has_input_gradients(builder, config):
     assert float(future.grad.abs().sum()) > 0.0
 
 
+def test_patchtst_continuous_exogenous_paths_are_independently_active():
+    torch.manual_seed(20260724)
+    model = build_patchTST_exogenous(_patchtst_config(exogenous=True)).eval()
+    x = torch.linspace(-1.0, 1.0, steps=16).reshape(2, 8, 1)
+    past_base = torch.zeros(2, 8, 1)
+    past_changed = torch.linspace(-0.5, 0.75, steps=16).reshape(2, 8, 1)
+    future_base = torch.zeros(2, 2, 1)
+    future_changed = torch.tensor([[[1.0], [0.0]], [[0.5], [-0.5]]])
+
+    with torch.no_grad():
+        baseline = model(
+            x,
+            past_exo_cont=past_base,
+            future_exo=future_base,
+        )
+        repeat = model(
+            x,
+            past_exo_cont=past_base,
+            future_exo=future_base,
+        )
+        past_result = model(
+            x,
+            past_exo_cont=past_changed,
+            future_exo=future_base,
+        )
+        future_result = model(
+            x,
+            past_exo_cont=past_base,
+            future_exo=future_changed,
+        )
+
+    assert baseline.shape == (2, 2)
+    assert torch.isfinite(baseline).all()
+    torch.testing.assert_close(repeat, baseline, rtol=0.0, atol=0.0)
+    assert float((past_result - baseline).abs().max()) > 1e-6
+    assert float((future_result - baseline).abs().max()) > 1e-6
+
+
 @pytest.mark.parametrize(
     ("builder", "config", "fusion_strategy"),
     (

@@ -125,7 +125,34 @@ class TrainCollateWithFutureExo:
 
     def __call__(self, batch):
         """Collate target, series IDs, and all supported exogenous payloads."""
-        xs, ys, uids, start_idxs, pe_conts, pe_cats = zip(*batch)
+        if not batch:
+            raise ValueError("Cannot collate an empty batch.")
+
+        sample_lengths = {len(sample) for sample in batch}
+        if len(sample_lengths) != 1:
+            raise ValueError(
+                "All exogenous Dataset samples in one batch must use the same "
+                f"tuple length; got {sorted(sample_lengths)}."
+            )
+        sample_length = sample_lengths.pop()
+        if sample_length == 6:
+            xs, ys, uids, start_idxs, pe_conts, pe_cats = zip(*batch)
+            future_cats = None
+        elif sample_length == 7:
+            (
+                xs,
+                ys,
+                uids,
+                start_idxs,
+                pe_conts,
+                pe_cats,
+                future_cats,
+            ) = zip(*batch)
+        else:
+            raise ValueError(
+                "Exogenous Dataset samples must be 6-tuples or 7-tuples; "
+                f"got length {sample_length}."
+            )
 
         x = self._stack_float(xs)
         y = self._stack_float(ys)
@@ -135,13 +162,27 @@ class TrainCollateWithFutureExo:
 
         B = len(start_idxs)
         H = int(self.horizon)
+        future_cat = None
+        if future_cats is not None:
+            future_cat = self._stack_int(future_cats)
+            if future_cat.ndim != 3 or tuple(future_cat.shape[:2]) != (B, H):
+                raise ValueError(
+                    "future_cat payload must be shaped "
+                    f"(B,H,E); got {tuple(future_cat.shape)}."
+                )
+
+        def finalize(fe: torch.Tensor):
+            output = (x, y, uid_list, fe, pe_cont, pe_cat)
+            if future_cat is not None:
+                return (*output, future_cat)
+            return output
 
         first_payload = start_idxs[0]
         if torch.is_tensor(first_payload) or isinstance(first_payload, np.ndarray):
             fe = self._stack_float(start_idxs)
             if fe.ndim != 3 or tuple(fe.shape[:2]) != (B, H):
                 raise ValueError(f"future_exo payload must be shaped (B,H,E); got {tuple(fe.shape)}")
-            return x, y, uid_list, fe, pe_cont, pe_cat
+            return finalize(fe)
 
         # -----------------------------------------
         # 1) auto fe (callback)
@@ -224,4 +265,4 @@ class TrainCollateWithFutureExo:
             components = [value for value in (fe_auto, fe_manual, fe_part) if value is not None]
             fe = components[0] if len(components) == 1 else torch.cat(components, dim=-1)
 
-        return x, y, uid_list, fe, pe_cont, pe_cat
+        return finalize(fe)

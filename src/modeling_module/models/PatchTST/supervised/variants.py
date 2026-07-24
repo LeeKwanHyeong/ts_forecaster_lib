@@ -4,6 +4,7 @@ from typing import Any, Optional
 
 import torch
 
+from ..common.configs import validate_patchtst_future_categorical_config
 from .PatchTST import PatchTSTModel, PatchTSTQuantileModel
 
 
@@ -15,16 +16,25 @@ def patchtst_exogenous_widths(cfg: Any) -> tuple[int, int, int]:
     )
 
 
+def patchtst_future_categorical_width(cfg: Any) -> int:
+    cardinalities, _ = validate_patchtst_future_categorical_config(cfg)
+    return len(cardinalities)
+
+
 def patchtst_uses_exogenous_inputs(cfg: Any) -> bool:
-    return any(width > 0 for width in patchtst_exogenous_widths(cfg))
+    return any(width > 0 for width in patchtst_exogenous_widths(cfg)) or (
+        patchtst_future_categorical_width(cfg) > 0
+    )
 
 
 def _require_endogenous_config(cfg: Any, *, model_name: str) -> None:
     widths = patchtst_exogenous_widths(cfg)
-    if any(widths):
+    future_cat_width = patchtst_future_categorical_width(cfg)
+    if any(widths) or future_cat_width > 0:
         raise ValueError(
             f"{model_name} requires zero exogenous widths, got "
-            f"past_cont={widths[0]}, past_cat={widths[1]}, future_cont={widths[2]}."
+            f"past_cont={widths[0]}, past_cat={widths[1]}, "
+            f"future_cont={widths[2]}, future_cat={future_cat_width}."
         )
 
 
@@ -39,9 +49,11 @@ def _validate_required_inputs(
     past_exo_cont: Optional[torch.Tensor],
     past_exo_cat: Optional[torch.Tensor],
     future_exo: Optional[torch.Tensor],
+    future_exo_cat: Optional[torch.Tensor],
     model_name: str,
 ) -> None:
     past_cont_width, past_cat_width, future_width = patchtst_exogenous_widths(cfg)
+    future_cat_width = patchtst_future_categorical_width(cfg)
     missing: list[str] = []
     if past_cont_width > 0 and past_exo_cont is None:
         missing.append("past_exo_cont")
@@ -49,6 +61,8 @@ def _validate_required_inputs(
         missing.append("past_exo_cat")
     if future_width > 0 and future_exo is None:
         missing.append("future_exo")
+    if future_cat_width > 0 and future_exo_cat is None:
+        missing.append("future_exo_cat")
     if missing:
         raise RuntimeError(f"{model_name} is missing required inputs: {', '.join(missing)}.")
 
@@ -87,6 +101,7 @@ class PatchTSTExogenousModel(PatchTSTModel):
         self,
         x: torch.Tensor,
         future_exo: Optional[torch.Tensor] = None,
+        future_exo_cat: Optional[torch.Tensor] = None,
         past_exo_cont: Optional[torch.Tensor] = None,
         past_exo_cat: Optional[torch.Tensor] = None,
         **kwargs,
@@ -96,11 +111,13 @@ class PatchTSTExogenousModel(PatchTSTModel):
             past_exo_cont=past_exo_cont,
             past_exo_cat=past_exo_cat,
             future_exo=future_exo,
+            future_exo_cat=future_exo_cat,
             model_name=type(self).__name__,
         )
         return super().forward(
             x,
             future_exo=future_exo,
+            future_exo_cat=future_exo_cat,
             past_exo_cont=past_exo_cont,
             past_exo_cat=past_exo_cat,
             **kwargs,
@@ -141,6 +158,7 @@ class PatchTSTQuantileExogenousModel(PatchTSTQuantileModel):
         self,
         x: torch.Tensor,
         future_exo: Optional[torch.Tensor] = None,
+        future_exo_cat: Optional[torch.Tensor] = None,
         past_exo_cont: Optional[torch.Tensor] = None,
         past_exo_cat: Optional[torch.Tensor] = None,
         part_ids=None,
@@ -152,11 +170,13 @@ class PatchTSTQuantileExogenousModel(PatchTSTQuantileModel):
             past_exo_cont=past_exo_cont,
             past_exo_cat=past_exo_cat,
             future_exo=future_exo,
+            future_exo_cat=future_exo_cat,
             model_name=type(self).__name__,
         )
         return super().forward(
             x,
             future_exo=future_exo,
+            future_exo_cat=future_exo_cat,
             past_exo_cont=past_exo_cont,
             past_exo_cat=past_exo_cat,
             part_ids=part_ids,

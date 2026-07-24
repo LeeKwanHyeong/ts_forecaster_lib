@@ -20,6 +20,9 @@ from .api.infer import predict, load_predictor
 from .api.forecast import ForecastRequest, ForecastResult, ForecastRuntimeConfig, forecast
 from .api.losses import DistributionLoss
 from .api.data import (
+    CATEGORICAL_UNK_ID,
+    CategoricalVocabulary,
+    CategoricalVocabularyArtifact,
     DataColumnConfig,
     DataRequest,
     DataWindowConfig,
@@ -41,6 +44,9 @@ __all__ = [
     'build_dataloader',
     'build_dataset',
     'build_exogenous_schema',
+    'CATEGORICAL_UNK_ID',
+    'CategoricalVocabulary',
+    'CategoricalVocabularyArtifact',
     'TrainRequest',
     'TrainResult',
     'TrainerConfig',
