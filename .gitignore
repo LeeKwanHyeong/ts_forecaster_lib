@@ -14,4 +14,4 @@ __pycache__/
 
 # Generated experiment outputs and imported archives
 artifacts/
-src/model_test/exogenous_test/Archive.zip
+*.zip
