@@ -4,3 +4,10 @@ dist/
 src/*.egg-info/
 __pycache__/
 .pytest_cache/
+.DS_Store
+.agents/
+.serena/
+artifacts/
+*.zip
+.idea/deployment.xml
+.idea/pyProjectModel.xml
