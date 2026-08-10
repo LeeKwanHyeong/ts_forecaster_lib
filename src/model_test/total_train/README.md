@@ -44,6 +44,50 @@ artifact directory와 `training_manifest.json`으로 분리합니다.
 | device | `auto` | 동일 |
 | artifact root | `<repo>/artifacts/total_train` | 동일 |
 
+## Governed V100 H26 production refit
+
+V100 운영 재학습은 위 범용 기본값을 변경하지 않고 전용 도구에서 정확한
+`site=V100`, `train_end=202509`, `lookback=52`, `horizon=26`, `W0..W25`,
+`seed=42`, `production_refit/final_epoch` 계약을 강제합니다. 먼저 Demand Engine이
+봉인한 입력 manifest와 target Hash, 모델별 command를 쓰기 없이 확인합니다.
+
+```bash
+python tools/run_dsio_v100_h26_refit.py \
+  --target-source /path/to/tb_master_target.parquet \
+  --input-manifest /path/to/manifest.json \
+  --output-root "$PWD/artifacts/v100-h26-refit" \
+  --device cuda \
+  --validate-only
+```
+
+`--validate-only`를 제거하면 각 모델을 독립 process로 preflight한 뒤 순차 학습합니다.
+모델별 epoch는 PatchTST 8, PatchTST Quantile 3, PatchMixer 3, N-HiTS 31,
+TimeMixer 33으로 고정되며 checkpoint 파일명은 정확히
+`weekly_<model>_L52_H26.pt`입니다. 기존 output root가 있으면 중복 실행하지 않고
+차단합니다.
+
+학습 후 비활성 Registry Bundle은 public forecast API로 검증하고 W0..W25 Candidate,
+checkpoint SHA-256, input manifest, model signature와 receipt seal을 함께 봉인합니다.
+
+```bash
+python tools/qualify_dsio_v100_h26_checkpoints.py qualify \
+  --registry /path/to/forecaster_weekly_endogenous_production_v1.json \
+  --checkpoint-root /path/to/checkpoints \
+  --input-manifest /path/to/manifest.json \
+  --receipt /path/to/public-forecast-smoke-receipt.json \
+  --device cuda
+```
+
+기존 receipt를 재검증할 때는 모든 외부 파일 Hash와 모델 signature를 다시 계산합니다.
+
+```bash
+python tools/qualify_dsio_v100_h26_checkpoints.py verify-receipt \
+  --registry /path/to/forecaster_weekly_endogenous_production_v1.json \
+  --checkpoint-root /path/to/checkpoints \
+  --input-manifest /path/to/manifest.json \
+  --receipt /path/to/public-forecast-smoke-receipt.json
+```
+
 Family request는 public registry artifact로 확장됩니다.
 
 - `endo_only`: `patchtst_base` → `patchtst_quantile` → `patchmixer` →
