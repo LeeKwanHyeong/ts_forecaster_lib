@@ -14,6 +14,13 @@ from .data import (
     build_exogenous_schema,
 )
 from .infer import LoadedPredictor, load_predictor, predict
+from .lifecycle import (
+    CGMMFitRequest,
+    CGMMFitResult,
+    CGMMForecastRequest,
+    fit_cgmm,
+    forecast_cgmm,
+)
 from .forecast import ForecastRequest, ForecastResult, ForecastRuntimeConfig, forecast
 from .losses import DistributionLoss
 from .train import (
@@ -41,6 +48,9 @@ __all__ = [
     "CATEGORICAL_UNK_ID",
     "CategoricalVocabulary",
     "CategoricalVocabularyArtifact",
+    "CGMMFitRequest",
+    "CGMMFitResult",
+    "CGMMForecastRequest",
     "DataColumnConfig",
     "DataRequest",
     "DataWindowConfig",
@@ -70,6 +80,8 @@ __all__ = [
     "build_dataset",
     "build_exogenous_schema",
     "forecast",
+    "fit_cgmm",
+    "forecast_cgmm",
     "load_predictor",
     "predict",
     "train",

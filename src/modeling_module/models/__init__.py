@@ -40,6 +40,8 @@ __all__ = [
     "build_timemixer",
     "build_timexer",
     "build_sellm",
+    "build_cgmm",
+    "CGMMConfig",
     "PatchMixerConfig",
     "PatchMixerExogenousConfig",
     "TimeMixerConfig",
@@ -48,6 +50,7 @@ __all__ = [
 if TYPE_CHECKING:
     from .model_builder import (
         build_exotst,
+        build_cgmm,
         build_nhits,
         build_timemixer,
         build_sellm,
@@ -63,10 +66,12 @@ if TYPE_CHECKING:
         build_timexer,
     )
     from .PatchMixer.common.configs import PatchMixerConfig, PatchMixerExogenousConfig
+    from .CGMM.configs import CGMMConfig
     from .TimeMixer.configs import TimeMixerConfig
 
 # Lazy import map: import modeling_module.models 시점에 heavy import 방지
 _LAZY = {
+    "build_cgmm": (".model_builder", "build_cgmm"),
     "build_patch_mixer": (".model_builder", "build_patch_mixer"),
     "build_patch_mixer_exogenous": (".model_builder", "build_patch_mixer_exogenous"),
     "build_titan_base": (".model_builder", "build_titan_base"),
@@ -92,6 +97,10 @@ _LAZY = {
     "TimeMixerConfig": (
         ".TimeMixer.configs",
         "TimeMixerConfig",
+    ),
+    "CGMMConfig": (
+        ".CGMM.configs",
+        "CGMMConfig",
     ),
 }
 
