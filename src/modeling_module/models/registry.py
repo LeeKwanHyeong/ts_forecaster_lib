@@ -42,6 +42,28 @@ _TITAN_DEPRECATION_MESSAGE = (
 
 
 MODEL_SPECS: dict[str, ModelSpec] = {
+    "cgmm": ModelSpec(
+        key="cgmm",
+        family="cgmm",
+        builder_module="modeling_module.models.model_builder",
+        builder_attr="build_cgmm",
+        label="Conditional Gaussian Mixture Model",
+        aliases=("conditionalgmm", "lifecyclecgmm", "ltbcgmm"),
+        class_names=(
+            "CGMMForecaster",
+            "ConditionalGaussianMixtureForecaster",
+        ),
+        checkpoint_aliases=("CGMM", "ConditionalGMM"),
+        trainable=False,
+        included_in_family=False,
+        exogenous_policy="lifecycle_conditional",
+        exogenous_inputs=(
+            "static",
+            "observed",
+            "known_future",
+        ),
+        fusion_strategy="joint_condition_target_gaussian_mixture",
+    ),
     "patchtst_base": ModelSpec(
         key="patchtst_base",
         family="patchtst",

@@ -1,6 +1,7 @@
 from dataclasses import fields, is_dataclass, asdict
 from typing import Union, Any, Optional, Mapping
 
+from modeling_module.models.CGMM.configs import CGMMConfig
 from modeling_module.models.ExoTST.configs import ExoTSTConfig
 from modeling_module.models.NHITS.configs import NHITSConfig
 from modeling_module.models.PatchMixer.PatchMixer import PatchMixerModel
@@ -14,6 +15,16 @@ from modeling_module.models.TimeMixer.configs import TimeMixerConfig
 from modeling_module.models.TimeXer.configs import TimeXerConfig
 from modeling_module.models.Titan import TitanBaseModel, TitanLMMModel, TitanSeq2SeqModel
 from modeling_module.models.Titan.common.configs import TitanConfig
+
+
+def build_cgmm(cfg: Any):
+    """Build the lifecycle-specific conditional Gaussian mixture model."""
+
+    from modeling_module.models.CGMM.model import (
+        ConditionalGaussianMixtureForecaster,
+    )
+
+    return ConditionalGaussianMixtureForecaster(CGMMConfig.from_config(cfg))
 
 
 # -----------------------------
