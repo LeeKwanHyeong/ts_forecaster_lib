@@ -11,6 +11,9 @@ from modeling_module.models.PatchMixer.common.configs import (
 )
 from modeling_module.models.PatchTST.common.configs import PatchTSTConfig
 from modeling_module.models.SELLM.configs import SELLMConfig
+from modeling_module.models.SimilarLifecycle.configs import (
+    SimilarLifecycleConfig,
+)
 from modeling_module.models.TimeMixer.configs import TimeMixerConfig
 from modeling_module.models.TimeXer.configs import TimeXerConfig
 from modeling_module.models.Titan import TitanBaseModel, TitanLMMModel, TitanSeq2SeqModel
@@ -25,6 +28,18 @@ def build_cgmm(cfg: Any):
     )
 
     return ConditionalGaussianMixtureForecaster(CGMMConfig.from_config(cfg))
+
+
+def build_similar_lifecycle(cfg: Any):
+    """Build the lifecycle nearest-neighbor retrieval model."""
+
+    from modeling_module.models.SimilarLifecycle.model import (
+        SimilarLifecycleForecaster,
+    )
+
+    return SimilarLifecycleForecaster(
+        SimilarLifecycleConfig.from_config(cfg)
+    )
 
 
 # -----------------------------
