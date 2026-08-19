@@ -1,5 +1,7 @@
 # CGMM Lifecycle Forecast Contract
 
+현재 LTB 모델 역할과 비교 결과는 [LTBBaseline.md](LTBBaseline.md)에 고정한다.
+
 ## 역할
 
 CGMM은 Lifecycle 시작 후 12개월의 관측값으로 M12~M83의 72개월 수요

@@ -15,6 +15,20 @@ from modeling_module.models.CGMM.contracts import (
 from modeling_module.models.CGMM.model import (
     ConditionalGaussianMixtureForecaster,
 )
+from modeling_module.models.SimilarLifecycle.artifact import (
+    load_similar_lifecycle_artifact,
+)
+from modeling_module.models.SimilarLifecycle.configs import (
+    SimilarLifecycleConfig,
+    default_similar_lifecycle_preprocessing,
+)
+from modeling_module.models.SimilarLifecycle.contracts import (
+    SIMILAR_LIFECYCLE_MODEL_KEY,
+    SimilarLifecyclePrediction,
+)
+from modeling_module.models.SimilarLifecycle.model import (
+    SimilarLifecycleForecaster,
+)
 
 __all__ = [
     "CGMM_MODEL_KEY",
@@ -24,6 +38,12 @@ __all__ = [
     "CGMMPreprocessingConfig",
     "ConditionalGaussianMixtureForecaster",
     "LifecycleSample",
+    "SIMILAR_LIFECYCLE_MODEL_KEY",
+    "SimilarLifecycleConfig",
+    "SimilarLifecycleForecaster",
+    "SimilarLifecyclePrediction",
+    "default_similar_lifecycle_preprocessing",
     "load_cgmm_artifact",
+    "load_similar_lifecycle_artifact",
     "require_sha256",
 ]

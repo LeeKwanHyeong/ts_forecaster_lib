@@ -18,8 +18,13 @@ from .lifecycle import (
     CGMMFitRequest,
     CGMMFitResult,
     CGMMForecastRequest,
+    SimilarLifecycleFitRequest,
+    SimilarLifecycleFitResult,
+    SimilarLifecycleForecastRequest,
     fit_cgmm,
+    fit_similar_lifecycle,
     forecast_cgmm,
+    forecast_similar_lifecycle,
 )
 from .forecast import ForecastRequest, ForecastResult, ForecastRuntimeConfig, forecast
 from .losses import DistributionLoss
@@ -51,6 +56,9 @@ __all__ = [
     "CGMMFitRequest",
     "CGMMFitResult",
     "CGMMForecastRequest",
+    "SimilarLifecycleFitRequest",
+    "SimilarLifecycleFitResult",
+    "SimilarLifecycleForecastRequest",
     "DataColumnConfig",
     "DataRequest",
     "DataWindowConfig",
@@ -81,7 +89,9 @@ __all__ = [
     "build_exogenous_schema",
     "forecast",
     "fit_cgmm",
+    "fit_similar_lifecycle",
     "forecast_cgmm",
+    "forecast_similar_lifecycle",
     "load_predictor",
     "predict",
     "train",
