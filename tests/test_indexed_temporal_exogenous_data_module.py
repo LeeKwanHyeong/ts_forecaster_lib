@@ -61,7 +61,9 @@ def test_exogenous_temporal_split_matches_endogenous_last_origin_contract():
     assert len(val_dataset) == 2
     assert datamodule.summary == {
         "row_count": 22,
+        "source_series_count": 2,
         "series_count": 2,
+        "excluded_series_count": 0,
         "source_min_week": 202444,
         "source_max_week": 202502,
         "train_windows": 4,
@@ -164,3 +166,25 @@ def test_exogenous_source_cutoff_must_match_training_contract():
             forecast_origin=202502,
             validation_origin=202451,
         )
+
+
+def test_too_short_series_can_be_explicitly_excluded_without_padding():
+    frame = _weekly_frame().filter(
+        ~(
+            (pl.col("oper_part_no") == "A")
+            & pl.col("demand_dt").is_in([202444, 202445])
+        )
+    )
+    datamodule = _datamodule(
+        frame,
+        require_all_series_eligible=False,
+    )
+
+    assert datamodule.summary["source_series_count"] == 2
+    assert datamodule.summary["series_count"] == 1
+    assert datamodule.summary["excluded_series_count"] == 1
+    assert datamodule.ineligible_series_reasons == (
+        "A:rows=9,validation_index=6",
+    )
+    assert datamodule.val_dataset is not None
+    assert datamodule.val_dataset.series_ids == ("B",)
