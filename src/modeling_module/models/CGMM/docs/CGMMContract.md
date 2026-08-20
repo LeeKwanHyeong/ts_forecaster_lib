@@ -38,6 +38,16 @@ Demand Engine은 DSDM 데이터를 `LifecycleSample`로 변환하고 모델 arti
 표준편차는 학습 표본에서만 계산한다. 추론에서 처음 등장한 카테고리는
 해당 feature slot의 `<UNK>` 열로 변환된다.
 
+정적 관측 전처리는 다음 두 profile을 제공한다.
+
+- `static_observed_v1`: 기존 조건 벡터를 그대로 유지하는 호환 profile
+- `static_observed_m0_v1`: 기존 조건 벡터에
+  `year * 12 + month - 1` 형태의 Lifecycle 시작 월 ordinal을 추가하는 profile
+
+M0 ordinal은 예측 요청 시 이미 알 수 있는 값이다. 학습 표본에서 계산한 평균과
+표준편차로 정규화하며, 실제 미래 72개월의 감소 속도나 정답 값은 조건 벡터에
+포함하지 않는다. 선택한 profile과 정규화 상태는 artifact에 저장된다.
+
 ## 예측 출력
 
 `CGMMPrediction`은 다음 값을 함께 반환한다.

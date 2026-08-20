@@ -184,6 +184,67 @@ def test_static_observed_profile_preserves_legacy_condition_layout() -> None:
     np.testing.assert_allclose(state.condition_scales, expected_scale)
 
 
+def test_static_observed_m0_profile_adds_month_ordinal_and_restores_artifact(
+    tmp_path,
+) -> None:
+    samples = tuple(_sample(index) for index in range(24))
+    result = fit_cgmm(
+        CGMMFitRequest(
+            samples=samples,
+            dataset_fingerprint=DATASET_FINGERPRINT,
+            config=_config(),
+            preprocessing=CGMMPreprocessingConfig(
+                feature_profile="static_observed_m0_v1"
+            ),
+        )
+    )
+    state = result.model.preprocessing_state
+    ordinal_index = state.condition_feature_names.index(
+        "lifecycle_start_month_ordinal"
+    )
+    expected_ordinals = np.asarray(
+        [
+            sample.lifecycle_start_month.year * 12
+            + sample.lifecycle_start_month.month
+            - 1
+            for sample in samples
+        ],
+        dtype=np.float64,
+    )
+
+    assert state.feature_profile == "static_observed_m0_v1"
+    assert ordinal_index == 13
+    assert state.condition_means[ordinal_index] == expected_ordinals.mean()
+    assert state.condition_scales[ordinal_index] == expected_ordinals.std()
+
+    inference = (
+        _sample(130, inference=True, family="new-family"),
+        _sample(131, inference=True, family="new-family"),
+    )
+    prepared = result.model.preprocessor.transform(inference)
+    assert prepared.condition_matrix[0, ordinal_index] != (
+        prepared.condition_matrix[1, ordinal_index]
+    )
+    expected = result.model.predict(inference)
+    receipt = save_cgmm_artifact(result.model, tmp_path / "cgmm-m0")
+    restored = load_cgmm_artifact(receipt.artifact_dir)
+    actual = restored.predict(inference)
+
+    assert restored.preprocessing_state == state
+    for field_name in (
+        "component_probabilities",
+        "candidate_curves",
+        "mean_forecast",
+        "forecast_std",
+        "lower_bound",
+        "upper_bound",
+    ):
+        np.testing.assert_array_equal(
+            getattr(actual, field_name),
+            getattr(expected, field_name),
+        )
+
+
 def test_cgmm_public_fit_and_forecast_preserve_distribution_contract() -> None:
     result = _fit_model()
     inference = (

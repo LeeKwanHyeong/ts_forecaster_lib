@@ -162,9 +162,13 @@ class SimilarLifecycleFitRequest:
             raise TypeError(
                 "preprocessing must be SimilarLifecyclePreprocessingConfig"
             )
-        if self.preprocessing.feature_profile != "static_observed_v1":
+        if self.preprocessing.feature_profile not in {
+            "static_observed_v1",
+            "static_observed_m0_v1",
+        }:
             raise ValueError(
-                "Similar Lifecycle preprocessing must use static_observed_v1"
+                "Similar Lifecycle preprocessing must use a static observed "
+                "profile"
             )
         if self.correction_state is not None and not isinstance(
             self.correction_state,

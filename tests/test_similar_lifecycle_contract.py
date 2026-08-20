@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 
 from modeling_module import (
+    CGMMPreprocessingConfig,
     LifecycleFeatureSchema,
     LifecycleSample,
     LifecycleSamplePurpose,
@@ -129,6 +130,53 @@ def test_public_fit_and_forecast_return_retrieval_and_interval_evidence() -> Non
     assert prediction.to_dict()["metadata"]["model_key"] == (
         "similar_lifecycle"
     )
+
+
+def test_m0_profile_drives_retrieval_and_restores_exact_artifact(tmp_path) -> None:
+    train = tuple(_sample(index) for index in range(24))
+    result = fit_similar_lifecycle(
+        SimilarLifecycleFitRequest(
+            samples=train,
+            dataset_fingerprint=DATASET_FINGERPRINT,
+            config=_config(),
+            preprocessing=CGMMPreprocessingConfig(
+                feature_profile="static_observed_m0_v1"
+            ),
+        )
+    )
+    assert "lifecycle_start_month_ordinal" in result.distance_feature_names
+    assert result.model.preprocessing_state.feature_profile == (
+        "static_observed_m0_v1"
+    )
+
+    query = (_sample(100, inference=True, family="unseen-family"),)
+    expected = forecast_similar_lifecycle(
+        SimilarLifecycleForecastRequest(model=result.model, samples=query)
+    )
+    receipt = save_similar_lifecycle_artifact(
+        result.model,
+        tmp_path / "similar-lifecycle-m0",
+    )
+    actual = forecast_similar_lifecycle(
+        SimilarLifecycleForecastRequest(
+            model=receipt.artifact_dir,
+            samples=query,
+        )
+    )
+
+    assert actual.neighbor_sample_ids == expected.neighbor_sample_ids
+    for field_name in (
+        "mean_forecast",
+        "forecast_std",
+        "lower_bound",
+        "upper_bound",
+        "neighbor_weights",
+        "neighbor_distances",
+    ):
+        np.testing.assert_array_equal(
+            getattr(actual, field_name),
+            getattr(expected, field_name),
+        )
 
 
 def test_training_query_excludes_its_own_sample_id() -> None:
