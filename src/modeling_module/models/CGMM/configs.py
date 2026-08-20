@@ -101,6 +101,7 @@ class CGMMCorrectionConfig:
 
     name: str = "cohort-half-tail72"
     cohort_strength: float = 0.5
+    short_horizon_cohort_strength: float | None = None
     maximum_monthly_log_slope: float = 0.03
     tail_start_month: int = 36
     tail_half_life_months: float | None = 72.0
@@ -123,6 +124,15 @@ class CGMMCorrectionConfig:
                 raise ValueError(f"{field_name} must be finite")
         if not 0.0 <= self.cohort_strength <= 1.0:
             raise ValueError("cohort_strength must be between zero and one")
+        if self.short_horizon_cohort_strength is not None and (
+            isinstance(self.short_horizon_cohort_strength, bool)
+            or not np.isfinite(self.short_horizon_cohort_strength)
+            or not 0.0 <= self.short_horizon_cohort_strength <= 1.0
+        ):
+            raise ValueError(
+                "short_horizon_cohort_strength must be between zero and one "
+                "when set"
+            )
         if self.maximum_monthly_log_slope <= 0.0:
             raise ValueError("maximum_monthly_log_slope must be positive")
         if (
@@ -157,7 +167,10 @@ class CGMMCorrectionConfig:
             )
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        payload = asdict(self)
+        if self.short_horizon_cohort_strength is None:
+            payload.pop("short_horizon_cohort_strength")
+        return payload
 
 
 __all__ = [

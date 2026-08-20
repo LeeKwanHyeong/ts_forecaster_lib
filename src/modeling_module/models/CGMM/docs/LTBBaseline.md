@@ -59,6 +59,39 @@ Train 선택 report SHA-256:
 Validation 비교 report SHA-256:
 `9922dce0c76899076ae1326892592c722621eac1828c2312b7128dcc97fa9119`
 
+### CGMM 단기 Horizon 보강
+
+M0 및 Tail 후보의 M1~M12 회귀를 보완하기 위해 다른 설정은 고정하고
+`short_horizon_cohort_strength`만 Train 내부에서 비교했다. `0.0`, `0.4`,
+`0.5`, `0.6`, `0.75`, `1.0` 중 `0.6`이 선택됐다.
+
+- Train M1~M12 WAPE: `0.20118 → 0.19632`
+- Train 전체 WAPE: `0.29855 → 0.29778`
+- Train M37~M72 WAPE: `0.3584947 → 0.3584947`
+- Validation M1~M12 WAPE: 기존 `0.32550`, M0+Tail `0.38805`, 단기 보강
+  `0.31063`
+- Validation 전체 WAPE: 기존 `0.73702`, M0+Tail `0.59621`, 단기 보강
+  `0.57140`
+- Validation M37~M72 WAPE: M0+Tail과 단기 보강 모두 `0.6344568`
+- Validation 편향: `+48.50% → +44.48%`
+- Validation 90% coverage: `0.8836 → 0.8942`
+- Validation interval score: `54.2962 → 52.0272`
+
+단기 strength는 첫 horizon block의 cohort 반영 비율만 바꾼다. block 중심
+보간이 끝나는 M25 이후 correction factor는 기존 M0+Tail 설정과 동일하다.
+CGMM 후보곡선, 평균, 표준편차, 하한과 상한에는 같은 계수를 적용하며 artifact
+strict load 후 출력도 동일하게 복원된다.
+
+따라서 현재 CGMM 개발 기준선은 M0 profile, cohort `0.25`, 단기 cohort
+`0.6`, Tail half-life `48`, scale gate `0.25` 조합이다. Similar Lifecycle은
+기존 기준선을 유지한다.
+
+Train 선택 report SHA-256:
+`bb98814c3bb86b1039c5a11aadfd2c8fc439392efed02207ad378402602f9a56`
+
+Validation 최종 비교 report SHA-256:
+`0130aa3b454ce6405e6a0266e05b370f785ee3c3ce424b76d6249e829230e366`
+
 ## 검증 데이터와 경계
 
 - Dataset fingerprint:
