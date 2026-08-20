@@ -63,10 +63,12 @@ def test_h26_exogenous_split_and_batch_match_endogenous_calendar():
     summary = datamodule.summary
 
     assert summary["source_max_week"] == TRAIN_END_WEEK
+    assert summary["source_series_count"] == 2
     assert summary["train_target_max_week"] == 202435
     assert summary["validation_target_min_week"] == VALIDATION_ORIGIN
     assert summary["validation_target_max_week"] == TRAIN_END_WEEK
     assert summary["validation_windows"] == 2
+    assert summary["excluded_series_count"] == 0
     assert summary["past_cont_dim"] == 12
     assert summary["future_cont_dim"] == 12
 

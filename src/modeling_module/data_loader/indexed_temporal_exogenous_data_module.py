@@ -257,6 +257,7 @@ class IndexedTemporalExogenousDataModule:
             future_cont=self.future_exo_cont_cols,
         )
         self.df = self._validate_and_normalize_frame(df)
+        self._ineligible_series_reasons: tuple[str, ...] = ()
         self._series = self._build_series_buffers()
         self.train_dataset: IndexedTemporalExogenousWindowDataset | None = None
         self.val_dataset: IndexedTemporalExogenousWindowDataset | None = None
@@ -432,6 +433,7 @@ class IndexedTemporalExogenousDataModule:
                 )
             )
 
+        self._ineligible_series_reasons = tuple(ineligible)
         if ineligible and self.require_all_series_eligible:
             preview = ", ".join(ineligible[:5])
             raise ValueError(
@@ -443,6 +445,12 @@ class IndexedTemporalExogenousDataModule:
                 "No series are eligible for temporal exogenous training."
             )
         return eligible
+
+    @property
+    def ineligible_series_reasons(self) -> tuple[str, ...]:
+        """Explain source series excluded before window construction."""
+
+        return self._ineligible_series_reasons
 
     @staticmethod
     def _feature_matrix(
@@ -498,7 +506,9 @@ class IndexedTemporalExogenousDataModule:
         )
         return {
             "row_count": self.df.height,
+            "source_series_count": self.df[self.part_col].n_unique(),
             "series_count": len(self._series),
+            "excluded_series_count": len(self._ineligible_series_reasons),
             "source_min_week": int(self.df[self.date_col].min()),
             "source_max_week": int(self.df[self.date_col].max()),
             "train_windows": len(self.train_dataset),

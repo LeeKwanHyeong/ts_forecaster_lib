@@ -300,8 +300,19 @@ def _build_datamodule(
         part_col=ID_COLUMN,
         date_col=DATE_COLUMN,
         qty_col=TARGET_COLUMN,
+        require_all_series_eligible=False,
     )
     summary = datamodule.summary
+    unsupported_exclusions = tuple(
+        reason
+        for reason in datamodule.ineligible_series_reasons
+        if ":rows=" not in reason or ",validation_index=" not in reason
+    )
+    if unsupported_exclusions:
+        raise V100H26ContractError(
+            "series may be excluded only when pre-validation history is too "
+            f"short; examples: {unsupported_exclusions[:5]}"
+        )
     expected_train_target_max = add_period(VALIDATION_ORIGIN, -1, "weekly")
     if summary["train_target_max_week"] != expected_train_target_max:
         raise V100H26ContractError(
