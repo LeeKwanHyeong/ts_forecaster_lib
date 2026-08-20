@@ -370,6 +370,8 @@ PRODUCTION_REFIT_ARTIFACT_KEYS: tuple[str, ...] = (
     "patchmixer",
     "nhits_base",
     "timemixer",
+    "exotst_base",
+    "patchtst_exogenous",
 )
 
 

@@ -24,6 +24,7 @@ from modeling_module.data_loader.temporal import normalize_period_key
 
 
 Split = Literal["train", "validation"]
+TrainingMode = Literal["qualification", "production_refit"]
 
 
 @dataclass(frozen=True)
@@ -78,6 +79,7 @@ class IndexedTemporalExogenousWindowDataset(Dataset):
         lookback: int,
         horizon: int,
         split: Split,
+        training_mode: TrainingMode = "qualification",
         window_stride: int = 1,
     ) -> None:
         if lookback <= 0 or horizon <= 0:
@@ -86,10 +88,17 @@ class IndexedTemporalExogenousWindowDataset(Dataset):
             raise ValueError("window_stride must be positive.")
         if split not in {"train", "validation"}:
             raise ValueError(f"Unsupported split: {split!r}.")
+        if training_mode not in {"qualification", "production_refit"}:
+            raise ValueError(f"Unsupported training_mode: {training_mode!r}.")
+        if split == "validation" and training_mode == "production_refit":
+            raise ValueError(
+                "production_refit does not define a validation dataset."
+            )
 
         self.lookback = int(lookback)
         self.horizon = int(horizon)
         self.split = split
+        self.training_mode = training_mode
         self.window_stride = int(window_stride)
 
         retained: list[_ExogenousSeriesBuffer] = []
@@ -97,7 +106,9 @@ class IndexedTemporalExogenousWindowDataset(Dataset):
         for item in series:
             if split == "train":
                 max_start = (
-                    item.validation_index - self.lookback - self.horizon
+                    len(item.values) - self.lookback - self.horizon
+                    if self.training_mode == "production_refit"
+                    else item.validation_index - self.lookback - self.horizon
                 )
                 count = (
                     max_start // self.window_stride + 1
@@ -150,7 +161,9 @@ class IndexedTemporalExogenousWindowDataset(Dataset):
         item = self._series[series_index]
         if self.split == "train":
             max_start = (
-                item.validation_index - self.lookback - self.horizon
+                len(item.values) - self.lookback - self.horizon
+                if self.training_mode == "production_refit"
+                else item.validation_index - self.lookback - self.horizon
             )
             first_start = max_start % self.window_stride
             start = first_start + local_index * self.window_stride
@@ -216,6 +229,7 @@ class IndexedTemporalExogenousDataModule:
         date_col: str = "demand_dt",
         qty_col: str = "demand_qty",
         require_all_series_eligible: bool = True,
+        training_mode: TrainingMode = "qualification",
     ) -> None:
         if lookback <= 0 or horizon <= 0:
             raise ValueError("lookback and horizon must be positive.")
@@ -227,6 +241,8 @@ class IndexedTemporalExogenousDataModule:
             validation_origin=validation_origin,
             horizon=horizon,
         )
+        if training_mode not in {"qualification", "production_refit"}:
+            raise ValueError(f"Unsupported training_mode: {training_mode!r}.")
 
         self.lookback = int(lookback)
         self.horizon = int(horizon)
@@ -239,6 +255,7 @@ class IndexedTemporalExogenousDataModule:
         self.date_col = date_col
         self.qty_col = qty_col
         self.require_all_series_eligible = bool(require_all_series_eligible)
+        self.training_mode = training_mode
         self.past_exo_cont_cols = _normalize_feature_columns(
             past_exo_cont_cols,
             label="past_exo_cont_cols",
@@ -387,13 +404,19 @@ class IndexedTemporalExogenousDataModule:
                 continue
             validation_index = int(validation_matches[0])
             has_train_window = (
-                validation_index - self.lookback - self.horizon >= 0
+                len(weeks) - self.lookback - self.horizon >= 0
+                if self.training_mode == "production_refit"
+                else validation_index - self.lookback - self.horizon >= 0
             )
             has_validation_window = (
                 validation_index >= self.lookback
                 and len(weeks) - validation_index >= self.horizon
             )
-            if not has_train_window or not has_validation_window:
+            has_required_windows = has_train_window and (
+                self.training_mode == "production_refit"
+                or has_validation_window
+            )
+            if not has_required_windows:
                 ineligible.append(
                     f"{part_id}:rows={len(weeks)},"
                     f"validation_index={validation_index}"
@@ -467,36 +490,43 @@ class IndexedTemporalExogenousDataModule:
         )
 
     def setup(self) -> None:
-        if self.train_dataset is not None and self.val_dataset is not None:
+        if self.train_dataset is not None and (
+            self.training_mode == "production_refit"
+            or self.val_dataset is not None
+        ):
             return
         self.train_dataset = IndexedTemporalExogenousWindowDataset(
             self._series,
             lookback=self.lookback,
             horizon=self.horizon,
             split="train",
+            training_mode=self.training_mode,
             window_stride=self.window_stride,
-        )
-        self.val_dataset = IndexedTemporalExogenousWindowDataset(
-            self._series,
-            lookback=self.lookback,
-            horizon=self.horizon,
-            split="validation",
-            window_stride=1,
         )
         if len(self.train_dataset) == 0:
             raise ValueError(
                 "Temporal exogenous split produced no training windows."
             )
+        if self.training_mode == "production_refit":
+            self.val_dataset = None
+            return
+        self.val_dataset = IndexedTemporalExogenousWindowDataset(
+            self._series,
+            lookback=self.lookback,
+            horizon=self.horizon,
+            split="validation",
+            training_mode=self.training_mode,
+            window_stride=1,
+        )
         if len(self.val_dataset) == 0:
             raise ValueError(
                 "Temporal exogenous split produced no validation windows."
             )
 
     @property
-    def summary(self) -> dict[str, int]:
+    def summary(self) -> dict[str, int | None]:
         self.setup()
         assert self.train_dataset is not None
-        assert self.val_dataset is not None
         train_target_max_week = max(
             self.train_dataset.window_metadata(index).y_end_week
             for index in (
@@ -513,9 +543,15 @@ class IndexedTemporalExogenousDataModule:
             "source_max_week": int(self.df[self.date_col].max()),
             "train_windows": len(self.train_dataset),
             "train_target_max_week": train_target_max_week,
-            "validation_windows": len(self.val_dataset),
-            "validation_target_min_week": self.validation_origin,
-            "validation_target_max_week": self.train_end_week,
+            "validation_windows": (
+                len(self.val_dataset) if self.val_dataset is not None else 0
+            ),
+            "validation_target_min_week": (
+                self.validation_origin if self.val_dataset is not None else None
+            ),
+            "validation_target_max_week": (
+                self.train_end_week if self.val_dataset is not None else None
+            ),
             "past_cont_dim": len(self.past_exo_cont_cols),
             "future_cont_dim": len(self.future_exo_cont_cols),
         }
@@ -584,7 +620,11 @@ class IndexedTemporalExogenousDataModule:
         drop_last: bool = False,
     ) -> DataLoader:
         self.setup()
-        assert self.val_dataset is not None
+        if self.val_dataset is None:
+            raise RuntimeError(
+                "production_refit has no validation loader; "
+                "use get_train_loader()."
+            )
         loader = DataLoader(
             self.val_dataset,
             batch_size=int(batch_size),
@@ -605,4 +645,5 @@ __all__ = [
     "IndexedTemporalExogenousDataModule",
     "IndexedTemporalExogenousWindowDataset",
     "TemporalExogenousWindowMetadata",
+    "TrainingMode",
 ]

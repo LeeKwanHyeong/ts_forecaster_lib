@@ -8,6 +8,7 @@ import torch
 from modeling_module import (
     ArchitectureConfig,
     ArtifactConfig,
+    ExoTSTArchitectureConfig,
     NHITSArchitectureConfig,
     PatchMixerArchitectureConfig,
     PatchTSTArchitectureConfig,
@@ -19,6 +20,9 @@ from modeling_module import (
     load_predictor,
     train,
 )
+from modeling_module.data_loader.exogenous_contracts import (
+    ExogenousFeatureSchema,
+)
 
 
 PRODUCTION_MODEL_KEYS = (
@@ -27,6 +31,10 @@ PRODUCTION_MODEL_KEYS = (
     "patchmixer",
     "nhits_base",
     "timemixer",
+)
+EXOGENOUS_PRODUCTION_MODEL_KEYS = (
+    "exotst_base",
+    "patchtst_exogenous",
 )
 
 
@@ -40,7 +48,45 @@ def _loader():
     ]
 
 
+def _exo_loader():
+    class Loader(list):
+        pass
+
+    loader = Loader(
+        [
+            (
+                torch.zeros(2, 14, 1),
+                torch.zeros(2, 2),
+                ["A", "B"],
+                torch.zeros(2, 2, 1),
+                torch.zeros(2, 14, 1),
+                torch.zeros(2, 14, 0, dtype=torch.long),
+            )
+        ]
+    )
+    loader.exogenous_schema = ExogenousFeatureSchema.from_columns(
+        past_cont=("past_calendar",),
+        future_cont=("future_calendar",),
+    )
+    return loader
+
+
 def _architecture(model_key: str) -> ArchitectureConfig:
+    if model_key == "exotst_base":
+        return ArchitectureConfig(
+            exotst=ExoTSTArchitectureConfig(
+                patch_len=7,
+                stride=3,
+                d_model=16,
+                n_heads=4,
+                d_ff=32,
+                dropout=0.0,
+                attn_dropout=0.0,
+                exo_enc_layers=1,
+                fusion_layers=1,
+                endo_dec_layers=1,
+            )
+        )
     if model_key.startswith("patchtst"):
         return ArchitectureConfig(
             patchtst=PatchTSTArchitectureConfig(
@@ -173,10 +219,10 @@ def test_public_production_refit_rejects_validation_loader(tmp_path):
         )
 
 
-def test_public_production_refit_rejects_exogenous_model(tmp_path):
+def test_public_production_refit_rejects_unapproved_artifact(tmp_path):
     with pytest.raises(
         ValueError,
-        match="supports exactly one endogenous artifact",
+        match="supports exactly one approved artifact",
     ):
         train(
             TrainRequest(
@@ -200,7 +246,7 @@ def test_public_production_refit_rejects_exogenous_model(tmp_path):
 def test_public_production_refit_rejects_multiple_artifacts(tmp_path):
     with pytest.raises(
         ValueError,
-        match="supports exactly one endogenous artifact",
+        match="supports exactly one approved artifact",
     ):
         train(
             TrainRequest(
@@ -270,6 +316,74 @@ def test_production_refit_saves_final_epoch_checkpoint(tmp_path, model_key):
     )
     output = predictor.predict(
         {"x": train_loader[0][0], "part_ids": train_loader[0][2]},
+        horizon=2,
+    )
+    point = torch.as_tensor(output["point"])
+    assert point.numel() == 4
+    assert torch.isfinite(point).all()
+    assert predictor.model_key == model_key
+
+
+@pytest.mark.parametrize("model_key", EXOGENOUS_PRODUCTION_MODEL_KEYS)
+def test_exogenous_production_refit_saves_final_epoch_checkpoint(
+    tmp_path,
+    model_key,
+):
+    train_loader = _exo_loader()
+    result = train(
+        TrainRequest(
+            train_loader=train_loader,
+            models=[model_key],
+            freq="daily",
+            lookback=14,
+            horizon=2,
+            trainer=TrainerConfig(
+                epochs=1,
+                lr=1e-3,
+                use_intermittent=False,
+                training_mode="production_refit",
+                random_seed=42,
+            ),
+            ssl=SSLConfig(mode="sl_only"),
+            runtime=RuntimeConfig(device="cpu"),
+            artifacts=ArtifactConfig(
+                save_dir=str(tmp_path / model_key),
+                auto_save_dir=False,
+            ),
+            architecture=_architecture(model_key),
+            use_exogenous_mode=True,
+            use_past_exogenous=True,
+            use_future_exogenous=True,
+        )
+    )
+
+    assert result.primary_ckpt_path is not None
+    checkpoint = torch.load(
+        result.primary_ckpt_path,
+        map_location="cpu",
+        weights_only=False,
+    )
+    assert checkpoint["meta"]["training_mode"] == "production_refit"
+    assert checkpoint["meta"]["validation_enabled"] is False
+    assert checkpoint["meta"]["state_selection"] == "final_epoch"
+    assert checkpoint["meta"]["configured_epochs"] == 1
+    assert checkpoint["meta"]["completed_epochs"] == 1
+    assert checkpoint["meta"]["random_seed"] == 42
+    assert checkpoint["meta"]["model_key"] == model_key
+
+    predictor = load_predictor(
+        result.primary_ckpt_path,
+        device="cpu",
+        strict=True,
+    )
+    batch = train_loader[0]
+    output = predictor.predict(
+        {
+            "x": batch[0],
+            "part_ids": batch[2],
+            "future_exo": batch[3],
+            "past_exo_cont": batch[4],
+        },
         horizon=2,
     )
     point = torch.as_tensor(output["point"])
