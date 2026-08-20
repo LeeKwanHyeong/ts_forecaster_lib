@@ -30,7 +30,6 @@ from modeling_module import load_predictor  # noqa: E402
 from tools.dsio_v100_h26_contract import (  # noqa: E402
     HORIZON,
     LOOKBACK,
-    SEED,
     TRAIN_END_WEEK,
     VALIDATION_ORIGIN,
     V100H26ContractError,
@@ -41,6 +40,8 @@ from tools.dsio_v100_h26_contract import (  # noqa: E402
 )
 from tools.run_dsio_v100_h26_exogenous_qualification import (  # noqa: E402
     MODEL_SPECS,
+    MODEL_SPECS_BY_KEY,
+    ExogenousQualificationModelSpec,
     _build_datamodule,
     _load_target,
     configure_torch_runtime,
@@ -70,7 +71,11 @@ def _require_mapping(value: object, *, label: str) -> Mapping[str, Any]:
     return value
 
 
-def _load_qualification_receipt(path: Path) -> dict[str, Any]:
+def _load_qualification_receipt(
+    path: Path,
+    *,
+    model_specs: tuple[ExogenousQualificationModelSpec, ...] = MODEL_SPECS,
+) -> dict[str, Any]:
     raw = dict(
         _require_mapping(
             json.loads(path.read_text(encoding="ascii")),
@@ -83,10 +88,10 @@ def _load_qualification_receipt(path: Path) -> dict[str, Any]:
     if raw.get("status") != "PASS":
         raise V100H26ContractError("qualification receipt status must be PASS")
     models = raw.get("models")
-    if not isinstance(models, list) or len(models) != len(MODEL_SPECS):
+    if not isinstance(models, list) or len(models) != len(model_specs):
         raise V100H26ContractError("qualification model inventory drifted")
     if [item.get("model_key") for item in models] != [
-        spec.model_key for spec in MODEL_SPECS
+        spec.model_key for spec in model_specs
     ]:
         raise V100H26ContractError("qualification model order drifted")
     return {**raw, "receipt_sha256": receipt_sha256}
@@ -94,6 +99,37 @@ def _load_qualification_receipt(path: Path) -> dict[str, Any]:
 
 def _safe_ratio(numerator: float, denominator: float) -> float:
     return float(numerator / denominator) if denominator > 0.0 else 0.0
+
+
+def _qualification_seed(receipt: Mapping[str, Any]) -> int:
+    models = receipt.get("models")
+    if not isinstance(models, list) or not models:
+        raise V100H26ContractError("qualification receipt has no models")
+    receipt_seeds: set[int] = set()
+    for model in models:
+        model_payload = _require_mapping(
+            model,
+            label="qualification model receipt",
+        )
+        training_contract = _require_mapping(
+            model_payload.get("training_contract"),
+            label="qualification training contract",
+        )
+        seed = training_contract.get("seed")
+        if not isinstance(seed, int) or isinstance(seed, bool):
+            raise V100H26ContractError(
+                "qualification training seed must be an integer"
+            )
+        receipt_seeds.add(seed)
+    if len(receipt_seeds) != 1:
+        raise V100H26ContractError(
+            f"qualification model seeds disagree: {sorted(receipt_seeds)}"
+        )
+    seed = receipt_seeds.pop()
+    aggregate_seed = receipt.get("seed")
+    if aggregate_seed is not None and aggregate_seed != seed:
+        raise V100H26ContractError("qualification aggregate seed drifted")
+    return seed
 
 
 @dataclass
@@ -315,6 +351,7 @@ def evaluate(
     batch_size: int,
     num_workers: int,
     device: str,
+    model_specs: tuple[ExogenousQualificationModelSpec, ...] = MODEL_SPECS,
 ) -> dict[str, Any]:
     if batch_size <= 0:
         raise ValueError("batch_size must be positive")
@@ -328,8 +365,10 @@ def evaluate(
     )
     qualification_receipt_path = qualification_root / "qualification-receipt.json"
     qualification_receipt = _load_qualification_receipt(
-        qualification_receipt_path
+        qualification_receipt_path,
+        model_specs=model_specs,
     )
+    seed = _qualification_seed(qualification_receipt)
     target = _load_target(target_source, sample_part_count=None)
     configure_torch_runtime()
 
@@ -339,11 +378,11 @@ def evaluate(
     horizon_rows: list[dict[str, Any]] = []
     try:
         for spec, model_receipt in zip(
-            MODEL_SPECS,
+            model_specs,
             qualification_receipt["models"],
             strict=True,
         ):
-            datamodule = _build_datamodule(target, spec=spec)
+            datamodule = _build_datamodule(target, spec=spec, seed=seed)
             _validate_data_summary(datamodule.summary)
             loader = datamodule.get_val_loader(
                 batch_size=batch_size,
@@ -449,7 +488,7 @@ def evaluate(
                 "forecast_points_per_model": (
                     EXPECTED_ELIGIBLE_SERIES * HORIZON
                 ),
-                "seed": SEED,
+                "seed": seed,
             },
             "metric_contract": {
                 "mae": "mean(abs(prediction - actual))",
@@ -526,6 +565,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--batch-size", type=int, default=512)
     parser.add_argument("--num-workers", type=int, default=8)
     parser.add_argument("--device", default="cuda")
+    parser.add_argument(
+        "--model-keys",
+        nargs="+",
+        choices=tuple(MODEL_SPECS_BY_KEY),
+        default=None,
+        help="Evaluate the selected qualification model subset.",
+    )
     return parser
 
 
@@ -545,6 +591,10 @@ def main(argv: list[str] | None = None) -> int:
         batch_size=int(args.batch_size),
         num_workers=int(args.num_workers),
         device=str(args.device),
+        model_specs=tuple(
+            MODEL_SPECS_BY_KEY[key]
+            for key in (args.model_keys or tuple(MODEL_SPECS_BY_KEY))
+        ),
     )
     print(json.dumps(receipt["ranking_by_nonnegative_mae"], sort_keys=True))
     return 0

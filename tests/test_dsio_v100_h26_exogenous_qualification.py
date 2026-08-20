@@ -103,12 +103,14 @@ def test_worker_command_carries_governed_runtime_values():
         device="cuda",
         sample_part_count=8,
         preflight_only=True,
+        seed=22,
     )
 
     assert command[0] == "/opt/python"
     assert command[command.index("--model-key") + 1] == "exotst_base"
     assert command[command.index("--epochs") + 1] == "40"
     assert command[command.index("--sample-part-count") + 1] == "8"
+    assert command[command.index("--seed") + 1] == "22"
     assert command[-1] == "--preflight-only"
 
 
