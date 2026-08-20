@@ -8,6 +8,7 @@ import gc
 import json
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Final
@@ -118,6 +119,37 @@ EPOCH_POLICY_EVIDENCE: Final = {
         "rule": "fixed_project_canonical_seed_not_selected_by_validation_rank",
     },
 }
+
+
+def _start_runtime_measurement(device: str) -> float:
+    if device.startswith("cuda") and torch.cuda.is_available():
+        torch.cuda.synchronize()
+        torch.cuda.reset_peak_memory_stats()
+    return time.perf_counter()
+
+
+def _finish_runtime_measurement(
+    started: float,
+    *,
+    device: str,
+) -> dict[str, object]:
+    cuda_enabled = device.startswith("cuda") and torch.cuda.is_available()
+    if cuda_enabled:
+        torch.cuda.synchronize()
+    evidence: dict[str, object] = {
+        "seconds": time.perf_counter() - started,
+        "cuda_peak_allocated_mib": None,
+        "cuda_peak_reserved_mib": None,
+    }
+    if cuda_enabled:
+        mib = 1024.0 * 1024.0
+        evidence["cuda_peak_allocated_mib"] = (
+            torch.cuda.max_memory_allocated() / mib
+        )
+        evidence["cuda_peak_reserved_mib"] = (
+            torch.cuda.max_memory_reserved() / mib
+        )
+    return evidence
 
 
 def build_worker_command(
@@ -318,6 +350,7 @@ def run_model(
     preflight_only: bool,
     resume_existing: bool = False,
 ) -> dict[str, object]:
+    run_started = time.perf_counter()
     if batch_size <= 0:
         raise ValueError("batch_size must be positive.")
     if spec.model_key not in PRODUCTION_REFIT_EPOCHS:
@@ -449,6 +482,7 @@ def run_model(
 
     training_manifest_path = model_output / "training_manifest.json"
     expected_checkpoint_path = model_output / spec.checkpoint_filename
+    training_runtime: dict[str, object] | None = None
     if resume_existing and expected_checkpoint_path.is_file():
         if not training_manifest_path.is_file():
             raise V100H26ContractError(
@@ -463,6 +497,7 @@ def run_model(
         )
         checkpoint_path = expected_checkpoint_path.resolve()
     else:
+        training_started = _start_runtime_measurement(device)
         result = train(
             TrainRequest(
                 train_loader=train_loader,
@@ -496,10 +531,16 @@ def run_model(
             )
         checkpoint_path = Path(result.primary_ckpt_path).resolve()
         model_metrics = result.results.get(spec.model_key, {})
+        training_runtime = _finish_runtime_measurement(
+            training_started,
+            device=device,
+        )
+        del result
 
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
+    canary_started = _start_runtime_measurement(device)
     checkpoint_evidence = _validate_checkpoint(
         checkpoint_path=checkpoint_path,
         spec=spec,
@@ -507,6 +548,26 @@ def run_model(
         device=device,
         epochs=epochs,
     )
+    canary_runtime = _finish_runtime_measurement(
+        canary_started,
+        device=device,
+    )
+    runtime_evidence = {
+        "python_version": (
+            f"{sys.version_info.major}.{sys.version_info.minor}."
+            f"{sys.version_info.micro}"
+        ),
+        "torch_version": torch.__version__,
+        "device": device,
+        "cuda_device_name": (
+            torch.cuda.get_device_name(0)
+            if device.startswith("cuda") and torch.cuda.is_available()
+            else None
+        ),
+        "run_wall_seconds": time.perf_counter() - run_started,
+        "training": training_runtime,
+        "strict_load_predict": canary_runtime,
+    }
     receipt: dict[str, object] = {
         "receipt_format_version": 1,
         "status": "PASS",
@@ -531,6 +592,7 @@ def run_model(
         "epoch_policy": EPOCH_POLICY_EVIDENCE,
         "data_summary": summary,
         "metrics": _training_metrics(model_metrics),
+        "runtime_evidence": runtime_evidence,
         "production_canary_contract": canary_contract,
         "checkpoint": {"path": str(checkpoint_path), **checkpoint_evidence},
     }
