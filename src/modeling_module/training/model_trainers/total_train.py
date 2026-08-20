@@ -901,7 +901,25 @@ def _run_exotst(
             exotst_model,
             exotst_cfg,
             ckpt_path,
-            extra_meta={"model_key": "exotst_base", "family_key": "exotst"},
+            extra_meta={
+                "model_key": "exotst_base",
+                "family_key": "exotst",
+                **_training_checkpoint_meta(
+                    point_train_cfg,
+                    stages,
+                    best,
+                ),
+            },
+            exogenous_schema=getattr(
+                train_loader,
+                "exogenous_schema",
+                None,
+            ),
+            categorical_vocabulary_artifact=getattr(
+                train_loader,
+                "categorical_vocabulary_artifact",
+                None,
+            ),
         )
         best["ckpt_path"] = str(ckpt_path)
 
@@ -992,7 +1010,25 @@ def _run_timexer(
             timexer_model,
             timexer_cfg,
             ckpt_path,
-            extra_meta={"model_key": "timexer_base", "family_key": "timexer"},
+            extra_meta={
+                "model_key": "timexer_base",
+                "family_key": "timexer",
+                **_training_checkpoint_meta(
+                    point_train_cfg,
+                    stages,
+                    best,
+                ),
+            },
+            exogenous_schema=getattr(
+                train_loader,
+                "exogenous_schema",
+                None,
+            ),
+            categorical_vocabulary_artifact=getattr(
+                train_loader,
+                "categorical_vocabulary_artifact",
+                None,
+            ),
         )
         best["ckpt_path"] = str(ckpt_path)
 
@@ -1907,7 +1943,25 @@ def _run_patchmixer(
                 pm_exo_model,
                 pm_exo_cfg,
                 ckpt_path,
-                extra_meta={"model_key": "patchmixer_exo", "family_key": "patchmixer"},
+                extra_meta={
+                    "model_key": "patchmixer_exo",
+                    "family_key": "patchmixer",
+                    **_training_checkpoint_meta(
+                        point_train_cfg,
+                        stages,
+                        best_pm_exo,
+                    ),
+                },
+                exogenous_schema=getattr(
+                    train_loader,
+                    "exogenous_schema",
+                    None,
+                ),
+                categorical_vocabulary_artifact=getattr(
+                    train_loader,
+                    "categorical_vocabulary_artifact",
+                    None,
+                ),
             )
             best_pm_exo["ckpt_path"] = str(ckpt_path)
         _store_result(
