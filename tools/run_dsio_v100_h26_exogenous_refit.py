@@ -118,6 +118,7 @@ def build_worker_command(
     device: str,
     sample_part_count: int | None,
     preflight_only: bool,
+    resume_existing: bool = False,
 ) -> list[str]:
     if model_key not in PRODUCTION_REFIT_EPOCHS:
         raise ValueError(f"Unsupported production model: {model_key!r}.")
@@ -143,6 +144,8 @@ def build_worker_command(
         command.extend(["--sample-part-count", str(sample_part_count)])
     if preflight_only:
         command.append("--preflight-only")
+    if resume_existing:
+        command.append("--resume-existing")
     return command
 
 
@@ -200,6 +203,23 @@ def _production_canary_batch(datamodule, *, spec: ExogenousQualificationModelSpe
     return batch, evidence
 
 
+def _validate_point_canary_output(
+    values: Any,
+    *,
+    batch_size: int,
+) -> tuple[np.ndarray, tuple[int, int]]:
+    points = np.asarray(values)
+    expected_matrix_shape = (int(batch_size), HORIZON)
+    expected_size = expected_matrix_shape[0] * expected_matrix_shape[1]
+    if points.size != expected_size or not np.isfinite(points).all():
+        raise V100H26ContractError(
+            "production checkpoint canary failed: "
+            f"expected {expected_size} finite points for "
+            f"{expected_matrix_shape}, got shape {points.shape}"
+        )
+    return points, expected_matrix_shape
+
+
 def _validate_checkpoint(
     *,
     checkpoint_path: Path,
@@ -254,17 +274,15 @@ def _validate_checkpoint(
         raise V100H26ContractError("checkpoint future exogenous schema drifted")
 
     prediction = predictor.predict(canary_batch)
-    points = np.asarray(prediction.get("point"))
-    expected_shape = (len(canary_batch[2]), HORIZON)
-    if points.shape != expected_shape or not np.isfinite(points).all():
-        raise V100H26ContractError(
-            "production checkpoint canary failed: "
-            f"expected finite {expected_shape}, got {points.shape}"
-        )
+    points, expected_matrix_shape = _validate_point_canary_output(
+        prediction.get("point"),
+        batch_size=len(canary_batch[2]),
+    )
     return {
         "checkpoint_sha256": file_sha256(checkpoint_path),
         "checkpoint_size_bytes": checkpoint_path.stat().st_size,
         "prediction_shape": list(points.shape),
+        "prediction_matrix_shape": list(expected_matrix_shape),
         "prediction_finite": True,
         "prediction_min": float(points.min()),
         "prediction_max": float(points.max()),
@@ -284,6 +302,7 @@ def run_model(
     device: str,
     sample_part_count: int | None,
     preflight_only: bool,
+    resume_existing: bool = False,
 ) -> dict[str, object]:
     if batch_size <= 0:
         raise ValueError("batch_size must be positive.")
@@ -339,80 +358,134 @@ def run_model(
 
     model_output = output_root / spec.model_key
     if model_output.exists():
-        raise V100H26ContractError(
-            f"model output already exists; refusing overwrite: {model_output}"
-        )
-    model_output.mkdir(parents=True)
-    write_secure_json(
-        model_output / "production-refit-data-manifest.json",
-        {
-            **preflight,
-            "status": "SEALED",
-            "training_contract": {
-                "site_cd": SITE_CD,
-                "frequency": FREQUENCY,
-                "lookback": LOOKBACK,
-                "horizon": HORIZON,
-                "train_end_week": TRAIN_END_WEEK,
-                "forecast_origin": FORECAST_ORIGIN,
-                "window_stride": WINDOW_STRIDE,
-                "epochs": epochs,
-                "seed": PRODUCTION_REFIT_SEED,
-                "loss": "library_point_default",
-                "training_mode": "production_refit",
-                "validation_enabled": False,
-                "state_selection": "final_epoch",
-            },
-            "feature_contract": {
-                "source_kind": "deterministic_calendar",
-                "past_continuous_columns": list(WEEKLY_CALENDAR_CONTINUOUS_FEATURES),
-                "future_continuous_columns": (
-                    list(WEEKLY_CALENDAR_CONTINUOUS_FEATURES)
-                    if spec.uses_future_continuous
-                    else []
-                ),
-                "past_categorical_columns": [],
-                "future_categorical_columns": [],
-            },
-        },
-    )
+        if not resume_existing:
+            raise V100H26ContractError(
+                "model output already exists; refusing overwrite without "
+                f"--resume-existing: {model_output}"
+            )
+        receipt_path = model_output / "production-refit-receipt.json"
+        if receipt_path.is_file():
+            receipt = json.loads(receipt_path.read_text(encoding="ascii"))
+            if receipt.get("status") != "PASS":
+                raise V100H26ContractError(
+                    f"existing receipt is not PASS: {receipt_path}"
+                )
+            return receipt
+    else:
+        model_output.mkdir(parents=True)
 
-    result = train(
-        TrainRequest(
-            train_loader=train_loader,
-            val_loader=None,
-            freq=FREQUENCY,
-            lookback=LOOKBACK,
-            horizon=HORIZON,
-            models=[spec.model_key],
-            architecture=build_architecture(),
-            trainer=TrainerConfig(
-                warmup_epochs=epochs,
-                spike_epochs=0,
-                lr=1e-3,
-                training_mode="production_refit",
-                random_seed=PRODUCTION_REFIT_SEED,
+    data_manifest_path = model_output / "production-refit-data-manifest.json"
+    sealed_data_manifest = {
+        **preflight,
+        "status": "SEALED",
+        "training_contract": {
+            "site_cd": SITE_CD,
+            "frequency": FREQUENCY,
+            "lookback": LOOKBACK,
+            "horizon": HORIZON,
+            "train_end_week": TRAIN_END_WEEK,
+            "forecast_origin": FORECAST_ORIGIN,
+            "window_stride": WINDOW_STRIDE,
+            "epochs": epochs,
+            "seed": PRODUCTION_REFIT_SEED,
+            "loss": "library_point_default",
+            "training_mode": "production_refit",
+            "validation_enabled": False,
+            "state_selection": "final_epoch",
+        },
+        "feature_contract": {
+            "source_kind": "deterministic_calendar",
+            "past_continuous_columns": list(
+                WEEKLY_CALENDAR_CONTINUOUS_FEATURES
             ),
-            ssl=SSLConfig(mode="sl_only"),
-            runtime=RuntimeConfig(device=device),
-            artifacts=ArtifactConfig(
-                save_dir=str(model_output),
-                auto_save_dir=False,
+            "future_continuous_columns": (
+                list(WEEKLY_CALENDAR_CONTINUOUS_FEATURES)
+                if spec.uses_future_continuous
+                else []
             ),
-            use_exogenous_mode=True,
-            use_past_exogenous=True,
-            use_future_exogenous=spec.uses_future_continuous,
+            "past_categorical_columns": [],
+            "future_categorical_columns": [],
+        },
+    }
+    if data_manifest_path.is_file():
+        existing_data_manifest = json.loads(
+            data_manifest_path.read_text(encoding="ascii")
         )
-    )
-    if result.primary_ckpt_path is None:
-        raise V100H26ContractError(
-            f"{spec.model_key} refit did not return a checkpoint"
+        for key in (
+            "model_key",
+            "target_sha256",
+            "input_manifest_sha256",
+            "calendar_contract_version",
+            "calendar_schema_fingerprint",
+            "data_summary",
+            "train_batch_contract",
+            "production_canary_contract",
+            "epoch_policy",
+            "training_contract",
+            "feature_contract",
+        ):
+            if existing_data_manifest.get(key) != sealed_data_manifest.get(key):
+                raise V100H26ContractError(
+                    f"existing production data manifest drifted at {key!r}"
+                )
+        training_source_commit = str(existing_data_manifest["source_commit"])
+    else:
+        write_secure_json(data_manifest_path, sealed_data_manifest)
+        training_source_commit = _source_commit()
+
+    training_manifest_path = model_output / "training_manifest.json"
+    expected_checkpoint_path = model_output / spec.checkpoint_filename
+    if resume_existing and expected_checkpoint_path.is_file():
+        if not training_manifest_path.is_file():
+            raise V100H26ContractError(
+                "resume requires the existing training_manifest.json"
+            )
+        training_manifest = json.loads(
+            training_manifest_path.read_text(encoding="utf-8")
         )
+        model_metrics = (training_manifest.get("results") or {}).get(
+            spec.model_key,
+            {},
+        )
+        checkpoint_path = expected_checkpoint_path.resolve()
+    else:
+        result = train(
+            TrainRequest(
+                train_loader=train_loader,
+                val_loader=None,
+                freq=FREQUENCY,
+                lookback=LOOKBACK,
+                horizon=HORIZON,
+                models=[spec.model_key],
+                architecture=build_architecture(),
+                trainer=TrainerConfig(
+                    warmup_epochs=epochs,
+                    spike_epochs=0,
+                    lr=1e-3,
+                    training_mode="production_refit",
+                    random_seed=PRODUCTION_REFIT_SEED,
+                ),
+                ssl=SSLConfig(mode="sl_only"),
+                runtime=RuntimeConfig(device=device),
+                artifacts=ArtifactConfig(
+                    save_dir=str(model_output),
+                    auto_save_dir=False,
+                ),
+                use_exogenous_mode=True,
+                use_past_exogenous=True,
+                use_future_exogenous=spec.uses_future_continuous,
+            )
+        )
+        if result.primary_ckpt_path is None:
+            raise V100H26ContractError(
+                f"{spec.model_key} refit did not return a checkpoint"
+            )
+        checkpoint_path = Path(result.primary_ckpt_path).resolve()
+        model_metrics = result.results.get(spec.model_key, {})
 
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
-    checkpoint_path = Path(result.primary_ckpt_path).resolve()
     checkpoint_evidence = _validate_checkpoint(
         checkpoint_path=checkpoint_path,
         spec=spec,
@@ -420,14 +493,14 @@ def run_model(
         device=device,
         epochs=epochs,
     )
-    model_metrics = result.results.get(spec.model_key, {})
     receipt: dict[str, object] = {
         "receipt_format_version": 1,
         "status": "PASS",
         "completed_at_utc": datetime.now(timezone.utc).isoformat(),
         "model_key": spec.model_key,
         "plan_model_name": spec.plan_model_name,
-        "source_commit": _source_commit(),
+        "source_commit": training_source_commit,
+        "validation_source_commit": _source_commit(),
         "input_manifest_sha256": manifest["file_sha256"],
         "training_contract": {
             "lookback": LOOKBACK,
@@ -462,16 +535,17 @@ def run_all(
     num_workers: int,
     device: str,
     sample_part_count: int | None,
+    resume_existing: bool = False,
     model_specs: tuple[ExogenousQualificationModelSpec, ...] = PRODUCTION_MODEL_SPECS,
 ) -> dict[str, object]:
     load_training_input_manifest(input_manifest, target_source=target_source)
-    if output_root.exists():
+    if output_root.exists() and not resume_existing:
         raise V100H26ContractError(
             f"output root already exists; refusing overwrite: {output_root}"
         )
-    output_root.mkdir(parents=True)
+    output_root.mkdir(parents=True, exist_ok=resume_existing)
     logs_dir = output_root / "logs"
-    logs_dir.mkdir()
+    logs_dir.mkdir(exist_ok=resume_existing)
     status_path = output_root / "production-refit-status.txt"
     status_path.write_text("RUNNING current=preflight\n", encoding="ascii")
 
@@ -479,6 +553,16 @@ def run_all(
     try:
         for spec in model_specs:
             epochs = PRODUCTION_REFIT_EPOCHS[spec.model_key]
+            receipt_path = (
+                output_root
+                / spec.model_key
+                / "production-refit-receipt.json"
+            )
+            if resume_existing and receipt_path.is_file():
+                receipts.append(
+                    json.loads(receipt_path.read_text(encoding="ascii"))
+                )
+                continue
             status_path.write_text(
                 "RUNNING "
                 f"current={spec.model_key} epochs={epochs} "
@@ -496,9 +580,11 @@ def run_all(
                 device=device,
                 sample_part_count=sample_part_count,
                 preflight_only=False,
+                resume_existing=resume_existing,
             )
             log_path = logs_dir / f"training-{spec.model_key}.log"
-            with log_path.open("x", encoding="utf-8") as stream:
+            mode = "a" if resume_existing else "x"
+            with log_path.open(mode, encoding="utf-8") as stream:
                 stream.write(
                     "command="
                     + json.dumps(command, ensure_ascii=True)
@@ -512,11 +598,6 @@ def run_all(
                     stdout=stream,
                     stderr=subprocess.STDOUT,
                 )
-            receipt_path = (
-                output_root
-                / spec.model_key
-                / "production-refit-receipt.json"
-            )
             receipts.append(json.loads(receipt_path.read_text(encoding="ascii")))
     except BaseException:
         status_path.write_text("FAILED\n", encoding="ascii")
@@ -566,6 +647,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--sample-part-count", type=int, default=None)
     parser.add_argument("--preflight-only", action="store_true")
+    parser.add_argument("--resume-existing", action="store_true")
     parser.add_argument("--python", type=Path, default=Path(sys.executable))
     return parser
 
@@ -586,6 +668,7 @@ def main(argv: list[str] | None = None) -> int:
             device=str(args.device),
             sample_part_count=args.sample_part_count,
             preflight_only=bool(args.preflight_only),
+            resume_existing=bool(args.resume_existing),
         )
     else:
         if args.preflight_only:
@@ -599,6 +682,7 @@ def main(argv: list[str] | None = None) -> int:
             num_workers=int(args.num_workers),
             device=str(args.device),
             sample_part_count=args.sample_part_count,
+            resume_existing=bool(args.resume_existing),
             model_specs=tuple(
                 MODEL_SPECS_BY_KEY[key]
                 for key in (args.model_keys or tuple(PRODUCTION_REFIT_EPOCHS))
