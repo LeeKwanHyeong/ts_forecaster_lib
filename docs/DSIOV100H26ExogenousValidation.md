@@ -141,8 +141,8 @@ when seed 42 is included.
 
 ## TimeXer Multi-seed Qualification
 
-TimeXer was subsequently qualified from scratch with seeds 11, 22, and 33
-under the same L52/H26 data, split, architecture, loss, 40-epoch limit, and
+TimeXer was qualified from scratch with seeds 11, 22, 33, and 42 under the
+same L52/H26 data, split, architecture, loss, 40-epoch limit, and
 best-validation state selection. TimeXer remains an independent full-H26 model
 and uses the 12 past continuous calendar features without future exogenous
 features.
@@ -152,14 +152,17 @@ features.
 | 11 | 29 | 1.386854 | 1.339047 | 28.4491% | 72.5298% | +0.359800 |
 | 22 | 25 | 1.399899 | 1.356807 | 28.8265% | 71.9633% | +0.405909 |
 | 33 | 10 | 1.408210 | 1.331664 | 28.2923% | 70.3282% | +0.289316 |
-| Mean | 21.33 | 1.398321 | 1.342506 | 28.5226% | 71.6071% | +0.351675 |
-| Population standard deviation | 8.18 | 0.008790 | 0.010552 | 0.2242% | 0.9334% | 0.047944 |
+| 42 | 26 | 1.401998 | 1.343031 | 28.5338% | 72.6657% | +0.323529 |
+| Mean | 22.50 | 1.399240 | 1.342637 | 28.5254% | 71.8718% | +0.344639 |
+| Population standard deviation | 7.37 | 0.007777 | 0.009141 | 0.1942% | 0.9293% | 0.043273 |
 
 Each seed evaluates 6,952 eligible series and 180,752 forecast points. Its
 horizon CSV contains all 26 steps for both raw and nonnegative output policies.
-The qualification artifacts and their receipt seals are recorded below. This
-section fixes qualification evidence only; it does not yet choose the TimeXer
-production-refit epoch.
+The qualification artifacts and their receipt seals are recorded below. The
+fixed production-refit epoch is 20: this is the lowest four-seed mean
+validation loss across the complete 40-epoch curves. At epoch 20, the mean is
+`1.42310275`, the sample standard deviation is `0.01936867`, and the
+worst-seed loss is `1.447352`.
 
 ## Model Interpretation
 
@@ -211,12 +214,26 @@ TimeXer multi-seed roots at source commit `bdea737`:
 - Seed 11: `/home/leekwanhyeong/artifacts/exogenous-h26-timexer-multiseed-bdea737-seed11-e40`
   - Checkpoint: `a3a531d0b99e996b17be60bbfa4dc00c714c76362ec3b166abf93f980f03db58`
   - Evaluation receipt: `f82d0d76d2883396564c489af3e6729e0ddc13b8f72d1accd0f560317346095c`
+  - Training log: `46821eb3eeab276d40c46f4962e909f19b64d76a457285e37439ffc2f968fbd2`
 - Seed 22: `/home/leekwanhyeong/artifacts/exogenous-h26-timexer-multiseed-bdea737-seed22-e40`
   - Checkpoint: `cc8156c974262c586095dfd4d239aae16aff4e0a9da4c65bf0dfe964ccc87fda`
   - Evaluation receipt: `6e177832b05787b0517ed1730659a4a5bd9fe215196e51033d2b12d0933305f9`
+  - Training log: `b540767ec5de3f68f990af96a6ef7dd58a24d051f396bb27bd8f8c32cd2bf3b2`
 - Seed 33: `/home/leekwanhyeong/artifacts/exogenous-h26-timexer-multiseed-bdea737-seed33-e40`
   - Checkpoint: `ed9b78ce95a2ad3bbfa872ea70732622fca16fdfabf377866db208a3cb01477e`
   - Evaluation receipt: `ffba8eebe5e888a5d666f89429f64285a7767da103a4741bb3396186731bba8f`
+  - Training log: `e38d34cf89a3e3fac710006f5b615bb4243d5fe3f36ba0cd9a3b74a0dece1a55`
 
 The aggregate qualification, model, and evaluation receipt seals for all three
 TimeXer seeds were independently recomputed successfully.
+
+Seed 42 qualification root at source commit `f750d9d`:
+
+- `/home/leekwanhyeong/artifacts/exogenous-h26-qualification-f750d9d-seed42-e40`
+  - Checkpoint: `98338d9779314f04b8725b9ebe00a40c553c15e04946dbced57def2bb4161d3f`
+  - Training log: `e5c81ccbe35e93705dc7c6f9ca29fe1336b9ead5ca3d02c371d12db15dae7b53`
+
+Changes between the source commits add multi-seed orchestration, evaluation,
+and production-refit plumbing; they do not alter the TimeXer model or trainer.
+All four runs use the same input manifest, TimeXer architecture, split, loss,
+and 40-epoch training contract.
