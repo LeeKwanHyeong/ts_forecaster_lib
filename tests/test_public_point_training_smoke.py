@@ -410,6 +410,11 @@ def test_public_point_train_checkpoint_load_predict_smoke(
             assert checkpoint["meta"]["architecture_variant"] == "endogenous"
 
     predictor = load_predictor(result.primary_ckpt_path, device="cpu", strict=True)
+    if exogenous is not None:
+        assert predictor.exogenous_schema is not None
+        assert predictor.exogenous_schema.past_cont_names == ("exo_known",)
+        expected_future = () if model_key == "timexer_base" else ("exo_known",)
+        assert predictor.exogenous_schema.future_cont_names == expected_future
     payload = _prediction_payload(model_key)
     first = predictor.predict(payload)
     second = predictor.predict(payload)
