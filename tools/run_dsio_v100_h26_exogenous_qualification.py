@@ -198,6 +198,7 @@ def build_worker_command(
     device: str,
     sample_part_count: int | None,
     preflight_only: bool,
+    seed: int,
 ) -> list[str]:
     command = [
         str(python_executable),
@@ -218,6 +219,8 @@ def build_worker_command(
         str(num_workers),
         "--device",
         device,
+        "--seed",
+        str(seed),
     ]
     if sample_part_count is not None:
         command.extend(["--sample-part-count", str(sample_part_count)])
@@ -241,6 +244,7 @@ def _load_target(
     source: Path,
     *,
     sample_part_count: int | None,
+    seed: int = SEED,
 ) -> pl.DataFrame:
     if not source.is_file():
         raise FileNotFoundError(f"target source not found: {source}")
@@ -259,7 +263,7 @@ def _load_target(
                 "sample_part_count exceeds available series: "
                 f"{sample_part_count} > {len(part_ids)}."
             )
-        rng = np.random.default_rng(SEED)
+        rng = np.random.default_rng(seed)
         selected = sorted(
             str(value)
             for value in rng.choice(
@@ -276,6 +280,7 @@ def _build_datamodule(
     frame: pl.DataFrame,
     *,
     spec: ExogenousQualificationModelSpec,
+    seed: int = SEED,
 ) -> IndexedTemporalExogenousDataModule:
     one_table = attach_weekly_calendar_features(
         frame,
@@ -296,7 +301,7 @@ def _build_datamodule(
         past_exo_cont_cols=WEEKLY_CALENDAR_CONTINUOUS_FEATURES,
         future_exo_cont_cols=future_columns,
         window_stride=WINDOW_STRIDE,
-        seed=SEED,
+        seed=seed,
         part_col=ID_COLUMN,
         date_col=DATE_COLUMN,
         qty_col=TARGET_COLUMN,
@@ -407,6 +412,7 @@ def _validate_checkpoint(
     spec: ExogenousQualificationModelSpec,
     validation_batch: tuple[Any, ...],
     device: str,
+    seed: int,
 ) -> dict[str, object]:
     if checkpoint_path.name != spec.checkpoint_filename:
         raise V100H26ContractError(
@@ -430,7 +436,7 @@ def _validate_checkpoint(
         raise V100H26ContractError(
             "qualification checkpoint must restore the best validation state"
         )
-    if meta.get("random_seed") != SEED:
+    if meta.get("random_seed") != seed:
         raise V100H26ContractError("checkpoint random seed mismatch")
 
     predictor = load_predictor(
@@ -482,6 +488,7 @@ def run_model(
     device: str,
     sample_part_count: int | None,
     preflight_only: bool,
+    seed: int,
 ) -> dict[str, object]:
     if epochs <= 0:
         raise ValueError("epochs must be positive.")
@@ -491,14 +498,15 @@ def run_model(
         input_manifest,
         target_source=target_source,
     )
-    set_global_seed(SEED)
+    set_global_seed(seed)
     configure_torch_runtime()
 
     target = _load_target(
         target_source,
         sample_part_count=sample_part_count,
+        seed=seed,
     )
-    datamodule = _build_datamodule(target, spec=spec)
+    datamodule = _build_datamodule(target, spec=spec, seed=seed)
     summary = datamodule.summary
     train_loader = datamodule.get_train_loader(
         batch_size=batch_size,
@@ -553,7 +561,7 @@ def run_model(
                 "validation_origin": VALIDATION_ORIGIN,
                 "window_stride": WINDOW_STRIDE,
                 "epochs": epochs,
-                "seed": SEED,
+                "seed": seed,
                 "loss": "library_point_default",
                 "state_selection": "best_validation",
             },
@@ -587,7 +595,7 @@ def run_model(
                 spike_epochs=0,
                 lr=1e-3,
                 training_mode="qualification",
-                random_seed=SEED,
+                random_seed=seed,
             ),
             ssl=SSLConfig(mode="sl_only"),
             runtime=RuntimeConfig(device=device),
@@ -614,6 +622,7 @@ def run_model(
         spec=spec,
         validation_batch=validation_batch,
         device=device,
+        seed=seed,
     )
     model_metrics = result.results.get(spec.model_key, {})
     receipt: dict[str, object] = {
@@ -632,7 +641,7 @@ def run_model(
             "validation_end_week": TRAIN_END_WEEK,
             "window_stride": WINDOW_STRIDE,
             "epochs": epochs,
-            "seed": SEED,
+            "seed": seed,
             "state_selection": "best_validation",
         },
         "data_summary": summary,
@@ -661,6 +670,8 @@ def run_all(
     num_workers: int,
     device: str,
     sample_part_count: int | None,
+    seed: int,
+    model_specs: tuple[ExogenousQualificationModelSpec, ...] = MODEL_SPECS,
 ) -> dict[str, object]:
     load_training_input_manifest(
         input_manifest,
@@ -678,7 +689,7 @@ def run_all(
 
     receipts: list[dict[str, object]] = []
     try:
-        for spec in MODEL_SPECS:
+        for spec in model_specs:
             status_path.write_text(
                 f"RUNNING current={spec.model_key} epochs={epochs}\n",
                 encoding="ascii",
@@ -695,6 +706,7 @@ def run_all(
                 device=device,
                 sample_part_count=sample_part_count,
                 preflight_only=False,
+                seed=seed,
             )
             log_path = logs_dir / f"training-{spec.model_key}.log"
             with log_path.open("x", encoding="utf-8") as stream:
@@ -731,6 +743,8 @@ def run_all(
         "source_commit": _source_commit(),
         "target_source_sha256": file_sha256(target_source),
         "input_manifest_sha256": file_sha256(input_manifest),
+        "seed": seed,
+        "selected_model_keys": [spec.model_key for spec in model_specs],
         "models": receipts,
     }
     aggregate["receipt_sha256"] = canonical_json_sha256(aggregate)
@@ -738,7 +752,10 @@ def run_all(
         output_root / "qualification-receipt.json",
         aggregate,
     )
-    status_path.write_text("PASS models=3\n", encoding="ascii")
+    status_path.write_text(
+        f"PASS models={len(model_specs)} seed={seed}\n",
+        encoding="ascii",
+    )
     return aggregate
 
 
@@ -757,6 +774,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
     parser.add_argument("--num-workers", type=int, default=8)
     parser.add_argument("--device", default="cuda")
+    parser.add_argument("--seed", type=int, default=SEED)
+    parser.add_argument(
+        "--model-keys",
+        nargs="+",
+        choices=tuple(MODEL_SPECS_BY_KEY),
+        default=None,
+        help="Run a selected model subset sequentially. Omit for all models.",
+    )
     parser.add_argument("--sample-part-count", type=int, default=None)
     parser.add_argument("--preflight-only", action="store_true")
     parser.add_argument("--python", type=Path, default=Path(sys.executable))
@@ -780,6 +805,7 @@ def main(argv: list[str] | None = None) -> int:
             device=str(args.device),
             sample_part_count=args.sample_part_count,
             preflight_only=bool(args.preflight_only),
+            seed=int(args.seed),
         )
     else:
         if args.preflight_only:
@@ -796,6 +822,11 @@ def main(argv: list[str] | None = None) -> int:
             num_workers=int(args.num_workers),
             device=str(args.device),
             sample_part_count=args.sample_part_count,
+            seed=int(args.seed),
+            model_specs=tuple(
+                MODEL_SPECS_BY_KEY[key]
+                for key in (args.model_keys or tuple(MODEL_SPECS_BY_KEY))
+            ),
         )
     print(json.dumps(receipt, ensure_ascii=True, sort_keys=True))
     return 0

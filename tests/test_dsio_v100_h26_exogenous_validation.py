@@ -6,8 +6,10 @@ import torch
 
 from tools.evaluate_dsio_v100_h26_exogenous_qualification import (
     ValidationMetricAccumulator,
+    _qualification_seed,
     evaluate_prediction_batches,
 )
+from tools.dsio_v100_h26_contract import V100H26ContractError
 
 
 def test_validation_metrics_match_explicit_point_definitions():
@@ -121,3 +123,28 @@ def test_public_predictor_batches_are_reshaped_and_counted():
     assert metrics["raw"]["overall"]["forecast_points"] == 78
     assert metrics["raw"]["overall"]["mae"] == pytest.approx(1.0)
     assert metrics["nonnegative"]["overall"]["mae"] == pytest.approx(1.0)
+
+
+def test_qualification_seed_requires_one_seed_across_selected_models():
+    receipt = {
+        "seed": 11,
+        "models": [
+            {"training_contract": {"seed": 11}},
+            {"training_contract": {"seed": 11}},
+        ],
+    }
+    assert _qualification_seed(receipt) == 11
+
+    receipt["models"][1]["training_contract"]["seed"] = 22
+    with pytest.raises(V100H26ContractError, match="seeds disagree"):
+        _qualification_seed(receipt)
+
+
+def test_qualification_seed_rejects_aggregate_drift():
+    with pytest.raises(V100H26ContractError, match="aggregate seed drifted"):
+        _qualification_seed(
+            {
+                "seed": 22,
+                "models": [{"training_contract": {"seed": 11}}],
+            }
+        )
