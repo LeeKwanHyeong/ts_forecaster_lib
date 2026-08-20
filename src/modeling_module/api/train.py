@@ -1226,7 +1226,7 @@ def _validate_training_request(
         ):
             supported = ", ".join(PRODUCTION_REFIT_ARTIFACT_KEYS)
             raise ValueError(
-                "production_refit supports exactly one endogenous artifact: "
+                "production_refit supports exactly one approved artifact: "
                 f"{supported}."
             )
         if int(payload.get("spike_epochs") or 0) > 0:

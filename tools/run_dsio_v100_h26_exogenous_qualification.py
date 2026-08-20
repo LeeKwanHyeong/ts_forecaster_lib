@@ -281,6 +281,7 @@ def _build_datamodule(
     *,
     spec: ExogenousQualificationModelSpec,
     seed: int = SEED,
+    training_mode: str = "qualification",
 ) -> IndexedTemporalExogenousDataModule:
     one_table = attach_weekly_calendar_features(
         frame,
@@ -306,6 +307,7 @@ def _build_datamodule(
         date_col=DATE_COLUMN,
         qty_col=TARGET_COLUMN,
         require_all_series_eligible=False,
+        training_mode=training_mode,
     )
     summary = datamodule.summary
     unsupported_exclusions = tuple(
@@ -318,25 +320,42 @@ def _build_datamodule(
             "series may be excluded only when pre-validation history is too "
             f"short; examples: {unsupported_exclusions[:5]}"
         )
-    expected_train_target_max = add_period(VALIDATION_ORIGIN, -1, "weekly")
-    if summary["train_target_max_week"] != expected_train_target_max:
-        raise V100H26ContractError(
-            "exogenous training windows crossed the validation boundary: "
-            f"expected {expected_train_target_max}, got "
-            f"{summary['train_target_max_week']}"
+    if training_mode == "qualification":
+        expected_train_target_max = add_period(
+            VALIDATION_ORIGIN,
+            -1,
+            "weekly",
         )
-    if summary["validation_target_min_week"] != VALIDATION_ORIGIN:
-        raise V100H26ContractError(
-            "exogenous validation origin drifted from the H26 contract"
-        )
-    if summary["validation_target_max_week"] != TRAIN_END_WEEK:
-        raise V100H26ContractError(
-            "exogenous validation window does not end at train_end_week"
-        )
-    if summary["validation_windows"] != summary["series_count"]:
-        raise V100H26ContractError(
-            "last-origin validation must contain exactly one window per series"
-        )
+        if summary["train_target_max_week"] != expected_train_target_max:
+            raise V100H26ContractError(
+                "exogenous training windows crossed the validation boundary: "
+                f"expected {expected_train_target_max}, got "
+                f"{summary['train_target_max_week']}"
+            )
+        if summary["validation_target_min_week"] != VALIDATION_ORIGIN:
+            raise V100H26ContractError(
+                "exogenous validation origin drifted from the H26 contract"
+            )
+        if summary["validation_target_max_week"] != TRAIN_END_WEEK:
+            raise V100H26ContractError(
+                "exogenous validation window does not end at train_end_week"
+            )
+        if summary["validation_windows"] != summary["series_count"]:
+            raise V100H26ContractError(
+                "last-origin validation must contain exactly one window per "
+                "series"
+            )
+    elif training_mode == "production_refit":
+        if summary["train_target_max_week"] != TRAIN_END_WEEK:
+            raise V100H26ContractError(
+                "production refit must train through train_end_week"
+            )
+        if summary["validation_windows"] != 0:
+            raise V100H26ContractError(
+                "production refit must not create validation windows"
+            )
+    else:
+        raise ValueError(f"Unsupported training_mode: {training_mode!r}.")
     return datamodule
 
 

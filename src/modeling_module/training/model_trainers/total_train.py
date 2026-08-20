@@ -2106,7 +2106,7 @@ def run_total_train(
         ):
             supported = ", ".join(PRODUCTION_REFIT_ARTIFACT_KEYS)
             raise ValueError(
-                "production_refit supports exactly one endogenous artifact: "
+                "production_refit supports exactly one approved artifact: "
                 f"{supported}."
             )
 

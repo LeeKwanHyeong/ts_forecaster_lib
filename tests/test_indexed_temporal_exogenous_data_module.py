@@ -105,6 +105,26 @@ def test_past_only_loader_emits_empty_future_tensor_for_timexer():
     assert loader.exogenous_schema.future_cont_names == ()
 
 
+def test_production_refit_uses_all_exogenous_targets_without_validation():
+    datamodule = _datamodule(training_mode="production_refit")
+    summary = datamodule.summary
+
+    assert summary["train_windows"] == 10
+    assert summary["train_target_max_week"] == 202502
+    assert summary["validation_windows"] == 0
+    assert summary["validation_target_min_week"] is None
+    assert summary["validation_target_max_week"] is None
+    assert datamodule.val_dataset is None
+
+    batch = next(iter(datamodule.get_train_loader(batch_size=2)))
+    assert batch[0].shape == (2, 4, 1)
+    assert batch[1].shape == (2, 3)
+    assert batch[3].shape == (2, 3, 1)
+    assert batch[4].shape == (2, 4, 2)
+    with pytest.raises(RuntimeError, match="has no validation loader"):
+        datamodule.get_val_loader(batch_size=2)
+
+
 def test_window_stride_keeps_latest_eligible_training_origin_and_is_seeded():
     first = _datamodule(window_stride=2)
     second = _datamodule(window_stride=2)
@@ -188,3 +208,21 @@ def test_too_short_series_can_be_explicitly_excluded_without_padding():
     )
     assert datamodule.val_dataset is not None
     assert datamodule.val_dataset.series_ids == ("B",)
+
+
+def test_production_refit_recovers_series_that_only_lack_holdout_history():
+    frame = _weekly_frame().filter(
+        ~(
+            (pl.col("oper_part_no") == "A")
+            & pl.col("demand_dt").is_in([202444, 202445])
+        )
+    )
+    datamodule = _datamodule(
+        frame,
+        require_all_series_eligible=False,
+        training_mode="production_refit",
+    )
+
+    assert datamodule.summary["source_series_count"] == 2
+    assert datamodule.summary["series_count"] == 2
+    assert datamodule.summary["excluded_series_count"] == 0
