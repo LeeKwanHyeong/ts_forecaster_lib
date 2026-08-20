@@ -2,15 +2,17 @@
 
 ## Scope
 
-- Source commit: `9af7449`
-- Checkpoint training commit: `f750d9d`
+- Initial evaluation commit: `9af7449`
+- Multi-seed qualification commit: `ee5d18b`
+- Seed 42 checkpoint training commit: `f750d9d`
 - Window: weekly L52/H26
 - Validation target: `202436` through `202509`
 - Source series: 7,000
 - Eligible series: 6,952
 - Excluded series: 48 with insufficient pre-validation history
 - Forecast points per model: 180,752
-- Seed: 42
+- Initial baseline seed: 42
+- Stability seeds: 11, 22, 33
 - Checkpoint selection: best validation state within 40 epochs
 
 This is a detailed comparison of the qualification validation set. It is not an
@@ -29,9 +31,10 @@ mean error in demand units, where a positive value means overforecasting.
 | 2 | ExoTST | 1.2548 | 26.6591% | 52.7229% | -0.0606 | -1.2880% |
 | 3 | TimeXer | 1.3430 | 28.5338% | 72.6657% | +0.3235 | +6.8736% |
 
-PatchTSTExogenous improves MAE by 5.34% over ExoTST and 11.56% over
-TimeXer. ExoTST has the smallest absolute bias, while TimeXer has both the
-largest overall error and the strongest overforecast bias.
+At seed 42, PatchTSTExogenous improves MAE by 5.34% over ExoTST and 11.56%
+over TimeXer. ExoTST has the smallest absolute bias, while TimeXer has both the
+largest overall error and the strongest overforecast bias. The multi-seed
+results below supersede this single-seed ranking for model strategy decisions.
 
 ## Output Policy Effect
 
@@ -59,11 +62,9 @@ must remain separate in future comparisons.
 | TimeXer | W9-W17 | 1.4205 | 29.4807% | 76.0364% | +0.1392 |
 | TimeXer | W18-W25 | 1.4604 | 42.7977% | 80.0079% | +0.8207 |
 
-PatchTSTExogenous wins 16 of 26 horizons, covering W1, W3, and W6-W19.
-ExoTST wins the other 10 horizons, including every horizon from W20 through
-W25. TimeXer does not win an individual horizon. The late-horizon result means
-PatchTSTExogenous is the best aggregate checkpoint, but ExoTST is more stable at
-the far end of H26.
+At seed 42, PatchTSTExogenous wins 16 of 26 horizons, covering W1, W3, and
+W6-W19. ExoTST wins the other 10 horizons, including every horizon from W20
+through W25. TimeXer does not win an individual horizon.
 
 ## Horizon MAE
 
@@ -96,6 +97,64 @@ the far end of H26.
 | W24 | 1.5869 | **1.3930** | 1.5686 |
 | W25 | 1.5524 | **1.2798** | 1.5950 |
 
+## Multi-seed Stability
+
+Seeds 11, 22, and 33 retrain ExoTST and PatchTSTExogenous from scratch with
+the same data, split, architecture, loss, 40-epoch limit, and best-validation
+state selection. The table uses nonnegative point output.
+
+| Seed | ExoTST MAE | PatchTSTExogenous MAE | Winner |
+|---:|---:|---:|---|
+| 11 | **1.2630** | 1.4099 | ExoTST |
+| 22 | 1.3062 | **1.2175** | PatchTSTExogenous |
+| 33 | **1.2053** | 1.2235 | ExoTST |
+| Mean | **1.2582** | 1.2836 | ExoTST |
+| Population standard deviation | **0.0413** | 0.0893 | ExoTST |
+
+ExoTST wins two of three stability seeds and has less than half the MAE
+variation of PatchTSTExogenous. PatchTSTExogenous therefore does not retain its
+seed 42 aggregate advantage consistently and must not be promoted as the sole
+default model.
+
+Across seeds 11, 22, 33, and the supplemental seed 42 baseline, W18 favors
+PatchTSTExogenous in three of four seeds, while W19 favors ExoTST in three of
+four. ExoTST wins W22-W25 in all four seeds. This places the stable contiguous
+handoff boundary between W18 and W19.
+
+## Routing Comparison
+
+A cutoff of `k` means PatchTSTExogenous supplies W0 through W(k-1), and
+ExoTST supplies Wk through W25. The primary comparison below uses seeds 11,
+22, and 33.
+
+| Strategy | Mean MAE | MAE std | Worst-seed MAE | Mean WAPE | Mean sMAPE | Mean bias |
+|---|---:|---:|---:|---:|---:|---:|
+| ExoTST only | 1.2582 | 0.0413 | 1.3062 | 26.7308% | 56.9503% | -0.1911 |
+| Cutoff W18 | 1.2275 | **0.0368** | **1.2793** | 26.0792% | 55.2406% | +0.0325 |
+| Cutoff W19 | **1.2259** | 0.0409 | 1.2838 | **26.0462%** | 55.2769% | +0.0563 |
+| PatchTSTExogenous only | 1.2836 | 0.0893 | 1.4099 | 27.2720% | 57.8789% | +0.2419 |
+
+The W19 cutoff has the lowest mean MAE among all 27 contiguous routing
+candidates. It improves mean MAE by 2.56% over ExoTST-only and 4.50% over
+PatchTSTExogenous-only. The same W19 cutoff remains the best mean-MAE candidate
+when seed 42 is included.
+
+## Model Strategy
+
+The qualification strategy is fixed as follows:
+
+1. The accuracy-first default is a two-model route: PatchTSTExogenous for
+   W0-W18 and ExoTST for W19-W25.
+2. When only one model can be loaded or called, ExoTST is the single-model
+   fallback because it has the lower multi-seed mean MAE and lower variation.
+3. PatchTSTExogenous alone is not the default. Its seed 42 win does not survive
+   the stability check.
+4. Both model outputs use `max(0, raw)` before the horizon blocks are joined.
+
+This decision fixes the qualification model policy only. Production refit,
+artifact promotion, and Demand Engine routing are separate implementation and
+approval steps.
+
 ## Evidence
 
 Remote artifact root:
@@ -107,3 +166,20 @@ Remote artifact root:
 
 The JSON receipt also seals the source dataset, input manifest, qualification
 receipt, and all three checkpoint SHA-256 values.
+
+Multi-seed evaluation roots:
+
+- Seed 11: `/home/leekwanhyeong/artifacts/exogenous-h26-multiseed-ee5d18b-seed11-e40/validation-evaluation`
+  - Evaluation JSON SHA-256: `fc111a09e1588a69557986992a54f5bc767e842001864b17c4ff0ae6da342eaf`
+  - ExoTST checkpoint: `9d3d1c30769f982c3235c78c1fe686c988cafaa9e13fa5799fa74281528fe7dd`
+  - PatchTSTExogenous checkpoint: `fcd0c437ca624c0c23df33218fe53aec4e3c0992ce8233205064dd5747225086`
+- Seed 22: `/home/leekwanhyeong/artifacts/exogenous-h26-multiseed-ee5d18b-seed22-e40/validation-evaluation`
+  - Evaluation JSON SHA-256: `5edd2334d9edd92ae6fe3cab73aab5574b65ca0d2e0021525fafe23a9ebf68f0`
+  - ExoTST checkpoint: `84fddf647b73cbce29e5cbe05d251d0673a74575bf4a15e33fb5c19e167927ee`
+  - PatchTSTExogenous checkpoint: `cd30a1e94e63b8791274770514e8d6c7841de489447aa497936835dc39d9bf3b`
+- Seed 33: `/home/leekwanhyeong/artifacts/exogenous-h26-multiseed-ee5d18b-seed33-e40/validation-evaluation`
+  - Evaluation JSON SHA-256: `a47fc61016304af02bdfc0e6c555e8558009e2abd1c54d8d74a00193aea4e338`
+  - ExoTST checkpoint: `be5b8d736c9912ad07d7a4914beb3575723e21497c9e3869331ac4ba59f50b39`
+  - PatchTSTExogenous checkpoint: `996a5bbe7ac2320500e066a9cf3858dcf991428b941699176de1ec363008e7a7`
+
+All three evaluation receipt seals were recomputed successfully.
