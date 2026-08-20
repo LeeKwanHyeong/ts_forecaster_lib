@@ -11,9 +11,15 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from email.message import Message
+from email.parser import Parser
 from pathlib import Path
+from pathlib import PurePosixPath
 from typing import Any
 from zipfile import ZipFile
+
+from packaging.requirements import Requirement
+from packaging.utils import canonicalize_name
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -21,8 +27,13 @@ DIST_DIR = REPO_ROOT / "dist"
 PRIVATE_DIST_DIR = DIST_DIR / "private"
 DEFAULT_PRIVATE_BUILD_TAG = "1private"
 PRIVATE_BUILD_MANIFEST = "PRIVATE-BUILD.json"
+PRIVATE_DISTRIBUTION_PROFILE = "non-sellm"
 _BUILD_TAG_RE = re.compile(r"^[0-9][0-9A-Za-z_]*$")
 _NATIVE_SUFFIXES = frozenset({".dll", ".dylib", ".pyd", ".so"})
+_SELLM_DEPENDENCIES = frozenset(
+    canonicalize_name(name)
+    for name in ("accelerate", "safetensors", "tokenizers", "transformers")
+)
 _WHEEL_BUILD_FILES = (
     "LICENSE",
     "MANIFEST.in",
@@ -36,6 +47,14 @@ PUBLIC_SOURCE_ROOTS = (
 PUBLIC_SOURCE_FILES = {
     "modeling_module/__init__.py",
 }
+
+
+def is_sellm_payload(rel_path: str) -> bool:
+    path = PurePosixPath(rel_path.replace("\\", "/"))
+    return (
+        any(part.casefold() == "sellm" for part in path.parts)
+        or path.name.casefold() in {"sellm_train.py", "sellm_train.pyc"}
+    )
 
 
 def is_public_source(rel_path: str) -> bool:
@@ -169,6 +188,7 @@ def write_private_build_manifest(
     commit, dirty = _builder_git_provenance()
     manifest = {
         "format_version": 1,
+        "distribution_profile": PRIVATE_DISTRIBUTION_PROFILE,
         "build_tag": validate_private_build_tag(build_tag),
         "python_tag": private_python_tag(),
         "abi_tag": "none",
@@ -203,9 +223,56 @@ def stage_clean_wheel_source(stage_root: Path) -> Path:
     shutil.copytree(
         package_source,
         stage_root / "src" / "modeling_module",
-        ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo", ".DS_Store", "*.egg-info"),
+        ignore=shutil.ignore_patterns(
+            "__pycache__",
+            "*.pyc",
+            "*.pyo",
+            ".DS_Store",
+            "*.egg-info",
+            "SELLM",
+            "sellm_train.py",
+        ),
     )
     return stage_root
+
+
+def remove_sellm_payload(unpacked_root: Path) -> list[str]:
+    removed: list[str] = []
+    for path in sorted(
+        unpacked_root.rglob("*"),
+        key=lambda item: len(item.parts),
+        reverse=True,
+    ):
+        rel_path = path.relative_to(unpacked_root).as_posix()
+        if not is_sellm_payload(rel_path):
+            continue
+        if path.is_dir():
+            shutil.rmtree(path, ignore_errors=True)
+        elif path.exists():
+            path.unlink()
+        removed.append(rel_path)
+    return sorted(removed)
+
+
+def sanitize_non_sellm_metadata(unpacked_root: Path) -> Path:
+    metadata_path = _single_dist_info_dir(unpacked_root) / "METADATA"
+    message = Parser().parsestr(metadata_path.read_text(encoding="utf-8"))
+    sanitized = Message()
+    for name, value in message.raw_items():
+        normalized_name = name.casefold()
+        if normalized_name == "provides-extra" and value.strip().casefold() == "sellm":
+            continue
+        if normalized_name == "requires-dist":
+            requirement = Requirement(value)
+            if (
+                canonicalize_name(requirement.name) in _SELLM_DEPENDENCIES
+                or "sellm" in value.casefold()
+            ):
+                continue
+        sanitized[name] = value
+    sanitized.set_payload(message.get_payload())
+    metadata_path.write_text(sanitized.as_string(), encoding="utf-8")
+    return metadata_path
 
 
 def build_public_wheel(*, no_isolation: bool, dest_dir: Path | None = None) -> Path:
@@ -349,6 +416,12 @@ def assert_private_wheel_metadata(wheel_path: Path, *, build_tag: str) -> None:
         )
 
     with ZipFile(wheel_path) as archive:
+        sellm_members = sorted(
+            name for name in archive.namelist() if is_sellm_payload(name)
+        )
+        if sellm_members:
+            joined = ", ".join(sellm_members[:10])
+            raise RuntimeError(f"Private wheel contains SELLM payloads: {joined}")
         unexpected_sources = sorted(
             name
             for name in archive.namelist()
@@ -376,8 +449,38 @@ def assert_private_wheel_metadata(wheel_path: Path, *, build_tag: str) -> None:
                 f"Private wheel WHEEL metadata does not declare Build: {expected_build}."
             )
 
+        package_metadata_names = [
+            name
+            for name in archive.namelist()
+            if name.endswith(".dist-info/METADATA")
+        ]
+        if len(package_metadata_names) != 1:
+            raise RuntimeError(
+                "Expected exactly one package METADATA file, "
+                f"found {len(package_metadata_names)}."
+            )
+        package_metadata = Parser().parsestr(
+            archive.read(package_metadata_names[0]).decode("utf-8")
+        )
+        exposed_sellm_metadata = [
+            value
+            for header in ("Provides-Extra", "Requires-Dist")
+            for value in package_metadata.get_all(header, [])
+            if "sellm" in value.casefold()
+            or (
+                header == "Requires-Dist"
+                and canonicalize_name(Requirement(value).name) in _SELLM_DEPENDENCIES
+            )
+        ]
+        if exposed_sellm_metadata:
+            raise RuntimeError(
+                "Private wheel metadata exposes SELLM dependencies: "
+                f"{exposed_sellm_metadata[:5]}"
+            )
+
     manifest = read_private_build_manifest(wheel_path)
     expected_manifest = {
+        "distribution_profile": PRIVATE_DISTRIBUTION_PROFILE,
         "build_tag": expected_build,
         "python_tag": private_python_tag(),
         "abi_tag": "none",
@@ -493,6 +596,9 @@ assert target in package_path.parents, (target, package_path)
 assert target in registry_path.parents, (target, registry_path)
 assert registry_path.suffix == ".pyc", registry_path
 assert callable(train)
+assert not hasattr(modeling_module, "SELLMArchitectureConfig")
+assert not any("sellm" in key.casefold() for key in registry.MODEL_SPECS)
+assert not any("sellm" in family.casefold() for family in registry.TRAINING_FAMILY_DEFAULTS)
 assert TrainRequest(models=["patchtst_base"]).models == ["patchtst_base"]
 assert DistributionLoss(distribution="Normal").param_names == ["-loc", "-scale"]
 
@@ -521,6 +627,7 @@ print(json.dumps({
     "package_path": str(package_path),
     "registry_path": str(registry_path),
     "manifest": manifest,
+    "non_sellm": True,
 }, sort_keys=True))
 """
         completed = subprocess.run(
@@ -552,6 +659,8 @@ def build_private_wheel(
 
     with tempfile.TemporaryDirectory(prefix="private-wheel-") as tmpdir:
         unpack_root = unpack_wheel(source_wheel, Path(tmpdir))
+        remove_sellm_payload(unpack_root)
+        sanitize_non_sellm_metadata(unpack_root)
         convert_internal_sources_to_sourceless(unpack_root)
         assert_only_public_python_sources(unpack_root)
         assert_platform_independent_layout(unpack_root)

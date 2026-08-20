@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Callable, Dict
 
+from modeling_module._internal.optional_features import SELLM_AVAILABLE
+
 from .registry import (
     build_model,
     get_model_builders,
@@ -39,7 +41,6 @@ __all__ = [
     "build_nhits",
     "build_timemixer",
     "build_timexer",
-    "build_sellm",
     "build_cgmm",
     "build_similar_lifecycle",
     "CGMMConfig",
@@ -56,7 +57,7 @@ if TYPE_CHECKING:
         build_similar_lifecycle,
         build_nhits,
         build_timemixer,
-        build_sellm,
+        build_sellm as build_sellm,
         build_patch_mixer,
         build_patch_mixer_exogenous,
         build_titan_base,
@@ -93,7 +94,6 @@ _LAZY = {
     "build_nhits": (".model_builder", "build_nhits"),
     "build_timemixer": (".model_builder", "build_timemixer"),
     "build_timexer": (".model_builder", "build_timexer"),
-    "build_sellm": (".model_builder", "build_sellm"),
     "PatchMixerConfig": (
         ".PatchMixer.common.configs",
         "PatchMixerConfig",
@@ -115,6 +115,10 @@ _LAZY = {
         "SimilarLifecycleConfig",
     ),
 }
+
+if SELLM_AVAILABLE:
+    __all__.append("build_sellm")
+    _LAZY["build_sellm"] = (".model_builder", "build_sellm")
 
 
 def __getattr__(name: str):

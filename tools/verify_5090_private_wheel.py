@@ -156,6 +156,7 @@ def verify_5090_private_wheel(
             raise RuntimeError(f"private wheel contains incompatible bytecode: {bad_magic[:5]}")
 
     expected_manifest = {
+        "distribution_profile": "non-sellm",
         "build_tag": "1private",
         "python_tag": "cp312",
         "abi_tag": "none",

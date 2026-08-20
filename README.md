@@ -232,6 +232,8 @@ python3 tools/build_private_wheel.py
 기본 동작:
 
 - 현재 `src/modeling_module` 만 clean staging한 뒤 public wheel을 build
+- private distribution profile은 `non-sellm`이며 SELLM model, trainer, public export,
+  registry entry와 LLM extra dependency metadata를 제외
 - wheel을 unpack
 - `modeling_module/__init__.py` 와 `modeling_module/api/**/*.py` 만 source로 유지
 - 나머지 `modeling_module/**/*.py` 는 `.pyc` 로 컴파일 후 source 제거
@@ -239,6 +241,9 @@ python3 tools/build_private_wheel.py
 - 빈 임시 venv에 `--no-deps --no-index` 로 wheel만 설치해 metadata와 설치 경로를 검사
 - repository 밖의 격리 모드 Python에서 그 venv의 wheel과 기존 ML 의존성을 사용해 public import와
   `build_dataset` smoke를 실행
+
+일반 source checkout과 `python3 -m build`로 생성한 public wheel의 SELLM 지원은 유지됩니다.
+`tools/build_private_wheel.py`로 생성하는 core private wheel만 non-SELLM 경계를 적용합니다.
 
 Private wheel filename/ABI 정책은 다음과 같습니다.
 
