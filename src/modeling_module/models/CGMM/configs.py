@@ -13,9 +13,10 @@ from modeling_module.data_loader.lifecycle_contracts import LTB_FORECAST_MONTHS
 CGMMPreprocessingProfile: TypeAlias = Literal[
     "generic_v1",
     "static_observed_v1",
+    "static_observed_m0_v1",
 ]
 CGMM_PREPROCESSING_PROFILES: Final = frozenset(
-    {"generic_v1", "static_observed_v1"}
+    {"generic_v1", "static_observed_v1", "static_observed_m0_v1"}
 )
 
 
@@ -37,8 +38,8 @@ class CGMMPreprocessingConfig:
                 raise ValueError(f"{field_name} must be finite and positive")
         if self.feature_profile not in CGMM_PREPROCESSING_PROFILES:
             raise ValueError(
-                "feature_profile must be 'generic_v1' or "
-                "'static_observed_v1'"
+                "feature_profile must be 'generic_v1', "
+                "'static_observed_v1', or 'static_observed_m0_v1'"
             )
 
     def to_dict(self) -> dict[str, Any]:

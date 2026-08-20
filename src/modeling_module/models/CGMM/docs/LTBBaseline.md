@@ -16,6 +16,49 @@ LTB Lifecycle 예측은 **초기 12개월 관측으로 이후 72개월을 예측
 
 Production registry는 변경하지 않는다.
 
+## 2026-08-20 M0 및 Tail 개선 기준선
+
+현재 DSDM 시간순 8:2 데이터에서는 기존 모델 용량을 유지한 채 M0 ordinal,
+cohort strength, Tail half-life, scale gate를 분리해 비교했다.
+
+- Dataset fingerprint:
+  `12a4eb4d02e3c7a4222cc02c59de7dd4e55922005460e627129d2b5de36b6b22`
+- Train: M0 `2020-03` 이하, 5,620개
+- Validation: M0 `2021-01~2023-03`, 1,380개
+- 설정 선택: Train 5,620개 내부의 시간순 rolling 구간만 사용
+- 입력 경계: M0 ordinal은 사용하고 실제 미래 감소 속도는 사용하지 않음
+
+Train 내부 단일 요인 비교 후 선택된 값을 조합한 결과는 다음과 같다.
+
+- CGMM: `static_observed_m0_v1`, cohort strength `0.25`, Tail half-life
+  `48`, scale gate quantile `0.25`
+- Similar Lifecycle 후보: `static_observed_m0_v1`, cohort strength `0.0`,
+  Tail half-life `48`, scale gate quantile `0.25`
+
+고정된 Validation에서 기존 기준선과 비교한 결과는 다음과 같다.
+
+| 모델 | 설정 | WAPE | 수량 편향 | 90% coverage | Interval score |
+|---|---|---:|---:|---:|---:|
+| CGMM | 기존 | 0.7370 | +64.80% | 0.9088 | 59.0856 |
+| CGMM | M0 및 Tail 후보 | **0.5962** | **+48.50%** | 0.8836 | **54.2962** |
+| Similar Lifecycle | 기존 | **0.7632** | **+66.58%** | **0.7354** | **76.0036** |
+| Similar Lifecycle | M0 및 Tail 후보 | 0.7714 | +68.68% | 0.6691 | 79.2129 |
+
+CGMM 후보는 WAPE를 `19.11%` 줄이고 절대 편향을 `25.15%` 줄였다. 특히
+M37~M72 WAPE가 `1.0869`에서 `0.6345`로 감소했다. 다만 M1~M12 WAPE는
+`0.3255`에서 `0.3880`으로 증가했으므로 단기 구간은 후속 개선 대상이다.
+
+Similar Lifecycle 후보는 장기 WAPE는 줄였지만 전체 WAPE와 편향 및 구간
+품질이 악화됐다. 따라서 현재 개발 기준선은 **개선된 CGMM을 채택 후보로
+고정하고 Similar Lifecycle은 기존 설정을 유지**한다. 이 결정은 production
+registry, wheel, 5090 Runtime을 변경하지 않는다.
+
+Train 선택 report SHA-256:
+`182a81ab9b447b01ae7c43e40fcb98b51cbd594c74d0d314e6912db9b979197c`
+
+Validation 비교 report SHA-256:
+`9922dce0c76899076ae1326892592c722621eac1828c2312b7128dcc97fa9119`
+
 ## 검증 데이터와 경계
 
 - Dataset fingerprint:

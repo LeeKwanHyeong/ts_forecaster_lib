@@ -9,7 +9,6 @@ import numpy as np
 
 from modeling_module.data_loader.lifecycle_contracts import (
     LTB_OBSERVED_MONTHS,
-    LifecycleFeatureSchema,
     LifecycleSample,
     LifecycleSamplePurpose,
 )
@@ -26,6 +25,11 @@ from modeling_module.models.CGMM.contracts import (
 
 class CGMMPreprocessingError(CGMMContractError):
     """Raised when train-only preprocessing cannot be fitted or applied."""
+
+
+_STATIC_OBSERVED_PROFILES = frozenset(
+    {"static_observed_v1", "static_observed_m0_v1"}
+)
 
 
 def _materialize_samples(
@@ -164,7 +168,7 @@ def _static_observed_categorical_slots(
         or schema.known_future_cat_names
     ):
         raise CGMMPreprocessingError(
-            "static_observed_v1 supports static categorical, static "
+            "static observed profiles support static categorical, static "
             "continuous, and observed continuous features only"
         )
     names: list[str] = []
@@ -176,7 +180,7 @@ def _static_observed_categorical_slots(
     ):
         if not isinstance(value, str) or not value:
             raise CGMMPreprocessingError(
-                "static_observed_v1 categorical values must be non-empty text"
+                "static observed categorical values must be non-empty text"
             )
         names.append(f"static:{name}")
         values.append(value)
@@ -190,12 +194,12 @@ def _validate_static_observed_numeric_values(
         for value in sample.static_cont:
             if value is not None and value < 0.0:
                 raise CGMMPreprocessingError(
-                    "static_observed_v1 continuous values must be non-negative"
+                    "static observed continuous values must be non-negative"
                 )
         for row in sample.observed_cont:
             if any(value is None or value < 0.0 for value in row):
                 raise CGMMPreprocessingError(
-                    "static_observed_v1 observed continuous values must be "
+                    "static observed continuous values must be "
                     "present and non-negative"
                 )
 
@@ -274,7 +278,7 @@ class CGMMPreprocessor:
         )
         if numeric_rows.shape != (len(materialized), len(numeric_names)):
             raise CGMMPreprocessingError("numeric feature schema is inconsistent")
-        if self.config.feature_profile == "static_observed_v1":
+        if self.config.feature_profile in _STATIC_OBSERVED_PROFILES:
             _validate_static_observed_numeric_values(materialized)
             transformed_numeric = numeric_rows
         else:
@@ -288,7 +292,7 @@ class CGMMPreprocessor:
 
         categorical_slot_reader = (
             _static_observed_categorical_slots
-            if self.config.feature_profile == "static_observed_v1"
+            if self.config.feature_profile in _STATIC_OBSERVED_PROFILES
             else _categorical_slots
         )
         categorical_names, _ = categorical_slot_reader(materialized[0])
@@ -410,7 +414,7 @@ class CGMMPreprocessor:
         categorical_slot_names: tuple[str, ...],
         categorical_vocabularies: tuple[tuple[str, ...], ...],
     ) -> tuple[np.ndarray, tuple[str, ...], np.ndarray]:
-        if self.config.feature_profile == "static_observed_v1":
+        if self.config.feature_profile in _STATIC_OBSERVED_PROFILES:
             return self._raw_static_observed_condition(
                 samples,
                 numeric_slot_names=numeric_slot_names,
@@ -435,7 +439,6 @@ class CGMMPreprocessor:
             *(f"observed_target_log_ratio_m{month:02d}" for month in range(LTB_OBSERVED_MONTHS)),
             "log_quantity_scale",
         ]
-
         actual_numeric_names, _ = _numeric_slots(samples[0])
         if actual_numeric_names != numeric_slot_names:
             raise CGMMPreprocessingError("numeric feature order mismatch")
@@ -553,6 +556,18 @@ class CGMMPreprocessor:
             ),
             "log_quantity_scale",
         ]
+        if self.config.feature_profile == "static_observed_m0_v1":
+            lifecycle_start_month_ordinal = np.asarray(
+                [
+                    sample.lifecycle_start_month.year * 12
+                    + sample.lifecycle_start_month.month
+                    - 1
+                    for sample in samples
+                ],
+                dtype=np.float64,
+            )
+            blocks.append(lifecycle_start_month_ordinal[:, None])
+            feature_names.append("lifecycle_start_month_ordinal")
         if static_width:
             blocks.extend(
                 (

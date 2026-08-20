@@ -25,10 +25,16 @@ M12~M83의 72개월 수요를 예측한다.
 
 ## 전처리와 거리
 
-CGMM과 동일한 train-only `static_observed_v1` 전처리 상태를 공유한다. 수량
-scale, 연속형 결측 대체값, 카테고리 사전, 조건 특성 평균과 표준편차는 학습
-Lifecycle에서만 계산한다. 검증과 추론에서 처음 등장한 카테고리는 `<UNK>`로
-처리한다.
+CGMM과 동일한 train-only `static_observed_v1` 또는
+`static_observed_m0_v1` 전처리 상태를 공유한다. M0 profile은 예측 시 이미
+알 수 있는 Lifecycle 시작 월을 ordinal로 추가하며 실제 미래 감소 속도는
+사용하지 않는다. 수량 scale, 연속형 결측 대체값, 카테고리 사전, 조건 특성
+평균과 표준편차는 학습 Lifecycle에서만 계산한다. 검증과 추론에서 처음
+등장한 카테고리는 `<UNK>`로 처리한다.
+
+M0 ordinal은 `demand_shape_static`과 `all` 거리 profile에서만 이웃 검색
+거리에 포함된다. shape 전용 profile의 기존 거리 계약과
+`static_observed_v1`의 feature layout은 변경하지 않는다.
 
 기본 설정은 전체 조건 특성을 사용해 15개 이웃을 찾는다. 각 이웃의 거리에
 역수를 적용해 가중치를 계산하고, 거리가 사실상 0인 이웃이 있으면 해당

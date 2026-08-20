@@ -62,9 +62,13 @@ class SimilarLifecycleForecaster:
             raise TypeError(
                 "preprocessing_config must be CGMMPreprocessingConfig"
             )
-        if resolved_preprocessing.feature_profile != "static_observed_v1":
+        if resolved_preprocessing.feature_profile not in {
+            "static_observed_v1",
+            "static_observed_m0_v1",
+        }:
             raise SimilarLifecycleModelError(
-                "Similar Lifecycle requires static_observed_v1 preprocessing"
+                "Similar Lifecycle requires a static observed preprocessing "
+                "profile"
             )
         self.preprocessor = CGMMPreprocessor(resolved_preprocessing)
         self._repository_state: SimilarLifecycleRepositoryState | None = None
@@ -300,9 +304,12 @@ class SimilarLifecycleForecaster:
     ) -> "SimilarLifecycleForecaster":
         if not isinstance(preprocessing_state, CGMMPreprocessingState):
             raise TypeError("preprocessing_state must be CGMMPreprocessingState")
-        if preprocessing_state.feature_profile != "static_observed_v1":
+        if preprocessing_state.feature_profile not in {
+            "static_observed_v1",
+            "static_observed_m0_v1",
+        }:
             raise SimilarLifecycleModelError(
-                "restored preprocessing profile is not static_observed_v1"
+                "restored preprocessing profile is not static observed"
             )
         if not isinstance(repository_state, SimilarLifecycleRepositoryState):
             raise TypeError(
@@ -428,6 +435,7 @@ class SimilarLifecycleForecaster:
             is_static = name.startswith(("static_log1p:", "static_missing:"))
             is_sales = name.startswith("observed_log1p:")
             is_category = name.startswith("category:")
+            is_m0 = name == "lifecycle_start_month_ordinal"
             if profile is SimilarLifecycleDistanceProfile.DEMAND_SHAPE:
                 return is_shape
             if profile is SimilarLifecycleDistanceProfile.DEMAND_SHAPE_SCALE:
@@ -435,10 +443,23 @@ class SimilarLifecycleForecaster:
             if profile is SimilarLifecycleDistanceProfile.DEMAND_SHAPE_CATEGORIES:
                 return is_shape or is_category
             if profile is SimilarLifecycleDistanceProfile.DEMAND_SHAPE_STATIC:
-                return is_shape or is_scale or is_static or is_category
+                return (
+                    is_shape
+                    or is_scale
+                    or is_static
+                    or is_category
+                    or is_m0
+                )
             if profile is SimilarLifecycleDistanceProfile.DEMAND_SHAPE_SALES:
                 return is_shape or is_scale or is_sales
-            return is_shape or is_scale or is_static or is_sales or is_category
+            return (
+                is_shape
+                or is_scale
+                or is_static
+                or is_sales
+                or is_category
+                or is_m0
+            )
 
         indices = tuple(
             index for index, name in enumerate(feature_names) if include(name)
