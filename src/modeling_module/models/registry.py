@@ -372,6 +372,7 @@ PRODUCTION_REFIT_ARTIFACT_KEYS: tuple[str, ...] = (
     "timemixer",
     "exotst_base",
     "patchtst_exogenous",
+    "timexer_base",
 )
 
 

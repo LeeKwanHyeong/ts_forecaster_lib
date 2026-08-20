@@ -384,7 +384,7 @@ def test_public_point_train_checkpoint_load_predict_smoke(
     assert result.manifest_path is not None
     assert Path(result.manifest_path).is_file()
 
-    if model_key in {"nhits_base", "timemixer"}:
+    if model_key in {"nhits_base", "timemixer", "timexer_base"}:
         checkpoint = torch.load(
             result.primary_ckpt_path,
             map_location="cpu",
@@ -393,6 +393,7 @@ def test_public_point_train_checkpoint_load_predict_smoke(
         expected_identity = {
             "nhits_base": ("NHITSConfig", "NHITSModel", "nhits"),
             "timemixer": ("TimeMixerConfig", "TimeMixerModel", "timemixer"),
+            "timexer_base": ("TimeXerConfig", "TimeXerModel", "timexer"),
         }
         cfg_cls, model_class, family_key = expected_identity[model_key]
         assert checkpoint["cfg_cls"] == cfg_cls
@@ -427,7 +428,7 @@ def test_public_point_train_checkpoint_load_predict_smoke(
     assert np.isfinite(points).all()
     np.testing.assert_array_equal(points, np.asarray(second["point"]))
 
-    if model_key in {"nhits_base", "timemixer"}:
+    if model_key in {"nhits_base", "timemixer", "timexer_base"}:
         restored_state = predictor.model.state_dict()
         assert restored_state.keys() == checkpoint["state_dict"].keys()
         for key, saved_value in checkpoint["state_dict"].items():

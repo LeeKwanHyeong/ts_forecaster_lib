@@ -15,6 +15,7 @@ from modeling_module import (
     RuntimeConfig,
     SSLConfig,
     TimeMixerArchitectureConfig,
+    TimexerArchitectureConfig,
     TrainRequest,
     TrainerConfig,
     load_predictor,
@@ -35,6 +36,7 @@ PRODUCTION_MODEL_KEYS = (
 EXOGENOUS_PRODUCTION_MODEL_KEYS = (
     "exotst_base",
     "patchtst_exogenous",
+    "timexer_base",
 )
 
 
@@ -67,6 +69,28 @@ def _exo_loader():
     loader.exogenous_schema = ExogenousFeatureSchema.from_columns(
         past_cont=("past_calendar",),
         future_cont=("future_calendar",),
+    )
+    return loader
+
+
+def _past_only_exo_loader():
+    class Loader(list):
+        pass
+
+    loader = Loader(
+        [
+            (
+                torch.zeros(2, 14, 1),
+                torch.zeros(2, 2),
+                ["A", "B"],
+                torch.zeros(2, 2, 0),
+                torch.zeros(2, 14, 1),
+                torch.zeros(2, 14, 0, dtype=torch.long),
+            )
+        ]
+    )
+    loader.exogenous_schema = ExogenousFeatureSchema.from_columns(
+        past_cont=("past_calendar",),
     )
     return loader
 
@@ -140,6 +164,20 @@ def _architecture(model_key: str) -> ArchitectureConfig:
                 down_sampling_window=2,
                 dropout=0.0,
                 use_norm=True,
+            )
+        )
+    if model_key == "timexer_base":
+        return ArchitectureConfig(
+            timexer=TimexerArchitectureConfig(
+                patch_len=7,
+                d_model=4,
+                n_heads=1,
+                d_ff=8,
+                e_layers=1,
+                dropout=0.0,
+                factor=1,
+                activation="gelu",
+                use_norm=False,
             )
         )
     raise AssertionError(f"Unexpected production model key: {model_key}")
@@ -329,7 +367,13 @@ def test_exogenous_production_refit_saves_final_epoch_checkpoint(
     tmp_path,
     model_key,
 ):
-    train_loader = _exo_loader()
+    train_loader = (
+        _past_only_exo_loader()
+        if model_key == "timexer_base"
+        else _exo_loader()
+    )
+    uses_future_exogenous = model_key != "timexer_base"
+    configured_epochs = 2 if model_key == "timexer_base" else 1
     result = train(
         TrainRequest(
             train_loader=train_loader,
@@ -338,7 +382,7 @@ def test_exogenous_production_refit_saves_final_epoch_checkpoint(
             lookback=14,
             horizon=2,
             trainer=TrainerConfig(
-                epochs=1,
+                epochs=configured_epochs,
                 lr=1e-3,
                 use_intermittent=False,
                 training_mode="production_refit",
@@ -353,7 +397,7 @@ def test_exogenous_production_refit_saves_final_epoch_checkpoint(
             architecture=_architecture(model_key),
             use_exogenous_mode=True,
             use_past_exogenous=True,
-            use_future_exogenous=True,
+            use_future_exogenous=uses_future_exogenous,
         )
     )
 
@@ -366,10 +410,11 @@ def test_exogenous_production_refit_saves_final_epoch_checkpoint(
     assert checkpoint["meta"]["training_mode"] == "production_refit"
     assert checkpoint["meta"]["validation_enabled"] is False
     assert checkpoint["meta"]["state_selection"] == "final_epoch"
-    assert checkpoint["meta"]["configured_epochs"] == 1
-    assert checkpoint["meta"]["completed_epochs"] == 1
+    assert checkpoint["meta"]["configured_epochs"] == configured_epochs
+    assert checkpoint["meta"]["completed_epochs"] == configured_epochs
     assert checkpoint["meta"]["random_seed"] == 42
     assert checkpoint["meta"]["model_key"] == model_key
+    assert checkpoint["meta"]["final_train_loss"] >= 0.0
 
     predictor = load_predictor(
         result.primary_ckpt_path,
@@ -377,15 +422,14 @@ def test_exogenous_production_refit_saves_final_epoch_checkpoint(
         strict=True,
     )
     batch = train_loader[0]
-    output = predictor.predict(
-        {
-            "x": batch[0],
-            "part_ids": batch[2],
-            "future_exo": batch[3],
-            "past_exo_cont": batch[4],
-        },
-        horizon=2,
-    )
+    prediction_payload = {
+        "x": batch[0],
+        "part_ids": batch[2],
+        "past_exo_cont": batch[4],
+    }
+    if uses_future_exogenous:
+        prediction_payload["future_exo"] = batch[3]
+    output = predictor.predict(prediction_payload, horizon=2)
     point = torch.as_tensor(output["point"])
     assert point.numel() == 4
     assert torch.isfinite(point).all()
