@@ -76,6 +76,7 @@ PRODUCTION_REFIT_SEED: Final = 42
 PRODUCTION_REFIT_EPOCHS: Final = {
     "exotst_base": 40,
     "patchtst_exogenous": 35,
+    "timexer_base": 20,
 }
 PRODUCTION_MODEL_SPECS: Final = tuple(
     MODEL_SPECS_BY_KEY[key] for key in PRODUCTION_REFIT_EPOCHS
@@ -97,6 +98,19 @@ EPOCH_POLICY_EVIDENCE: Final = {
             "selected_epoch_mean_validation_loss": 1.357135,
             "selected_epoch_validation_loss_std": 0.081083,
             "selected_epoch_worst_validation_loss": 1.473626,
+        },
+        "timexer_base": {
+            "seed_best_epochs": {"11": 29, "22": 25, "33": 10, "42": 26},
+            "selected_epoch": 20,
+            "selected_epoch_mean_validation_loss": 1.42310275,
+            "selected_epoch_validation_loss_std": 0.01936867,
+            "selected_epoch_worst_validation_loss": 1.447352,
+            "selected_epoch_seed_validation_losses": {
+                "11": 1.413029,
+                "22": 1.403064,
+                "33": 1.428966,
+                "42": 1.447352,
+            },
         },
     },
     "seed_policy": {
@@ -634,7 +648,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--model-key",
         choices=tuple(PRODUCTION_REFIT_EPOCHS),
         default=None,
-        help="Run one worker model. Omit to refit both models sequentially.",
+        help="Run one worker model. Omit to refit all selected models sequentially.",
     )
     parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
     parser.add_argument("--num-workers", type=int, default=8)

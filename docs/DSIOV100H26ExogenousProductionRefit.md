@@ -13,10 +13,12 @@
 - State selection: final fixed epoch
 - Seed: 42
 
-This refit creates two independent full-H26 checkpoints. PatchTSTExogenous and
-ExoTST each predict W0-W25 with their own model output; their horizons are not
-split or combined. This run does not deploy the artifacts or change the Demand
-Engine registry.
+The production policy covers three independent full-H26 checkpoints.
+PatchTSTExogenous, ExoTST, and TimeXer each predict W0-W25 with their own model
+output; their horizons are not split or combined. The recorded RTX 5090 run in
+this document created the first two checkpoints. TimeXer's fixed epoch is now
+selected, but its production refit has not yet run. This work does not deploy
+artifacts or change the Demand Engine registry.
 
 ## Epoch And Seed Policy
 
@@ -28,6 +30,12 @@ diagnostic evidence but are not averaged directly into the production epoch.
 |---|---|---:|---:|
 | ExoTST | 32 / 36 / 27 / 30 | 40 | 1.471662 |
 | PatchTSTExogenous | 25 / 35 / 30 / 39 | 35 | 1.357135 |
+| TimeXer | 29 / 25 / 10 / 26 | 20 | 1.42310275 |
+
+At TimeXer epoch 20, seed 11/22/33/42 validation losses are `1.413029`,
+`1.403064`, `1.428966`, and `1.447352`. Their sample standard deviation is
+`0.01936867`; the worst-seed loss is `1.447352`. The complete 40-epoch curve
+is stored in `DSIOV100H26TimeXerEpochPolicy.csv`.
 
 Seed 42 is the project canonical seed. It was fixed before the production run
 and was not chosen by validation rank.
@@ -45,7 +53,7 @@ and was not chosen by validation rank.
 | Training target maximum | `202509` |
 | Validation windows | 0 |
 | Past continuous width | 12 |
-| Future continuous width | 12 |
+| Future continuous width | 12 for ExoTST/PatchTSTExogenous; 0 for TimeXer |
 
 The input Parquet SHA-256 is
 `f5abf27149a8408f5011b0735fb622aec430ccebcf89f7f4ce797a668aafb416`.
@@ -97,3 +105,6 @@ These files are independent production-refit candidates, not deployed runtime
 artifacts. Any Demand Engine integration must register and call each model
 separately for its complete H26 output. Checkpoint copying, wheel release, and
 runtime deployment require a separate approved integration step.
+
+TimeXer has a fixed production policy of seed 42 and 20 epochs, but no TimeXer
+production checkpoint is claimed by the recorded two-model RTX 5090 result.

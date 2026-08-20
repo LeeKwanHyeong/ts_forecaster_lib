@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import csv
+import statistics
 from pathlib import Path
 
 import numpy as np
@@ -50,15 +52,69 @@ def test_production_epoch_and_seed_policy_is_frozen():
     assert PRODUCTION_REFIT_EPOCHS == {
         "exotst_base": 40,
         "patchtst_exogenous": 35,
+        "timexer_base": 20,
     }
     assert tuple(spec.model_key for spec in PRODUCTION_MODEL_SPECS) == (
         "exotst_base",
         "patchtst_exogenous",
+        "timexer_base",
     )
     assert EPOCH_POLICY_EVIDENCE["selection_rule"] == (
         "lowest_four_seed_mean_validation_loss_by_epoch"
     )
     assert EPOCH_POLICY_EVIDENCE["qualification_seeds"] == [11, 22, 33, 42]
+    timexer = EPOCH_POLICY_EVIDENCE["models"]["timexer_base"]
+    assert timexer["seed_best_epochs"] == {
+        "11": 29,
+        "22": 25,
+        "33": 10,
+        "42": 26,
+    }
+    assert timexer["selected_epoch"] == 20
+    assert timexer["selected_epoch_mean_validation_loss"] == pytest.approx(
+        1.42310275
+    )
+    assert timexer["selected_epoch_validation_loss_std"] == pytest.approx(
+        0.01936867
+    )
+    assert timexer["selected_epoch_worst_validation_loss"] == pytest.approx(
+        1.447352
+    )
+
+
+def test_timexer_epoch_policy_matches_frozen_four_seed_curve():
+    curve_path = (
+        Path(__file__).resolve().parents[1]
+        / "docs"
+        / "DSIOV100H26TimeXerEpochPolicy.csv"
+    )
+    with curve_path.open(newline="", encoding="ascii") as stream:
+        rows = list(csv.DictReader(stream))
+
+    assert len(rows) == 40
+    seed_columns = tuple(
+        f"seed{seed}_validation_loss" for seed in (11, 22, 33, 42)
+    )
+    for row in rows:
+        losses = [float(row[column]) for column in seed_columns]
+        assert float(row["mean_validation_loss"]) == pytest.approx(
+            statistics.fmean(losses)
+        )
+        assert float(row["sample_std_validation_loss"]) == pytest.approx(
+            statistics.stdev(losses),
+            abs=5e-9,
+        )
+        assert float(row["worst_validation_loss"]) == pytest.approx(max(losses))
+
+    selected = min(
+        rows,
+        key=lambda row: (float(row["mean_validation_loss"]), int(row["epoch"])),
+    )
+    assert int(selected["epoch"]) == PRODUCTION_REFIT_EPOCHS["timexer_base"]
+    evidence = EPOCH_POLICY_EVIDENCE["models"]["timexer_base"]
+    assert float(selected["mean_validation_loss"]) == pytest.approx(
+        evidence["selected_epoch_mean_validation_loss"]
+    )
 
 
 def test_production_split_trains_through_202509_without_validation():
@@ -95,6 +151,22 @@ def test_production_canary_uses_202510_origin_and_h26_calendar():
         HORIZON - 1,
         "weekly",
     )
+
+
+def test_timexer_production_canary_keeps_past_only_exogenous_contract():
+    spec = MODEL_SPECS_BY_KEY["timexer_base"]
+    datamodule = _build_datamodule(
+        _h26_frame(),
+        spec=spec,
+        training_mode="production_refit",
+    )
+    batch, evidence = _production_canary_batch(datamodule, spec=spec)
+
+    assert batch[0].shape == (2, LOOKBACK, 1)
+    assert batch[3].shape == (2, HORIZON, 0)
+    assert batch[4].shape == (2, LOOKBACK, 12)
+    assert evidence["future_cont_shape"] == [2, HORIZON, 0]
+    assert evidence["past_cont_shape"] == [2, LOOKBACK, 12]
 
 
 def test_worker_command_uses_governed_policy_without_epoch_or_seed_override():
