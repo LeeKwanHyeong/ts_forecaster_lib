@@ -72,6 +72,11 @@ M0 ordinal은 예측 요청 시 이미 알 수 있는 값이다. 학습 표본�
 후보곡선, 평균, 표준편차, 하한, 상한에 모두 곱한다. mixture 확률은 바꾸지
 않으므로 보정 후에도 후보곡선 가중합과 평균이 일치한다.
 
+`short_horizon_cohort_strength`를 설정하면 M1~M12 block에만 별도의 cohort
+반영 비율을 적용한다. M25 이후에는 기존 `cohort_strength`와 같은 계수를
+사용하므로 M37~M72 Tail 계약은 변하지 않는다. 기본값 `None`은 기존 세 block
+공통 strength와 직렬화 fingerprint를 그대로 유지한다.
+
 ## Artifact
 
 `save_cgmm_artifact()`는 pickle을 사용하지 않고 두 파일을 만든다.

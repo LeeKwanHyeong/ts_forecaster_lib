@@ -9,6 +9,7 @@ import pytest
 from modeling_module import (
     CGMMConfig,
     CGMMCorrectionConfig,
+    CGMMCorrectionState,
     CGMMFitRequest,
     CGMMForecastRequest,
     CGMMPreprocessingConfig,
@@ -351,6 +352,69 @@ def test_cgmm_correction_scales_candidates_and_all_distribution_outputs() -> Non
     assert corrected.correction_fingerprint == state.fingerprint
 
 
+def test_short_horizon_strength_preserves_late_factors_and_legacy_payload() -> None:
+    result = _fit_model()
+    evidence: list[CGMMRollingEvidence] = []
+    for cohort_index in range(3):
+        samples = tuple(
+            _sample(cohort_index * 2 + offset)
+            for offset in range(2)
+        )
+        raw = result.model.predict(samples, apply_correction=False)
+        evidence.append(
+            CGMMRollingEvidence(
+                validation_month=add_calendar_months(
+                    date(2020, 1, 1),
+                    cohort_index,
+                ),
+                sample_ids=raw.sample_ids,
+                observed_scale=np.asarray(
+                    [np.mean(sample.observed_target) for sample in samples]
+                ),
+                actual=raw.mean_forecast * (0.80 - cohort_index * 0.05),
+                prediction=raw,
+            )
+        )
+    baseline = fit_cgmm_correction(
+        evidence,
+        CGMMCorrectionConfig(
+            cohort_strength=0.25,
+            tail_start_month=36,
+            tail_half_life_months=48.0,
+        ),
+    )
+    strengthened = fit_cgmm_correction(
+        evidence,
+        CGMMCorrectionConfig(
+            cohort_strength=0.25,
+            short_horizon_cohort_strength=0.75,
+            tail_start_month=36,
+            tail_half_life_months=48.0,
+        ),
+    )
+    inference = (_sample(120, inference=True),)
+    baseline_factors = cgmm_correction_factors(inference, baseline)
+    strengthened_factors = cgmm_correction_factors(inference, strengthened)
+
+    assert "short_horizon_cohort_strength" not in (
+        baseline.config.to_dict()
+    )
+    assert strengthened.config.to_dict()[
+        "short_horizon_cohort_strength"
+    ] == 0.75
+    assert not np.array_equal(
+        strengthened_factors[:, :12],
+        baseline_factors[:, :12],
+    )
+    np.testing.assert_array_equal(
+        strengthened_factors[:, 24:],
+        baseline_factors[:, 24:],
+    )
+    assert CGMMCorrectionState.from_dict(strengthened.to_dict()).to_dict() == (
+        strengthened.to_dict()
+    )
+
+
 def test_cgmm_artifact_strict_load_restores_identical_prediction(tmp_path) -> None:
     result = _fit_model()
     evidence: list[CGMMRollingEvidence] = []
@@ -368,7 +432,10 @@ def test_cgmm_artifact_strict_load_restores_identical_prediction(tmp_path) -> No
                 prediction=prediction,
             )
         )
-    correction = fit_cgmm_correction(evidence)
+    correction = fit_cgmm_correction(
+        evidence,
+        CGMMCorrectionConfig(short_horizon_cohort_strength=0.75),
+    )
     result.model.attach_correction(correction)
     inference = (_sample(130, inference=True, family="new-family"),)
     expected = result.model.predict(inference)

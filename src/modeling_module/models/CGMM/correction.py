@@ -305,7 +305,14 @@ def cgmm_correction_factors(
         dtype=np.float64,
     )
     month_offset = query_months - state.reference_month_ordinal
-    block_log_factors = state.config.cohort_strength * (
+    block_strengths = np.full(
+        len(HORIZON_BLOCKS),
+        state.config.cohort_strength,
+        dtype=np.float64,
+    )
+    if state.config.short_horizon_cohort_strength is not None:
+        block_strengths[0] = state.config.short_horizon_cohort_strength
+    block_log_factors = block_strengths[None, :] * (
         state.block_log_intercepts[None, :]
         + month_offset[:, None] * state.block_monthly_log_slopes[None, :]
     )
