@@ -13,9 +13,10 @@
 - State selection: final fixed epoch
 - Seed: 42
 
-This refit creates the two checkpoints required by the approved horizon route:
-PatchTSTExogenous for W0-W18 and ExoTST for W19-W25. It does not deploy the
-artifacts or change the Demand Engine registry.
+This refit creates two independent full-H26 checkpoints. PatchTSTExogenous and
+ExoTST each predict W0-W25 with their own model output; their horizons are not
+split or combined. This run does not deploy the artifacts or change the Demand
+Engine registry.
 
 ## Epoch And Seed Policy
 
@@ -92,6 +93,7 @@ PatchTSTExogenous and produced the final PASS aggregate receipt.
 
 ## Current Boundary
 
-These files are production-refit candidates, not deployed runtime artifacts.
-Demand Engine registry registration, checkpoint copying, wheel release, and
+These files are independent production-refit candidates, not deployed runtime
+artifacts. Any Demand Engine integration must register and call each model
+separately for its complete H26 output. Checkpoint copying, wheel release, and
 runtime deployment require a separate approved integration step.

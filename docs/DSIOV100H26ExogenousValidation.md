@@ -139,21 +139,21 @@ candidates. It improves mean MAE by 2.56% over ExoTST-only and 4.50% over
 PatchTSTExogenous-only. The same W19 cutoff remains the best mean-MAE candidate
 when seed 42 is included.
 
-## Model Strategy
+## Model Interpretation
 
-The qualification strategy is fixed as follows:
+The W19 cutoff comparison is diagnostic evidence only. It shows how the two
+models differ by forecast distance, but it does not define a hybrid routing
+policy and must not be used to join their horizon blocks.
 
-1. The accuracy-first default is a two-model route: PatchTSTExogenous for
-   W0-W18 and ExoTST for W19-W25.
-2. When only one model can be loaded or called, ExoTST is the single-model
-   fallback because it has the lower multi-seed mean MAE and lower variation.
-3. PatchTSTExogenous alone is not the default. Its seed 42 win does not survive
-   the stability check.
-4. Both model outputs use `max(0, raw)` before the horizon blocks are joined.
+PatchTSTExogenous and ExoTST remain independent full-H26 models. Each model is
+trained, stored, selected, called, and evaluated separately for W0-W25. ExoTST
+has the lower multi-seed mean MAE and variation, while PatchTSTExogenous retains
+useful seed- and horizon-specific results. Model selection must compare their
+complete outputs rather than combine partial horizons.
 
-This decision fixes the qualification model policy only. Production refit,
-artifact promotion, and Demand Engine routing are separate implementation and
-approval steps.
+Both independent model outputs use the existing `max(0, raw)` postprocessing
+contract. Production refit, artifact promotion, and Demand Engine registration
+remain separate implementation and approval steps.
 
 ## Evidence
 
