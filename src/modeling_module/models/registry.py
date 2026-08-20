@@ -5,6 +5,8 @@ from importlib import import_module
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Optional
 
+from modeling_module._internal.optional_features import SELLM_AVAILABLE
+
 
 def _norm_name(name: str) -> str:
     return "".join(ch for ch in str(name).strip().lower() if ch.isalnum())
@@ -257,7 +259,10 @@ MODEL_SPECS: dict[str, ModelSpec] = {
         exogenous_inputs=("past_cont",),
         fusion_strategy="global_token_cross_attention",
     ),
-    "sellm_base": ModelSpec(
+}
+
+if SELLM_AVAILABLE:
+    MODEL_SPECS["sellm_base"] = ModelSpec(
         key="sellm_base",
         family="sellm",
         builder_module="modeling_module.models.model_builder",
@@ -269,8 +274,7 @@ MODEL_SPECS: dict[str, ModelSpec] = {
         exogenous_policy="optional",
         exogenous_inputs=("future_cont",),
         fusion_strategy="semantic_future_conditioning",
-    ),
-}
+    )
 
 
 _PATCHMIXER_LEGACY_MESSAGE = (
@@ -354,8 +358,10 @@ TRAINING_FAMILY_DEFAULTS: dict[str, tuple[str, ...]] = {
     "nhits": ("nhits_base",),
     "timemixer": ("timemixer",),
     "timexer": ("timexer_base",),
-    "sellm": ("sellm_base",),
 }
+
+if SELLM_AVAILABLE:
+    TRAINING_FAMILY_DEFAULTS["sellm"] = ("sellm_base",)
 
 
 PRODUCTION_REFIT_ARTIFACT_KEYS: tuple[str, ...] = (
@@ -413,8 +419,10 @@ TRAINING_FAMILY_ALIASES: dict[str, tuple[str, ...]] = {
     "nhits": ("nhits", "n-hits"),
     "timemixer": ("timemixer",),
     "timexer": ("timexer",),
-    "sellm": ("sellm", "se_llm"),
 }
+
+if SELLM_AVAILABLE:
+    TRAINING_FAMILY_ALIASES["sellm"] = ("sellm", "se_llm")
 
 
 _ARTIFACT_ALIAS_TO_KEY: dict[str, str] = {}

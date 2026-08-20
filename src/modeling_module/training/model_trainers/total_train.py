@@ -23,7 +23,6 @@ from modeling_module.models.PatchMixer.common.configs import (
 from modeling_module.models.PatchTST.common.configs import PatchTSTConfig
 from modeling_module.models.PatchTST.self_supervised.PatchTST import PatchTSTPretrainModel
 from modeling_module.models.NHITS.configs import NHITSConfig
-from modeling_module.models.SELLM.configs import SELLMConfig
 from modeling_module.models.TimeMixer.configs import TimeMixerConfig
 from modeling_module.models.TimeXer.configs import TimeXerConfig
 from modeling_module.models.Titan.common.configs import TitanConfig
@@ -41,7 +40,6 @@ from modeling_module.models.model_builder import (
     build_nhits,
     build_timemixer,
     build_timexer,
-    build_sellm,
 )
 from modeling_module.training.config import SpikeLossConfig, TrainingConfig, StageConfig
 from modeling_module.training.model_losses.loss_module import (
@@ -56,7 +54,6 @@ from modeling_module.training.model_trainers.patchmixer_train import train_patch
 from modeling_module.training.model_trainers.patchtst_finetune import train_patchtst_finetune
 from modeling_module.training.model_trainers.patchtst_pretrain import train_patchtst_pretrain
 from modeling_module.training.model_trainers.patchtst_train import train_patchtst
-from modeling_module.training.model_trainers.sellm_train import train_sellm
 from modeling_module.training.model_trainers.timemixer_train import train_timemixer
 from modeling_module.training.model_trainers.timexer_train import train_timexer
 from modeling_module.training.model_trainers.nhits_train import train_nhits
@@ -1029,6 +1026,10 @@ def _run_sellm(
     requested = _requested_target_set(requested_artifact_keys)
     if not _wants_artifact(requested, "sellm_base"):
         return
+
+    from modeling_module.models.SELLM.configs import SELLMConfig
+    from modeling_module.models.model_builder import build_sellm
+    from modeling_module.training.model_trainers.sellm_train import train_sellm
 
     if int(past_cat_dim) > 0:
         print(

@@ -45,6 +45,7 @@ def _write_candidate_wheel(
 ) -> tuple[Path, str]:
     wheel = directory / "modeling_module-0.1.1-1private-cp312-none-any.whl"
     manifest = {
+        "distribution_profile": "non-sellm",
         "build_tag": "1private",
         "python_tag": "cp312",
         "abi_tag": "none",
@@ -122,6 +123,7 @@ def test_5090_bootstrap_has_fail_closed_environment_and_private_wheel_gates():
         "--ignore-installed --no-deps --requirement",
         "-m pip --isolated check",
         'manifest["builder_worktree_dirty"] is False',
+        'manifest["distribution_profile"] == "non-sellm"',
         'manifest["build_tag"] == "1private"',
         'registry_path.suffix == ".pyc"',
         'probe_device("cuda") == (True, None)',

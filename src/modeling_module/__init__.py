@@ -1,3 +1,4 @@
+from ._internal.optional_features import SELLM_AVAILABLE
 from .api.train import (
     ArtifactConfig,
     ArchitectureConfig,
@@ -6,7 +7,6 @@ from .api.train import (
     PatchMixerArchitectureConfig,
     PatchTSTArchitectureConfig,
     RuntimeConfig,
-    SELLMArchitectureConfig,
     SSLConfig,
     TimeMixerArchitectureConfig,
     TimexerArchitectureConfig,
@@ -16,6 +16,9 @@ from .api.train import (
     TrainerConfig,
     train,
 )
+
+if SELLM_AVAILABLE:
+    from .api.train import SELLMArchitectureConfig as SELLMArchitectureConfig
 from .api.infer import predict, load_predictor
 from .api.lifecycle import (
     CGMMFitRequest,
@@ -156,7 +159,6 @@ __all__ = [
     'TrainerConfig',
     'SSLConfig',
     'RuntimeConfig',
-    'SELLMArchitectureConfig',
     'ArtifactConfig',
     'ArchitectureConfig',
     'PatchTSTArchitectureConfig',
@@ -269,3 +271,6 @@ __all__ = [
     'similar_lifecycle_correction_factors',
     'VALIDATION_COMPARISON_CONTRACT_ID',
 ]
+
+if SELLM_AVAILABLE:
+    __all__.append('SELLMArchitectureConfig')

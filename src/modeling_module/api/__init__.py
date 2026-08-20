@@ -1,3 +1,5 @@
+from modeling_module._internal.optional_features import SELLM_AVAILABLE
+
 from .data import (
     CATEGORICAL_UNK_ID,
     CategoricalVocabulary,
@@ -63,7 +65,6 @@ from .train import (
     PatchMixerArchitectureConfig,
     PatchTSTArchitectureConfig,
     RuntimeConfig,
-    SELLMArchitectureConfig,
     SSLConfig,
     TimeMixerArchitectureConfig,
     TimexerArchitectureConfig,
@@ -73,6 +74,9 @@ from .train import (
     TrainerConfig,
     train,
 )
+
+if SELLM_AVAILABLE:
+    from .train import SELLMArchitectureConfig as SELLMArchitectureConfig
 
 __all__ = [
     "ArtifactConfig",
@@ -121,7 +125,6 @@ __all__ = [
     "PatchMixerArchitectureConfig",
     "PatchTSTArchitectureConfig",
     "RuntimeConfig",
-    "SELLMArchitectureConfig",
     "SSLConfig",
     "TimeMixerArchitectureConfig",
     "TimexerArchitectureConfig",
@@ -146,3 +149,6 @@ __all__ = [
     "predict",
     "train",
 ]
+
+if SELLM_AVAILABLE:
+    __all__.append("SELLMArchitectureConfig")

@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import sys
+from email.parser import Parser
 from pathlib import Path
 from zipfile import ZipFile
 
@@ -35,6 +36,7 @@ build_private_wheel = wheel_builder.build_private_wheel
 build_public_wheel = wheel_builder.build_public_wheel
 convert_internal_sources_to_sourceless = wheel_builder.convert_internal_sources_to_sourceless
 is_public_source = wheel_builder.is_public_source
+is_sellm_payload = wheel_builder.is_sellm_payload
 private_compatibility_tag = wheel_builder.private_compatibility_tag
 read_private_build_manifest = wheel_builder.read_private_build_manifest
 validate_private_build_tag = wheel_builder.validate_private_build_tag
@@ -163,6 +165,7 @@ def test_private_wheel_clean_build_and_isolated_install_gate(tmp_path, monkeypat
     expected_sources = {
         path.relative_to(package_root).as_posix()
         for path in (package_root / "modeling_module").rglob("*.py")
+        if not is_sellm_payload(path.relative_to(package_root).as_posix())
     }
     with ZipFile(public_wheel) as archive:
         public_sources = {
@@ -221,13 +224,27 @@ def test_private_wheel_clean_build_and_isolated_install_gate(tmp_path, monkeypat
             for name in names
             if name.startswith("modeling_module/") and name.endswith(".pyc")
         }
+        metadata_name = next(
+            name for name in names if name.endswith(".dist-info/METADATA")
+        )
+        metadata = Parser().parsestr(archive.read(metadata_name).decode("utf-8"))
 
     assert private_sources == expected_public_sources
     assert private_bytecode == expected_internal_bytecode
+    assert not any(is_sellm_payload(name) for name in names)
+    assert "sellm" not in [
+        value.casefold() for value in metadata.get_all("Provides-Extra", [])
+    ]
+    assert not any(
+        dependency in requirement.casefold()
+        for requirement in metadata.get_all("Requires-Dist", [])
+        for dependency in ("accelerate", "safetensors", "tokenizers", "transformers")
+    )
     assert f"{STALE_BUILD_LIB_SOURCE[:-3]}.pyc" not in private_bytecode
 
     manifest = read_private_build_manifest(private_wheel)
     assert manifest["build_tag"] == "1private"
+    assert manifest["distribution_profile"] == "non-sellm"
     assert manifest["python_tag"] == f"cp{sys.version_info.major}{sys.version_info.minor}"
     assert manifest["abi_tag"] == "none"
     assert manifest["platform_tag"] == "any"
@@ -237,6 +254,7 @@ def test_private_wheel_clean_build_and_isolated_install_gate(tmp_path, monkeypat
 
     assert len(install_results) == 1
     assert install_results[0]["registry_path"].endswith("registry.pyc")
+    assert install_results[0]["non_sellm"] is True
     assert install_results[0]["manifest"] == manifest
     clean_install = install_results[0]["clean_install"]
     assert clean_install["manifest"] == manifest

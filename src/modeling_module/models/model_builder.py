@@ -10,7 +10,6 @@ from modeling_module.models.PatchMixer.common.configs import (
     PatchMixerExogenousConfig,
 )
 from modeling_module.models.PatchTST.common.configs import PatchTSTConfig
-from modeling_module.models.SELLM.configs import SELLMConfig
 from modeling_module.models.SimilarLifecycle.configs import (
     SimilarLifecycleConfig,
 )
@@ -240,7 +239,9 @@ def build_patchTST_quantile_exogenous(cfg):
     return PatchTSTQuantileExogenousModel.from_config(cfg)
 
 
-def _ensure_sellm_config(cfg: Union[SELLMConfig, dict, Any]) -> SELLMConfig:
+def _ensure_sellm_config(cfg: Any):
+    from modeling_module.models.SELLM.configs import SELLMConfig
+
     if isinstance(cfg, SELLMConfig):
         return cfg
     if isinstance(cfg, Mapping):
