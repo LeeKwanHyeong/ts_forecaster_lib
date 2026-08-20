@@ -24,6 +24,8 @@ from tools.run_dsio_v100_h26_exogenous_refit import (
     PRODUCTION_REFIT_SEED,
     _build_datamodule,
     _production_canary_batch,
+    _finish_runtime_measurement,
+    _start_runtime_measurement,
     _validate_point_canary_output,
     build_worker_command,
 )
@@ -115,6 +117,15 @@ def test_timexer_epoch_policy_matches_frozen_four_seed_curve():
     assert float(selected["mean_validation_loss"]) == pytest.approx(
         evidence["selected_epoch_mean_validation_loss"]
     )
+
+
+def test_cpu_runtime_measurement_records_time_without_cuda_memory():
+    started = _start_runtime_measurement("cpu")
+    evidence = _finish_runtime_measurement(started, device="cpu")
+
+    assert evidence["seconds"] >= 0.0
+    assert evidence["cuda_peak_allocated_mib"] is None
+    assert evidence["cuda_peak_reserved_mib"] is None
 
 
 def test_production_split_trains_through_202509_without_validation():
