@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
 import polars as pl
+import pytest
 
 from modeling_module.data_loader.temporal import add_period
 from tools.dsio_v100_h26_contract import (
@@ -10,6 +12,7 @@ from tools.dsio_v100_h26_contract import (
     HORIZON,
     LOOKBACK,
     TRAIN_END_WEEK,
+    V100H26ContractError,
 )
 from tools.run_dsio_v100_h26_exogenous_qualification import MODEL_SPECS_BY_KEY
 from tools.run_dsio_v100_h26_exogenous_refit import (
@@ -19,6 +22,7 @@ from tools.run_dsio_v100_h26_exogenous_refit import (
     PRODUCTION_REFIT_SEED,
     _build_datamodule,
     _production_canary_batch,
+    _validate_point_canary_output,
     build_worker_command,
 )
 
@@ -112,3 +116,40 @@ def test_worker_command_uses_governed_policy_without_epoch_or_seed_override():
     assert "--epochs" not in command
     assert "--seed" not in command
     assert command[-1] == "--preflight-only"
+
+
+@pytest.mark.parametrize("shape", [(52,), (2, 26)])
+def test_point_canary_accepts_public_flat_and_matrix_outputs(shape):
+    points, matrix_shape = _validate_point_canary_output(
+        np.zeros(shape, dtype=np.float32),
+        batch_size=2,
+    )
+
+    assert points.shape == shape
+    assert matrix_shape == (2, HORIZON)
+
+
+def test_point_canary_rejects_wrong_output_size():
+    with pytest.raises(V100H26ContractError, match="expected 52 finite points"):
+        _validate_point_canary_output(
+            np.zeros((2, HORIZON - 1), dtype=np.float32),
+            batch_size=2,
+        )
+
+
+def test_worker_command_can_resume_completed_training_artifact():
+    command = build_worker_command(
+        python_executable=Path("/opt/python"),
+        target_source=Path("/data/target.parquet"),
+        input_manifest=Path("/data/manifest.json"),
+        output_root=Path("/artifacts/refit"),
+        model_key="exotst_base",
+        batch_size=512,
+        num_workers=8,
+        device="cuda",
+        sample_part_count=None,
+        preflight_only=False,
+        resume_existing=True,
+    )
+
+    assert command[-1] == "--resume-existing"
