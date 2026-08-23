@@ -1226,6 +1226,8 @@ def _run_patchtst(
         device=device,
         lookback=lookback,
         horizon=horizon,
+        training_mode=point_train_cfg.training_mode,
+        random_seed=point_train_cfg.random_seed,
         c_in=1,
         patch_len=patch_len,
         stride=stride,

@@ -415,6 +415,10 @@ def test_exogenous_production_refit_saves_final_epoch_checkpoint(
     assert checkpoint["meta"]["random_seed"] == 42
     assert checkpoint["meta"]["model_key"] == model_key
     assert checkpoint["meta"]["final_train_loss"] >= 0.0
+    assert checkpoint["config"]["training_mode"] == "production_refit"
+    assert checkpoint["config"]["random_seed"] == 42
+    assert checkpoint["cfg_state"]["training_mode"] == "production_refit"
+    assert checkpoint["cfg_state"]["random_seed"] == 42
 
     predictor = load_predictor(
         result.primary_ckpt_path,
