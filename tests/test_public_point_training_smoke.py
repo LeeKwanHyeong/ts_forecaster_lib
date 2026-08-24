@@ -218,6 +218,7 @@ def _tiny_timemixer_architecture() -> ArchitectureConfig:
 def _tiny_sellm_architecture() -> ArchitectureConfig:
     return ArchitectureConfig(
         sellm=SELLMArchitectureConfig(
+            architecture_variant="paper_v1",
             token_len=2,
             d_model=8,
             n_heads=2,

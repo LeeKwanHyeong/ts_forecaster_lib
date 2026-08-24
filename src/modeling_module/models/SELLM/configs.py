@@ -21,6 +21,10 @@ class SELLMConfig(TrainingConfig):
     y_dim: int = 1
     future_exo_dim: int = 0
 
+    # Architecture lineage. Legacy remains the default so checkpoints saved before
+    # paper_v1 was introduced rebuild with their original state-dict schema.
+    architecture_variant: Literal["legacy_v1", "paper_v1"] = "legacy_v1"
+
     # Numeric tokenization
     token_len: int = 8
     d_model: int = 128

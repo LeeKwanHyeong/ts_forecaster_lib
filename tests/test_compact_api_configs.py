@@ -274,6 +274,7 @@ def test_train_accepts_family_architecture_overrides(monkeypatch, tmp_path):
                 n_layers=5,
             ),
             sellm=SELLMArchitectureConfig(
+                architecture_variant="paper_v1",
                 llm_source="local",
                 llm_local_path="/models/Qwen2-0.5B",
             ),
@@ -296,6 +297,7 @@ def test_train_accepts_family_architecture_overrides(monkeypatch, tmp_path):
             "d_model": 512,
         },
         "sellm": {
+            "architecture_variant": "paper_v1",
             "llm_source": "local",
             "llm_local_path": "/models/Qwen2-0.5B",
         },
