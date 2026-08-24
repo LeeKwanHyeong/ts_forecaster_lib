@@ -40,6 +40,10 @@ from modeling_module.api.train import (  # noqa: E402
 from modeling_module.data_loader.indexed_temporal_data_module import (  # noqa: E402
     IndexedTemporalDataModule,
 )
+from modeling_module.models.SELLM.training_contract import (  # noqa: E402
+    SELLM_TRAINER_CONTRACT,
+)
+from modeling_module.training.model_losses.loss_module import MAE  # noqa: E402
 from tools.dsio_v100_h26_contract import (  # noqa: E402
     V100H26ContractError,
     canonical_json_sha256,
@@ -58,7 +62,7 @@ WINDOW_STRIDE: Final = 4
 SEED: Final = 42
 BATCH_SIZE: Final = 256
 EPOCHS: Final = 6
-LEARNING_RATE: Final = 1e-4
+LEARNING_RATE: Final = SELLM_TRAINER_CONTRACT.learning_rate
 TOKEN_LEN: Final = 13
 SEMANTIC_VOCAB_SIZE: Final = 256
 SEMANTIC_TOP_K: Final = 32
@@ -169,6 +173,7 @@ def _expected_metadata() -> dict[str, Any]:
         "batch_size": BATCH_SIZE,
         "token_len": TOKEN_LEN,
         "semantic_vocab_size": SEMANTIC_VOCAB_SIZE,
+        **SELLM_TRAINER_CONTRACT.as_metadata(),
     }
 
 
@@ -289,6 +294,7 @@ def _preflight(
             "batch_size": BATCH_SIZE,
             "epochs": EPOCHS,
             "learning_rate": LEARNING_RATE,
+            **SELLM_TRAINER_CONTRACT.as_metadata(),
             "token_len": TOKEN_LEN,
             "semantic_vocab_size": SEMANTIC_VOCAB_SIZE,
             "semantic_top_k": SEMANTIC_TOP_K,
@@ -351,11 +357,12 @@ def run_refit(
                 trainer=TrainerConfig(
                     warmup_epochs=EPOCHS,
                     spike_epochs=0,
-                    lr=LEARNING_RATE,
+                    loss_point=MAE(),
                     use_intermittent=False,
                     val_use_weights=False,
                     training_mode="production_refit",
                     random_seed=SEED,
+                    **SELLM_TRAINER_CONTRACT.trainer_kwargs(),
                 ),
                 ssl=SSLConfig(mode="sl_only"),
                 runtime=RuntimeConfig(device=device),
