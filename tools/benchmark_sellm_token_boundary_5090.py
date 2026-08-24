@@ -198,6 +198,7 @@ def _train(
     device: torch.device,
     epochs: int,
     learning_rate: float,
+    max_optimizer_updates: int | None,
     progress_path: Path,
     run_contract: dict[str, Any],
 ) -> tuple[list[dict[str, Any]], dict[str, torch.Tensor], int]:
@@ -211,6 +212,7 @@ def _train(
     best_mae = float("inf")
     best_epoch = 0
     best_state: dict[str, torch.Tensor] = {}
+    total_optimizer_updates = 0
     if device.type == "cuda":
         torch.cuda.reset_peak_memory_stats(device)
 
@@ -218,6 +220,7 @@ def _train(
         model.train()
         objective_sum = 0.0
         point_count = 0
+        epoch_optimizer_updates = 0
         if device.type == "cuda":
             torch.cuda.synchronize(device)
         started = time.perf_counter()
@@ -233,8 +236,15 @@ def _train(
             loss.backward()
             torch.nn.utils.clip_grad_norm_(list(trainable.values()), 30.0)
             optimizer.step()
+            epoch_optimizer_updates += 1
+            total_optimizer_updates += 1
             objective_sum += float(loss.detach()) * y.numel()
             point_count += y.numel()
+            if (
+                max_optimizer_updates is not None
+                and total_optimizer_updates >= max_optimizer_updates
+            ):
+                break
         if device.type == "cuda":
             torch.cuda.synchronize(device)
         train_seconds = time.perf_counter() - started
@@ -246,6 +256,8 @@ def _train(
             "train_objective": objective_sum / point_count,
             "train_seconds": train_seconds,
             "validation_seconds": validation_seconds,
+            "epoch_optimizer_updates": epoch_optimizer_updates,
+            "total_optimizer_updates": total_optimizer_updates,
             **metrics,
         }
         reports.append(report)
@@ -276,6 +288,11 @@ def _train(
             ),
             flush=True,
         )
+        if (
+            max_optimizer_updates is not None
+            and total_optimizer_updates >= max_optimizer_updates
+        ):
+            break
 
     del optimizer
     if not best_state:
@@ -345,6 +362,7 @@ def run_integration(args: argparse.Namespace) -> dict[str, Any]:
         device=device,
         epochs=args.integration_epochs,
         learning_rate=args.learning_rate,
+        max_optimizer_updates=None,
         progress_path=output / "integration-progress.json",
         run_contract=contract,
     )
@@ -457,6 +475,16 @@ def run_qualification_case(
         pin_memory=device.type == "cuda",
         drop_last=False,
     )
+    available_optimizer_updates = args.epochs * len(train_loader)
+    if (
+        args.max_optimizer_updates is not None
+        and args.max_optimizer_updates > available_optimizer_updates
+    ):
+        raise ValueError(
+            "max_optimizer_updates exceeds the updates available from "
+            f"epochs={args.epochs} and batch_size={args.batch_size}: "
+            f"{args.max_optimizer_updates} > {available_optimizer_updates}."
+        )
     model = _build_model(
         token_len=token_len,
         seed=seed,
@@ -474,6 +502,8 @@ def run_qualification_case(
         "forecast_origin": FORECAST_ORIGIN,
         "window_stride": WINDOW_STRIDE,
         "epochs": args.epochs,
+        "max_optimizer_updates": args.max_optimizer_updates,
+        "optimizer_updates_per_full_epoch": len(train_loader),
         "batch_size": args.batch_size,
         "learning_rate": args.learning_rate,
         "series_count": len(module._series),
@@ -487,9 +517,13 @@ def run_qualification_case(
         device=device,
         epochs=args.epochs,
         learning_rate=args.learning_rate,
+        max_optimizer_updates=args.max_optimizer_updates,
         progress_path=case_root / "qualification-progress.json",
         run_contract=contract,
     )
+    contract["completed_optimizer_updates"] = reports[-1][
+        "total_optimizer_updates"
+    ]
     peak_training_bytes = (
         int(torch.cuda.max_memory_allocated(device)) if device.type == "cuda" else 0
     )
@@ -725,6 +759,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--batch-size", type=int, default=256)
+    parser.add_argument("--max-optimizer-updates", type=int)
     parser.add_argument("--integration-epochs", type=int, default=1)
     parser.add_argument("--integration-batch-size", type=int, default=128)
     parser.add_argument("--learning-rate", type=float, default=1e-4)
@@ -746,6 +781,8 @@ def main() -> None:
     args.llm_local_path = args.llm_local_path.expanduser().resolve()
     if args.epochs <= 0 or args.batch_size <= 0:
         raise ValueError("epochs and batch_size must be positive.")
+    if args.max_optimizer_updates is not None and args.max_optimizer_updates <= 0:
+        raise ValueError("max_optimizer_updates must be positive when provided.")
     if len(set(args.token_lengths)) != len(args.token_lengths) or not set(
         args.token_lengths
     ).issubset(TOKEN_LENGTHS):
