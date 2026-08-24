@@ -419,6 +419,9 @@ def run_integration(args: argparse.Namespace) -> dict[str, Any]:
     }
     receipt["receipt_sha256"] = _canonical_sha256(receipt)
     _write_json(output / "integration-receipt.json", receipt)
+    progress_path = output / "integration-progress.json"
+    if progress_path.exists():
+        progress_path.unlink()
     print(json.dumps(receipt["checkpoint"], sort_keys=True), flush=True)
     return receipt
 
