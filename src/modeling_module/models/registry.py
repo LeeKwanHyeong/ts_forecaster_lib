@@ -375,6 +375,12 @@ PRODUCTION_REFIT_ARTIFACT_KEYS: tuple[str, ...] = (
     "timexer_base",
 )
 
+if SELLM_AVAILABLE:
+    PRODUCTION_REFIT_ARTIFACT_KEYS = (
+        *PRODUCTION_REFIT_ARTIFACT_KEYS,
+        "sellm_base",
+    )
+
 
 PATCHTST_CAPABILITY_DEFAULTS: dict[str, str] = {
     "endogenous_point": "patchtst_base",

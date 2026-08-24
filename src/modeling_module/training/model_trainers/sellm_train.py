@@ -43,10 +43,20 @@ def train_sellm(
         stages = [StageConfig(epochs=train_cfg.epochs, spike_enabled=train_cfg.spike_loss.enabled)]
 
     adapter = SELLMAdapter()
+    is_production_refit = (
+        getattr(train_cfg, "training_mode", "qualification")
+        == "production_refit"
+    )
+    if is_production_refit and val_loader is not None:
+        raise ValueError("production_refit requires val_loader=None.")
+
     best = None
     global_best_loss = float("inf")
-    global_best_state = copy.deepcopy(model.state_dict())
+    global_best_state = (
+        None if is_production_refit else copy.deepcopy(model.state_dict())
+    )
     global_best_cfg = train_cfg
+    total_epochs_completed = 0
 
     for i, stg in enumerate(stages, 1):
         cfg_i = apply_stage(train_cfg, stg)
@@ -70,6 +80,20 @@ def train_sellm(
             device=device,
         )
         model = trainer.fit(model, tl_i, val_loader, tta_steps=0)
+        total_epochs_completed += int(getattr(trainer, "epochs_completed_", 0))
+        if is_production_refit:
+            best = {
+                "model": model,
+                "cfg": cfg_i,
+                "best_val_loss": None,
+                "final_train_loss": float(
+                    getattr(trainer, "final_train_loss_", float("nan"))
+                ),
+                "epochs_completed": total_epochs_completed,
+                "state_selection": "final_epoch",
+            }
+            continue
+
         stage_best_loss = float(getattr(trainer, "best_loss_", float("inf")))
         if stage_best_loss < global_best_loss:
             global_best_loss = stage_best_loss
@@ -77,6 +101,13 @@ def train_sellm(
             global_best_cfg = cfg_i
         best = {"model": model, "cfg": cfg_i, "best_val_loss": stage_best_loss}
 
-    model.load_state_dict(global_best_state)
-    best = {"model": model, "cfg": global_best_cfg, "best_val_loss": global_best_loss}
+    if not is_production_refit:
+        assert global_best_state is not None
+        model.load_state_dict(global_best_state)
+        best = {
+            "model": model,
+            "cfg": global_best_cfg,
+            "best_val_loss": global_best_loss,
+        }
+    assert best is not None
     return best

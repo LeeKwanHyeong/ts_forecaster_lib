@@ -13,6 +13,7 @@ from modeling_module import (
     PatchMixerArchitectureConfig,
     PatchTSTArchitectureConfig,
     RuntimeConfig,
+    SELLMArchitectureConfig,
     SSLConfig,
     TimeMixerArchitectureConfig,
     TimexerArchitectureConfig,
@@ -360,6 +361,144 @@ def test_production_refit_saves_final_epoch_checkpoint(tmp_path, model_key):
     assert point.numel() == 4
     assert torch.isfinite(point).all()
     assert predictor.model_key == model_key
+
+
+def test_sellm_production_refit_runs_six_epochs_and_restores_strictly(
+    monkeypatch,
+    tmp_path,
+):
+    class SELLMProductionDataset(torch.utils.data.Dataset):
+        def __init__(self) -> None:
+            base_x = torch.linspace(0.0, 1.0, 52).view(1, 52, 1)
+            offsets = torch.arange(256, dtype=torch.float32).view(256, 1, 1)
+            self.x = base_x + offsets / 1000.0
+            base_y = torch.linspace(0.2, 1.2, 26).view(1, 26)
+            self.y = base_y + offsets.view(256, 1) / 2000.0
+
+        def __len__(self) -> int:
+            return len(self.x)
+
+        def __getitem__(self, index: int):
+            return self.x[index], self.y[index], f"part-{index}"
+
+    total_train_module = importlib.import_module(
+        "modeling_module.training.model_trainers.total_train"
+    )
+    original_save_model = total_train_module.save_model
+    dataset = SELLMProductionDataset()
+    train_loader = torch.utils.data.DataLoader(
+        dataset,
+        batch_size=256,
+        shuffle=False,
+    )
+    sample_x = dataset.x[:2]
+    captured: dict[str, torch.Tensor] = {}
+
+    def capture_final_state(model, cfg, path, **kwargs):
+        model.eval()
+        with torch.inference_mode():
+            captured["point"] = model(sample_x).detach().cpu()
+        return original_save_model(model, cfg, path, **kwargs)
+
+    monkeypatch.setattr(total_train_module, "save_model", capture_final_state)
+    local_qwen_path = "/home/leekwanhyeong/models/Qwen2-0.5B"
+
+    result = train(
+        TrainRequest(
+            train_loader=train_loader,
+            models=["sellm_base"],
+            freq="weekly",
+            lookback=52,
+            horizon=26,
+            trainer=TrainerConfig(
+                epochs=6,
+                lr=1e-3,
+                use_intermittent=False,
+                training_mode="production_refit",
+                random_seed=42,
+            ),
+            ssl=SSLConfig(mode="sl_only"),
+            runtime=RuntimeConfig(device="cpu"),
+            artifacts=ArtifactConfig(
+                save_dir=str(tmp_path / "sellm_base"),
+                auto_save_dir=False,
+            ),
+            architecture=ArchitectureConfig(
+                sellm=SELLMArchitectureConfig(
+                    architecture_variant="paper_v1",
+                    token_len=13,
+                    d_model=8,
+                    n_heads=2,
+                    dropout=0.0,
+                    mlp_hidden_dim=8,
+                    semantic_vocab_size=256,
+                    semantic_top_k=32,
+                    tscc_latent_dim=2,
+                    tscc_hidden_dim=4,
+                    tscc_kl_weight=0.0,
+                    use_pretrained_llm=False,
+                    llm_source="local",
+                    llm_local_path=local_qwen_path,
+                    freeze_llm=True,
+                    use_time_adapter=True,
+                    time_adapter_rank=2,
+                    time_adapter_layers=2,
+                    fallback_layers=1,
+                    d_ff=16,
+                    head_hidden_dim=8,
+                    use_norm=False,
+                    final_nonneg=False,
+                )
+            ),
+        )
+    )
+
+    assert result.primary_ckpt_path is not None
+    checkpoint = torch.load(
+        result.primary_ckpt_path,
+        map_location="cpu",
+        weights_only=False,
+    )
+    assert checkpoint["meta"]["training_mode"] == "production_refit"
+    assert checkpoint["meta"]["validation_enabled"] is False
+    assert checkpoint["meta"]["state_selection"] == "final_epoch"
+    assert checkpoint["meta"]["random_seed"] == 42
+    assert checkpoint["meta"]["configured_epochs"] == 6
+    assert checkpoint["meta"]["completed_epochs"] == 6
+    assert checkpoint["meta"]["epochs"] == 6
+    assert checkpoint["meta"]["batch_size"] == 256
+    assert checkpoint["meta"]["token_len"] == 13
+    assert checkpoint["meta"]["semantic_vocab_size"] == 256
+    assert checkpoint["meta"]["final_train_loss"] >= 0.0
+    assert checkpoint["config"]["training_mode"] == "production_refit"
+    assert checkpoint["config"]["random_seed"] == 42
+    assert checkpoint["config"]["architecture_variant"] == "paper_v1"
+    assert checkpoint["config"]["token_len"] == 13
+    assert checkpoint["config"]["llm_source"] == "local"
+    assert checkpoint["config"]["llm_local_path"] == local_qwen_path
+
+    predictor = load_predictor(
+        result.primary_ckpt_path,
+        device="cpu",
+        strict=True,
+    )
+    output = predictor.predict(
+        {"x": sample_x, "part_ids": ["part-0", "part-1"]},
+        horizon=26,
+    )
+    restored = torch.as_tensor(output["point"])
+    assert restored.numel() == 2 * 26
+    restored = restored.reshape(2, 26)
+    torch.testing.assert_close(
+        restored,
+        captured["point"].squeeze(-1),
+        rtol=0.0,
+        atol=0.0,
+    )
+    assert predictor.model.cfg.architecture_variant == "paper_v1"
+    assert predictor.model.cfg.token_len == 13
+    assert predictor.model.cfg.llm_source == "local"
+    assert predictor.model.cfg.llm_local_path == local_qwen_path
 
 
 @pytest.mark.parametrize("model_key", EXOGENOUS_PRODUCTION_MODEL_KEYS)

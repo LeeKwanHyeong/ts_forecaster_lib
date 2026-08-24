@@ -1115,11 +1115,25 @@ def _run_sellm(
 
     if save_root:
         ckpt_path = _make_ckpt_path(save_root, freq, "SELLMBase", lookback, horizon)
+        configured_epochs = sum(int(stage.epochs) for stage in stages)
+        training_meta = _training_checkpoint_meta(
+            point_train_cfg,
+            stages,
+            best,
+        )
         save_model(
             sellm_model,
             sellm_cfg,
             ckpt_path,
-            extra_meta={"model_key": "sellm_base", "family_key": "sellm"},
+            extra_meta={
+                "model_key": "sellm_base",
+                "family_key": "sellm",
+                **training_meta,
+                "epochs": configured_epochs,
+                "batch_size": getattr(train_loader, "batch_size", None),
+                "token_len": int(sellm_cfg.token_len),
+                "semantic_vocab_size": int(sellm_cfg.semantic_vocab_size),
+            },
         )
         best["ckpt_path"] = str(ckpt_path)
 
