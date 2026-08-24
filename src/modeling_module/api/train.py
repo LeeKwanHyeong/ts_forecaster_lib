@@ -286,6 +286,7 @@ class SELLMArchitectureConfig:
     choose a Hub model ID or an on-premise model directory with `llm_source`.
     """
 
+    architecture_variant: Optional[Literal["legacy_v1", "paper_v1"]] = None
     token_len: Optional[int] = None
     d_model: Optional[int] = None
     n_heads: Optional[int] = None
@@ -596,6 +597,7 @@ _ARCHITECTURE_ALLOWED_KEYS: dict[str, set[str]] = {
         "use_norm",
     },
     "sellm": {
+        "architecture_variant",
         "token_len",
         "d_model",
         "n_heads",

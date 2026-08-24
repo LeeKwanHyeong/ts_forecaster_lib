@@ -35,6 +35,7 @@ request = TrainRequest(
     models=["sellm_base"],
     architecture=ArchitectureConfig(
         sellm=SELLMArchitectureConfig(
+            architecture_variant="paper_v1",
             use_pretrained_llm=True,
             llm_source="local",
             llm_local_path="/models/Qwen2-0.5B",
@@ -58,6 +59,7 @@ request = TrainRequest(
     models=["sellm_base"],
     architecture=ArchitectureConfig(
         sellm=SELLMArchitectureConfig(
+            architecture_variant="paper_v1",
             use_pretrained_llm=True,
             llm_source="huggingface",
             llm_model_name="Qwen/Qwen2-0.5B",
@@ -73,7 +75,13 @@ immutable commit is recommended for reproducible training and deployment.
 ## Notes
 
 - `SELLM` is a direct forecasting model family, not a POSTTIME-style forecast reviser.
+- Select `architecture_variant="paper_v1"` for the paper-based endogenous model. The
+  `legacy_v1` default exists only so checkpoints created before architecture versioning
+  retain their original state-dict contract.
+- `paper_v1` rejects future exogenous inputs. A separately versioned `sellm_exo` contract
+  has not been introduced yet.
 - `llm_source` is used only when `use_pretrained_llm=True`.
-- The default LLM backbone is frozen; trainable parameters are the numeric encoder, TSCC, TimeAdapter, and forecast head.
+- The default LLM backbone is frozen; trainable parameters are the vocabulary projection,
+  numeric encoder and decoder, TSCC, and Time-Adapter.
 - The environment file prefers CUDA 13.x PyTorch wheels for RTX 5090-class servers.
 - If the server driver is pinned to an older CUDA-compatible stack, update the PyTorch wheel index in `environment.5090-sellm.yml` before creating the env.

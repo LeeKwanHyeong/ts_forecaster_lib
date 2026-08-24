@@ -9,6 +9,16 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from modeling_module.models.SELLM.configs import SELLMConfig
+from modeling_module.models.SELLM.backbone import (
+    PaperSegmentMLP,
+    PaperTSCC,
+    VocabularySemanticProjection,
+    add_paper_time_adapter,
+)
+from modeling_module.models.SELLM.provenance import (
+    SELLM_UPSTREAM_COMMIT,
+    SELLM_UPSTREAM_REPOSITORY,
+)
 
 
 def _activation(name: str) -> nn.Module:
@@ -195,6 +205,10 @@ class SELLMModel(nn.Module):
         self.horizon = int(cfg.horizon)
         self.y_dim = int(cfg.y_dim)
         self.future_exo_dim = int(cfg.future_exo_dim)
+        self.architecture_variant = str(cfg.architecture_variant).strip().lower()
+        if self.architecture_variant == "paper_v1":
+            self.upstream_repository = SELLM_UPSTREAM_REPOSITORY
+            self.upstream_commit = SELLM_UPSTREAM_COMMIT
         self.token_len = int(cfg.token_len)
         self.use_norm = bool(cfg.use_norm)
         self.final_nonneg = bool(cfg.final_nonneg)
@@ -208,11 +222,28 @@ class SELLMModel(nn.Module):
             raise ValueError(f"y_dim must be positive, got {self.y_dim}")
         if self.token_len <= 0:
             raise ValueError(f"token_len must be positive, got {self.token_len}")
+        if self.token_len > self.lookback:
+            raise ValueError(
+                f"token_len={self.token_len} cannot exceed lookback={self.lookback}."
+            )
+        if self.architecture_variant not in {"legacy_v1", "paper_v1"}:
+            raise ValueError(
+                "architecture_variant must be 'legacy_v1' or 'paper_v1', got "
+                f"{cfg.architecture_variant!r}."
+            )
+        if self.architecture_variant == "paper_v1" and self.future_exo_dim > 0:
+            raise ValueError(
+                "paper_v1 is the endogenous SELLM baseline and does not accept "
+                "future exogenous inputs. Use legacy_v1 until a separate sellm_exo "
+                "contract is introduced."
+            )
 
         self.llm: Optional[nn.Module] = None
         self.fallback_encoder: Optional[nn.Module] = None
         self.semantic_bank: Optional[nn.Parameter] = None
+        self.semantic_source_bank: Optional[nn.Parameter] = None
         self.semantic_proj: Optional[nn.Module] = None
+        self.semantic_vocabulary_projection: Optional[nn.Module] = None
 
         d_model = int(cfg.d_model)
         if self.use_pretrained_llm:
@@ -222,12 +253,26 @@ class SELLMModel(nn.Module):
                 for parameter in self.llm.parameters():
                     parameter.requires_grad = False
             if bool(cfg.use_time_adapter):
-                self.llm = add_time_adapter(
-                    self.llm,
-                    rank=int(cfg.time_adapter_rank),
-                    num_layers=int(cfg.time_adapter_layers),
+                if self.architecture_variant == "paper_v1":
+                    self.llm = add_paper_time_adapter(
+                        self.llm,
+                        rank=int(cfg.time_adapter_rank),
+                        num_layers=int(cfg.time_adapter_layers),
+                    )
+                else:
+                    self.llm = add_time_adapter(
+                        self.llm,
+                        rank=int(cfg.time_adapter_rank),
+                        num_layers=int(cfg.time_adapter_layers),
+                    )
+            embedding = self.llm.get_input_embeddings().weight
+            if self.architecture_variant == "paper_v1":
+                self.semantic_vocabulary_projection = VocabularySemanticProjection(
+                    vocabulary_size=int(embedding.size(0)),
+                    prototype_count=int(cfg.semantic_vocab_size),
                 )
-            self.semantic_proj = nn.Linear(d_model, d_model)
+            else:
+                self.semantic_proj = nn.Linear(d_model, d_model)
         else:
             if d_model % int(cfg.n_heads) != 0:
                 raise ValueError(f"d_model={d_model} must be divisible by n_heads={cfg.n_heads}.")
@@ -245,9 +290,18 @@ class SELLMModel(nn.Module):
                 num_layers=int(cfg.fallback_layers),
                 norm=nn.LayerNorm(d_model),
             )
-            self.semantic_bank = nn.Parameter(
-                torch.randn(int(cfg.semantic_vocab_size), d_model) * 0.02
-            )
+            if self.architecture_variant == "paper_v1":
+                self.semantic_source_bank = nn.Parameter(
+                    torch.randn(int(cfg.semantic_vocab_size), d_model) * 0.02
+                )
+                self.semantic_vocabulary_projection = VocabularySemanticProjection(
+                    vocabulary_size=int(cfg.semantic_vocab_size),
+                    prototype_count=int(cfg.semantic_vocab_size),
+                )
+            else:
+                self.semantic_bank = nn.Parameter(
+                    torch.randn(int(cfg.semantic_vocab_size), d_model) * 0.02
+                )
 
         self.d_model = int(d_model)
         self.cfg = replace(cfg, d_model=self.d_model)
@@ -257,27 +311,49 @@ class SELLMModel(nn.Module):
             fallback_head = self._largest_divisor_at_most(self.d_model, n_heads)
             n_heads = fallback_head
 
-        self.ts_encoder = SegmentMLP(
+        segment_mlp = (
+            PaperSegmentMLP
+            if self.architecture_variant == "paper_v1"
+            else SegmentMLP
+        )
+        self.ts_encoder = segment_mlp(
             self.token_len,
             self.d_model,
             int(cfg.mlp_hidden_dim),
             float(cfg.dropout),
             str(cfg.mlp_activation),
         )
-        self.tscc = TemporalSemanticCrossCorrelation(
-            d_model=self.d_model,
-            n_heads=n_heads,
-            dropout=float(cfg.dropout),
-            latent_dim=int(cfg.tscc_latent_dim),
-            hidden_dim=int(cfg.tscc_hidden_dim),
-            top_k=int(cfg.semantic_top_k),
-        )
-        self.pool_head = nn.Sequential(
-            nn.Linear(self.d_model * 2, int(cfg.head_hidden_dim)),
-            nn.GELU(),
-            nn.Dropout(float(cfg.dropout)),
-            nn.Linear(int(cfg.head_hidden_dim), self.horizon),
-        )
+        if self.architecture_variant == "paper_v1":
+            self.tscc = PaperTSCC(
+                d_model=self.d_model,
+                latent_dim=int(cfg.tscc_latent_dim),
+                hidden_dim=int(cfg.tscc_hidden_dim),
+                top_k=int(cfg.semantic_top_k),
+            )
+            self.ts_decoder: Optional[nn.Module] = PaperSegmentMLP(
+                self.d_model,
+                self.token_len,
+                int(cfg.mlp_hidden_dim),
+                float(cfg.dropout),
+                str(cfg.mlp_activation),
+            )
+            self.pool_head: Optional[nn.Module] = None
+        else:
+            self.tscc = TemporalSemanticCrossCorrelation(
+                d_model=self.d_model,
+                n_heads=n_heads,
+                dropout=float(cfg.dropout),
+                latent_dim=int(cfg.tscc_latent_dim),
+                hidden_dim=int(cfg.tscc_hidden_dim),
+                top_k=int(cfg.semantic_top_k),
+            )
+            self.ts_decoder = None
+            self.pool_head = nn.Sequential(
+                nn.Linear(self.d_model * 2, int(cfg.head_hidden_dim)),
+                nn.GELU(),
+                nn.Dropout(float(cfg.dropout)),
+                nn.Linear(int(cfg.head_hidden_dim), self.horizon),
+            )
         if self.future_exo_dim > 0:
             self.future_exo_head = nn.Sequential(
                 nn.Linear(self.future_exo_dim, int(cfg.head_hidden_dim)),
@@ -348,6 +424,18 @@ class SELLMModel(nn.Module):
         return int(embedding.weight.shape[-1])
 
     def _make_semantic_prototypes(self, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+        if self.architecture_variant == "paper_v1":
+            if self.semantic_vocabulary_projection is None:
+                raise RuntimeError("paper_v1 semantic vocabulary projection is missing.")
+            if self.llm is not None:
+                source = self.llm.get_input_embeddings().weight
+            elif self.semantic_source_bank is not None:
+                source = self.semantic_source_bank
+            else:
+                raise RuntimeError("paper_v1 semantic source embeddings are missing.")
+            source = source.to(device=device, dtype=dtype)
+            return self.semantic_vocabulary_projection(source)
+
         if self.llm is not None:
             weight = self.llm.get_input_embeddings().weight
             vocab_size = int(weight.size(0))
@@ -378,6 +466,44 @@ class SELLMModel(nn.Module):
         if weight <= 0.0:
             return None
         return kl * weight
+
+    def _encode_paper_context(self, context: torch.Tensor) -> torch.Tensor:
+        batch_size, _, n_vars = context.shape
+        flat = context.permute(0, 2, 1).reshape(batch_size * n_vars, -1)
+        segments, _ = self._segment(flat)
+        time_tokens = self.ts_encoder(segments)
+        prototypes = self._make_semantic_prototypes(
+            time_tokens.device,
+            time_tokens.dtype,
+        )
+        fused = self.tscc(time_tokens, prototypes)
+        if self.llm is not None:
+            encoded = self.llm(inputs_embeds=fused).last_hidden_state
+        elif self.fallback_encoder is not None:
+            encoded = self.fallback_encoder(fused)
+        else:
+            raise RuntimeError("paper_v1 encoder backend is missing.")
+        if self.ts_decoder is None:
+            raise RuntimeError("paper_v1 numeric token decoder is missing.")
+        decoded = self.ts_decoder(encoded)
+        return decoded.reshape(batch_size, n_vars, -1).permute(0, 2, 1).contiguous()
+
+    def _paper_forecast(self, context: torch.Tensor) -> torch.Tensor:
+        chunks: list[torch.Tensor] = []
+        remaining = self.horizon
+        rolling_context = context
+        while remaining > 0:
+            reconstructed = self._encode_paper_context(rolling_context)
+            next_segment = reconstructed[:, -self.token_len :, :]
+            take = min(remaining, self.token_len)
+            chunks.append(next_segment[:, :take, :])
+            remaining -= take
+            if remaining > 0:
+                rolling_context = torch.cat(
+                    [rolling_context[:, self.token_len :, :], next_segment],
+                    dim=1,
+                )
+        return torch.cat(chunks, dim=1)
 
     def forward(
         self,
@@ -425,23 +551,32 @@ class SELLMModel(nn.Module):
             means = None
             stdev = None
 
-        batch_size, _, n_vars = x_norm.shape
-        flat = x_norm.permute(0, 2, 1).reshape(batch_size * n_vars, -1)
-        segments, _ = self._segment(flat)
-        time_tokens = self.ts_encoder(segments)
-        prototypes = self._make_semantic_prototypes(time_tokens.device, time_tokens.dtype)
-        fused = self.tscc(time_tokens, prototypes)
-
-        if self.llm is not None:
-            encoded = self.llm(inputs_embeds=fused).last_hidden_state
-        elif self.fallback_encoder is not None:
-            encoded = self.fallback_encoder(fused)
+        if self.architecture_variant == "paper_v1":
+            forecast = self._paper_forecast(x_norm)
         else:
-            encoded = fused
+            batch_size, _, n_vars = x_norm.shape
+            flat = x_norm.permute(0, 2, 1).reshape(batch_size * n_vars, -1)
+            segments, _ = self._segment(flat)
+            time_tokens = self.ts_encoder(segments)
+            prototypes = self._make_semantic_prototypes(time_tokens.device, time_tokens.dtype)
+            fused = self.tscc(time_tokens, prototypes)
 
-        pooled = torch.cat([encoded.mean(dim=1), encoded[:, -1, :]], dim=-1)
-        forecast = self.pool_head(pooled).reshape(batch_size, n_vars, self.horizon)
-        forecast = forecast.permute(0, 2, 1).contiguous()
+            if self.llm is not None:
+                encoded = self.llm(inputs_embeds=fused).last_hidden_state
+            elif self.fallback_encoder is not None:
+                encoded = self.fallback_encoder(fused)
+            else:
+                encoded = fused
+
+            pooled = torch.cat([encoded.mean(dim=1), encoded[:, -1, :]], dim=-1)
+            if self.pool_head is None:
+                raise RuntimeError("legacy_v1 pooling head is missing.")
+            forecast = self.pool_head(pooled).reshape(
+                batch_size,
+                n_vars,
+                self.horizon,
+            )
+            forecast = forecast.permute(0, 2, 1).contiguous()
 
         if self.future_exo_head is not None and future_exo is not None:
             forecast = forecast + self.future_exo_head(future_exo.to(dtype=forecast.dtype))
