@@ -76,6 +76,25 @@ def test_paper_time_adapter_has_two_temporal_stages_and_zero_init_parity():
         assert parameter.grad.abs().sum() > 0
 
 
+def test_paper_time_adapter_accepts_bfloat16_llm_projection():
+    torch.manual_seed(7)
+    original = nn.Linear(6, 4, bias=False).to(dtype=torch.bfloat16)
+    adapter = PaperTimeProjectionAdapter(original, rank=3)
+    value = torch.randn(2, 5, 6, dtype=torch.bfloat16)
+
+    output = adapter(value)
+
+    assert output.dtype == torch.bfloat16
+    assert torch.equal(output, original(value))
+    nn.init.constant_(adapter.up.weight, 0.1)
+    output = adapter(value)
+    output.float().square().mean().backward()
+    assert adapter.down.weight.grad is not None
+    assert adapter.up.weight.grad is not None
+    assert adapter.down.weight.grad.abs().sum() > 0
+    assert adapter.up.weight.grad.abs().sum() > 0
+
+
 def test_vocabulary_projection_matches_paper_matrix_orientation():
     projection = VocabularySemanticProjection(vocabulary_size=3, prototype_count=2)
     with torch.no_grad():
@@ -232,11 +251,13 @@ class _FakeQwen(nn.Module):
         self.embedding = nn.Embedding(11, 8)
         self.model = nn.Module()
         self.model.layers = nn.ModuleList([_FakeQwenLayer(), _FakeQwenLayer()])
+        self.last_input_dtype = None
 
     def get_input_embeddings(self):
         return self.embedding
 
     def forward(self, *, inputs_embeds):
+        self.last_input_dtype = inputs_embeds.dtype
         return SimpleNamespace(last_hidden_state=inputs_embeds)
 
 
@@ -267,5 +288,24 @@ def test_paper_qwen_contract_freezes_base_and_installs_trainable_adapters(monkey
     assert model.semantic_vocabulary_projection.projection.weight.requires_grad
 
     output = model(torch.randn(2, 8, 1))
+    assert output.shape == (2, 3, 1)
+    assert torch.isfinite(output).all()
+
+
+def test_paper_qwen_contract_bridges_bfloat16_llm_and_float32_decoder(monkeypatch):
+    fake_qwen = _FakeQwen().to(dtype=torch.bfloat16)
+    monkeypatch.setattr(SELLMModel, "_load_llm", staticmethod(lambda cfg: fake_qwen))
+    config = _paper_config(horizon=3)
+    config.use_pretrained_llm = True
+    config.use_time_adapter = True
+    config.time_adapter_rank = 2
+    config.time_adapter_layers = 1
+    config.semantic_vocab_size = 5
+
+    model = SELLMModel(config)
+    output = model(torch.randn(2, 8, 1))
+
+    assert fake_qwen.last_input_dtype == torch.bfloat16
+    assert output.dtype == torch.float32
     assert output.shape == (2, 3, 1)
     assert torch.isfinite(output).all()

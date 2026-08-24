@@ -213,10 +213,11 @@ class PaperTimeProjectionAdapter(nn.Module):
 
     def forward(self, value: torch.Tensor) -> torch.Tensor:
         residual = self.original_layer(value)
-        temporal = self.down(value)
+        adapter_dtype = self.down.weight.dtype
+        temporal = self.down(value.to(dtype=adapter_dtype))
         temporal, _ = self.long_term(temporal)
         temporal, _ = self.short_term(temporal)
-        return residual + self.up(temporal)
+        return residual + self.up(temporal).to(dtype=residual.dtype)
 
 
 def _iter_llm_layers(model: nn.Module) -> list[nn.Module]:
