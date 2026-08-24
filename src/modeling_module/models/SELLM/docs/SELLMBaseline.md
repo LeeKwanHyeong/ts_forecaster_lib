@@ -110,6 +110,14 @@ therefore rejected. K256 is the maintained default, while K512 remains an
 explicit experiment profile. K1024 remains rejected because its additional
 parameters and memory did not improve the initial pilot accuracy.
 
+The two-epoch K256 result was not a convergence result. Extending the same
+seed-isolated runs to ten epochs reduced mean MAE from 4.1017 at epoch 2 to
+2.1515 at epoch 9. The cross-seed standard deviation fell from 1.4966 to
+0.2635. The best epochs for seeds 11, 22, and 33 were 10, 9, and 9, with MAE
+2.3976, 2.0260, and 1.9103. K256 therefore converges in the 9-10 epoch range
+under this sampled qualification contract; its earlier large seed spread was
+primarily an under-training effect.
+
 ## Negative output policy
 
 K512 produced 1,629 negative raw points out of 19,968 validation points across
@@ -124,11 +132,52 @@ histories with 75-100% zeros. W7, W15, and W23 were the three highest-rate
 horizons, aligning with the ends of the model's eight-step autoregressive token
 segments.
 
+## Token boundary investigation
+
+The ten-epoch K256 runs traced the numeric decoder at every autoregressive call.
+At local token position 7, which produces W7, W15, and W23, the mean decoder
+input norm increased from 164.65 to 170.47 and 176.91 across the first three
+rollouts. The reconstructed value mean drifted from -1.3546 to -1.6933 and
+-2.0175, while its negative rate increased from 92.45% to 93.36% and 94.14%.
+The absolute gradient mean remained non-zero for every sample but decreased from
+0.003522 to 0.002719 and 0.002076.
+
+This rules out a detached-gradient failure. The observed boundary error is a
+decoder-position bias that is amplified by recursive rollout. With token length
+8, L52 is also replicate-padded to 56 positions, and H26 requires four decoder
+calls even though the fourth call contributes only two positions. Both effects
+disappear with token length 13: L52 becomes four exact input tokens and H26
+becomes two exact forecast tokens.
+
+Three stabilization candidates were compared on the same 256 series, seeds 11,
+22, and 33, ten epochs, batch 128, and learning rate `1e-4`:
+
+| Candidate | Mean best MAE | Seed std | Mean raw negative rate | Mean epoch time |
+| --- | ---: | ---: | ---: | ---: |
+| token length 8 baseline | 2.1113 | 0.2079 | 13.89% | 13.50 s |
+| token length 13 | **1.8632** | **0.0999** | 15.02% | **5.99 s** |
+| token length 8, overlap 4 | 3.7059 | 0.8936 | 11.23% | 23.34 s |
+| token-boundary delta loss, weight 0.1 | 3.6963 | 1.1807 | **8.45%** | 13.87 s |
+
+Token length 13 reduced mean best MAE by 11.75%, halved seed variation, and cut
+epoch time by 55.6%. Its actual token-end horizons W12 and W25 also improved
+from baseline MAE 2.5124 and 2.0922 to 1.9386 and 1.6937. Simple overlap decoding
+was rejected because additional rollout paths increased runtime and seed
+instability. The unnormalized boundary loss was rejected because it reduced raw
+negative output at the cost of large accuracy and seed-stability regressions.
+
+The L52/H26 `paper_v1` experiment profile must therefore set `token_len=13`
+explicitly. The global `SELLMConfig.token_len=8` default is retained because the
+global architecture default is `legacy_v1`; changing it would alter the legacy
+construction contract. No overlap or boundary-loss option is added to the public
+configuration.
+
 The maintained policy is to preserve raw model outputs for diagnostics and
 apply `clip_zero` at the public forecast or Demand Engine processing boundary.
 A hard clamp is not added inside training because it would hide the rollout
-boundary behavior and the bias tradeoff. Token-boundary stabilization should be
-tested separately before changing the model loss or output activation.
+boundary behavior and the bias tradeoff. Token length 13 improves accuracy and
+runtime but slightly increases aggregate raw negative rate, so it does not
+replace this post-processing safety boundary.
 
 These runs establish the development default only. Full-data, multi-seed
 qualification is still required before production promotion.
