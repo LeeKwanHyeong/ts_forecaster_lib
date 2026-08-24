@@ -310,3 +310,41 @@ The three qualification aggregate seals are:
 - batch 256: `e63e7ec694ebd9ce625b9269c0318d31be98180d370c334971497c01fb63fdf8`;
 - batch 512: `6243928ef7972dba110c9c079f5977e550ccbd368e17e646faf48edf22a20996`;
 - batch 1024: `2a3e04f099faf006d85daf6ea6c1244c1fe30854ac63b4b137e4971cc88b49a8`.
+
+## Production refit artifact
+
+Commit `cfd58795daa77d046b790967ef5b942c17f926bc` ran the approved SELLM
+production refit in the RTX 5090 `ai_env`. The run used all 7,000 eligible
+series and 420,484 supervised windows through week 202509. It preserved the
+selected L52/H26 `paper_v1`, token length 13, semantic vocabulary 256, batch
+256, seed 42, learning rate `1e-4`, and six fixed epochs. Validation was
+disabled and the final epoch state was saved.
+
+The production checkpoint is stored at
+`/home/leekwanhyeong/artifacts/sellm/production-refit/cfd5879-seed42-e6/weekly_SELLMBase_L52_H26.pt`.
+Its SHA-256 is
+`d77eaed462f0b8cbb0d93c9b493735bd29c4f54f25abc313eb9a9b03df89c1ab`,
+its size is 1,227,602,498 bytes, and its final training loss is 1.374697.
+The checkpoint metadata records `training_mode=production_refit`,
+`validation_enabled=false`, `state_selection=final_epoch`, six completed
+epochs, and seed 42. A separate `ai_env` process reproduced the SHA, completed
+a strict load, and returned exactly W0-W25 for each canary series.
+
+Training took 630.37 seconds at 4,002 windows/s. Peak CUDA allocation was
+4,838.72 MiB and peak reserved memory was 5,370 MiB. Strict load took 1.02
+seconds. Full 7,000-series inference took 1.03 seconds at 6,823 series/s with
+1,877.71 MiB peak allocation.
+
+The raw production-origin canary returned 182,000 finite points with no
+non-finite values, but 111,966 points were negative. The raw negative rate was
+therefore 61.52%, with a minimum of -106.49 and a maximum of 107.74. The
+checkpoint passes artifact integrity, metadata, strict-load, shape, and runtime
+contracts, but it is not approved as an operating default on this evidence
+alone. The existing `clip_zero` boundary remains mandatory, and the accuracy
+and bias impact of this substantially higher production-origin negative rate
+must be evaluated before Demand Engine registration or runtime deployment.
+
+The sealed production receipt is
+`/home/leekwanhyeong/artifacts/sellm/production-refit/cfd5879-seed42-e6/production-refit-receipt.json`.
+Its canonical receipt seal is
+`a8643761d93792c12a81d505e838dee4bad88d2c47baf43cdada12ab918cda32`.
