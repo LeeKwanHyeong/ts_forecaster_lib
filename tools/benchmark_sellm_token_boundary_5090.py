@@ -559,8 +559,8 @@ def _mean_std(values: Iterable[float]) -> dict[str, float]:
 def aggregate(args: argparse.Namespace) -> dict[str, Any]:
     output_root = args.output_root.resolve()
     receipts = []
-    for token_len in TOKEN_LENGTHS:
-        for seed in SEEDS:
+    for token_len in args.token_lengths:
+        for seed in args.seeds:
             path = output_root / f"token{token_len}" / f"seed{seed}" / "qualification-receipt.json"
             receipt = json.loads(path.read_text(encoding="ascii"))
             seal = receipt.pop("receipt_sha256", None)
@@ -569,12 +569,18 @@ def aggregate(args: argparse.Namespace) -> dict[str, Any]:
             receipts.append({**receipt, "receipt_sha256": seal})
 
     summaries = []
-    for token_len in TOKEN_LENGTHS:
+    for token_len in args.token_lengths:
         selected = [
             receipt
             for receipt in receipts
             if receipt["training"]["token_len"] == token_len
         ]
+        epoch_counts = {len(receipt["epochs"]) for receipt in selected}
+        if len(epoch_counts) != 1:
+            raise RuntimeError(
+                f"Epoch count drifted for token_len={token_len}: {epoch_counts}"
+            )
+        epoch_count = epoch_counts.pop()
         summaries.append(
             {
                 "token_len": token_len,
@@ -609,6 +615,27 @@ def aggregate(args: argparse.Namespace) -> dict[str, Any]:
                     receipt["runtime"]["peak_inference_allocated_bytes"]
                     for receipt in selected
                 ),
+                "epoch_metrics": [
+                    {
+                        "epoch": epoch + 1,
+                        **{
+                            metric: _mean_std(
+                                receipt["epochs"][epoch][metric]
+                                for receipt in selected
+                            )
+                            for metric in (
+                                "mae",
+                                "wape",
+                                "smape",
+                                "bias",
+                                "raw_negative_rate",
+                                "train_objective",
+                                "train_seconds",
+                            )
+                        },
+                    }
+                    for epoch in range(epoch_count)
+                ],
                 "horizon_metrics": [
                     {
                         "horizon": horizon,
@@ -630,45 +657,57 @@ def aggregate(args: argparse.Namespace) -> dict[str, Any]:
                 ],
             }
         )
-    baseline = next(item for item in summaries if item["token_len"] == 8)
-    candidate = next(item for item in summaries if item["token_len"] == 13)
-    comparison = {
-        metric: {
-            "token8": baseline[metric]["mean"],
-            "token13": candidate[metric]["mean"],
-            "absolute_delta": candidate[metric]["mean"] - baseline[metric]["mean"],
-            "relative_delta": (
-                (candidate[metric]["mean"] - baseline[metric]["mean"])
-                / baseline[metric]["mean"]
-                if baseline[metric]["mean"] != 0
-                else None
-            ),
+    comparison: dict[str, Any] = {}
+    if set(args.token_lengths) == {8, 13}:
+        baseline = next(item for item in summaries if item["token_len"] == 8)
+        candidate = next(item for item in summaries if item["token_len"] == 13)
+        comparison = {
+            metric: {
+                "token8": baseline[metric]["mean"],
+                "token13": candidate[metric]["mean"],
+                "absolute_delta": candidate[metric]["mean"]
+                - baseline[metric]["mean"],
+                "relative_delta": (
+                    (candidate[metric]["mean"] - baseline[metric]["mean"])
+                    / baseline[metric]["mean"]
+                    if baseline[metric]["mean"] != 0
+                    else None
+                ),
+            }
+            for metric in (
+                "mae",
+                "wape",
+                "smape",
+                "bias",
+                "raw_negative_rate",
+                "mean_train_seconds_per_epoch",
+                "inference_series_per_second",
+                "peak_training_allocated_bytes",
+                "peak_inference_allocated_bytes",
+            )
         }
-        for metric in (
-            "mae",
-            "wape",
-            "smape",
-            "bias",
-            "raw_negative_rate",
-            "mean_train_seconds_per_epoch",
-            "inference_series_per_second",
-            "peak_training_allocated_bytes",
-            "peak_inference_allocated_bytes",
-        )
-    }
     aggregate_receipt = {
         "status": "PASS",
-        "contract": "sellm-full-token-boundary-aggregate-v1",
+        "contract": "sellm-full-token-boundary-aggregate-v2",
         "created_at_utc": _utc_now(),
         "git_commit": args.git_commit,
         "source_sha256": args.source_sha256,
-        "seeds": list(SEEDS),
+        "seeds": list(args.seeds),
+        "token_lengths": list(args.token_lengths),
         "summaries": summaries,
         "comparison": comparison,
     }
     aggregate_receipt["receipt_sha256"] = _canonical_sha256(aggregate_receipt)
     _write_json(output_root / "qualification-aggregate-receipt.json", aggregate_receipt)
-    print(json.dumps(comparison, indent=2, sort_keys=True), flush=True)
+    printable = comparison or {
+        str(summary["token_len"]): {
+            "best_epoch": summary["best_epoch"],
+            "mae": summary["mae"],
+            "epoch_metrics": summary["epoch_metrics"],
+        }
+        for summary in summaries
+    }
+    print(json.dumps(printable, indent=2, sort_keys=True), flush=True)
     return aggregate_receipt
 
 
@@ -677,7 +716,7 @@ def _parser() -> argparse.ArgumentParser:
         description="Benchmark SELLM token-boundary candidates on RTX 5090."
     )
     parser.add_argument(
-        "command", choices=("integration", "qualify-all", "aggregate")
+        "command", choices=("integration", "qualify-all", "qualify", "aggregate")
     )
     parser.add_argument("--source", type=Path, required=True)
     parser.add_argument("--output-root", type=Path, required=True)
@@ -689,6 +728,13 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--integration-epochs", type=int, default=1)
     parser.add_argument("--integration-batch-size", type=int, default=128)
     parser.add_argument("--learning-rate", type=float, default=1e-4)
+    parser.add_argument(
+        "--token-lengths",
+        type=int,
+        nargs="+",
+        default=list(TOKEN_LENGTHS),
+    )
+    parser.add_argument("--seeds", type=int, nargs="+", default=list(SEEDS))
     parser.add_argument("--force", action="store_true")
     return parser
 
@@ -700,6 +746,17 @@ def main() -> None:
     args.llm_local_path = args.llm_local_path.expanduser().resolve()
     if args.epochs <= 0 or args.batch_size <= 0:
         raise ValueError("epochs and batch_size must be positive.")
+    if len(set(args.token_lengths)) != len(args.token_lengths) or not set(
+        args.token_lengths
+    ).issubset(TOKEN_LENGTHS):
+        raise ValueError(
+            f"token_lengths must be unique values from {TOKEN_LENGTHS}."
+        )
+    if len(set(args.seeds)) != len(args.seeds):
+        raise ValueError("seeds must contain unique integers.")
+    if args.command == "qualify-all":
+        args.token_lengths = list(TOKEN_LENGTHS)
+        args.seeds = list(SEEDS)
     if not args.source.is_file():
         raise FileNotFoundError(args.source)
     if not args.llm_local_path.is_dir():
@@ -716,8 +773,8 @@ def main() -> None:
     frame = pl.read_parquet(args.source).select(
         ["oper_part_no", "demand_dt", "demand_qty"]
     )
-    for seed in SEEDS:
-        for token_len in TOKEN_LENGTHS:
+    for seed in args.seeds:
+        for token_len in args.token_lengths:
             run_qualification_case(
                 args,
                 frame,
