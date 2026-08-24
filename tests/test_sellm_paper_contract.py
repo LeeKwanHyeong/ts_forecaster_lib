@@ -49,8 +49,9 @@ def _paper_config(*, horizon: int = 5) -> SELLMConfig:
     )
 
 
-def test_sellm_default_semantic_vocabulary_uses_5090_pilot_capacity():
-    assert SELLMConfig().semantic_vocab_size == 512
+def test_sellm_default_semantic_vocabulary_uses_5090_multiseed_capacity():
+    assert SELLMConfig().semantic_vocab_size == 256
+    assert SELLMConfig(semantic_vocab_size=512).semantic_vocab_size == 512
     assert SELLMConfig(semantic_vocab_size=1024).semantic_vocab_size == 1024
 
 
