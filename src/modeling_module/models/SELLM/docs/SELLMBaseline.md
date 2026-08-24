@@ -253,3 +253,60 @@ This recommendation selects only the training duration. It does not approve a
 production refit, build a production checkpoint, replace a wheel, or alter the
 port-8011 runtime. The maintained `clip_zero` processing boundary remains
 necessary because the selected fixed epoch still produces negative raw points.
+
+## Batch-size qualification
+
+Commit `5b06581d723265567d88823fba81afe4969fe684` compared training batches
+256, 512, and 1024 in the RTX 5090 `ai_env`. Token length 13, seed 42, learning
+rate `1e-4`, the full 6,952-series dataset, and all data boundaries remained
+fixed. No run produced an OOM, non-finite output, or invalid receipt.
+
+The one-epoch hardware probes produced:
+
+| Batch | Epoch seconds | Train windows/s | Inference series/s | Peak train VRAM |
+| ---: | ---: | ---: | ---: | ---: |
+| 256 | 127.72 | 2,937 | 7,275 | 6.73 GiB |
+| 512 | 115.01 | 3,261 | 8,287 | 10.85 GiB |
+| 1024 | 109.43 | 3,428 | 8,850 | 18.79 GiB |
+
+Batch 512 improved training throughput by 11.0% and batch 1024 by 16.7% over
+batch 256. These gains were much smaller than their 61% and 179% peak-memory
+increases. The RTX 5090 was not memory-bound at batch 256, so filling VRAM did
+not translate into proportional throughput.
+
+At the same six data passes, the accuracy comparison was:
+
+| Batch | Updates | MAE | WAPE | sMAPE | Bias | Raw negative rate |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 256 | 8,796 | 1.4271 | 0.3032 | **0.6109** | 0.3276 | 14.51% |
+| 512 | 4,398 | **1.3919** | **0.2957** | 0.6287 | 0.4064 | **14.34%** |
+| 1024 | 2,202 | 1.4703 | 0.3124 | 0.6493 | **0.2788** | 15.73% |
+
+Batch 512 improved MAE and WAPE by 2.47% relative to batch 256, but sMAPE and
+positive bias regressed. It also had an isolated validation MAE spike to 2.4159
+at epoch 3. Batch 1024 was worse on MAE, WAPE, sMAPE, and raw negative rate at
+the same data exposure.
+
+A secondary comparison stopped every run at exactly 8,796 optimizer updates:
+
+| Batch | Data passes | Total train time | Final MAE | WAPE | sMAPE | Bias | Raw negative rate |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 256 | 6 | 12.83 min | 1.4271 | 0.3032 | **0.6109** | 0.3276 | 14.51% |
+| 512 | 12 | 23.11 min | 1.2912 | 0.2743 | 0.6173 | **0.0728** | 17.82% |
+| 1024 | 24 | 43.99 min | **1.2360** | **0.2626** | 0.6224 | 0.2856 | **13.53%** |
+
+The lower MAE at larger batches is not a pure batch-size gain: batch 512 saw
+the dataset twice as many times and batch 1024 four times as many times. Total
+training time increased by 80% and 243%, respectively. This result is retained
+as an update-budget characterization, not as evidence for changing the fixed
+six-epoch production policy.
+
+Batch 256 remains the maintained L52/H26 `paper_v1` default because it already
+has a multi-seed convergence baseline, uses substantially less VRAM, and has no
+material throughput bottleneck. Batch 512 remains the only follow-up candidate
+for a future multi-seed throughput profile. Batch 1024 is rejected as a default.
+The three qualification aggregate seals are:
+
+- batch 256: `e63e7ec694ebd9ce625b9269c0318d31be98180d370c334971497c01fb63fdf8`;
+- batch 512: `6243928ef7972dba110c9c079f5977e550ccbd368e17e646faf48edf22a20996`;
+- batch 1024: `2a3e04f099faf006d85daf6ea6c1244c1fe30854ac63b4b137e4971cc88b49a8`.
