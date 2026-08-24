@@ -59,7 +59,7 @@ sellm = [
     "accelerate>=0.33",
     "safetensors>=0.4",
     "tokenizers>=0.20",
-    "transformers>=4.45,<5",
+    "transformers>=4.45,<6",
 ]
 all = [
     "ipykernel",
@@ -69,7 +69,7 @@ all = [
     "accelerate>=0.33",
     "safetensors>=0.4",
     "tokenizers>=0.20",
-    "transformers>=4.45,<5",
+    "transformers>=4.45,<6",
 ]
 
 [tool.setuptools]

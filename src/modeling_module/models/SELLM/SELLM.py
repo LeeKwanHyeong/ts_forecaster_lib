@@ -478,7 +478,10 @@ class SELLMModel(nn.Module):
         )
         fused = self.tscc(time_tokens, prototypes)
         if self.llm is not None:
-            encoded = self.llm(inputs_embeds=fused).last_hidden_state
+            llm_dtype = self.llm.get_input_embeddings().weight.dtype
+            encoded = self.llm(
+                inputs_embeds=fused.to(dtype=llm_dtype)
+            ).last_hidden_state.to(dtype=fused.dtype)
         elif self.fallback_encoder is not None:
             encoded = self.fallback_encoder(fused)
         else:
