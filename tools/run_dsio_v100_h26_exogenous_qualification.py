@@ -135,7 +135,10 @@ def configure_torch_runtime() -> None:
         pass
 
 
-def build_architecture() -> ArchitectureConfig:
+def build_architecture(
+    *,
+    negative_output_penalty_weight: float = 0.0,
+) -> ArchitectureConfig:
     """Return the frozen capacity used by the governed H26 comparison."""
 
     return ArchitectureConfig(
@@ -170,6 +173,9 @@ def build_architecture() -> ArchitectureConfig:
             exo_nan_policy="zero+indicator",
             use_revin=True,
             subtract_last=True,
+            negative_output_penalty_weight=float(
+                negative_output_penalty_weight
+            ),
         ),
         timexer=TimexerArchitectureConfig(
             patch_len=13,
@@ -199,6 +205,7 @@ def build_worker_command(
     sample_part_count: int | None,
     preflight_only: bool,
     seed: int,
+    negative_output_penalty_weight: float = 0.0,
 ) -> list[str]:
     command = [
         str(python_executable),
@@ -221,6 +228,8 @@ def build_worker_command(
         device,
         "--seed",
         str(seed),
+        "--negative-output-penalty-weight",
+        str(float(negative_output_penalty_weight)),
     ]
     if sample_part_count is not None:
         command.extend(["--sample-part-count", str(sample_part_count)])
@@ -432,6 +441,7 @@ def _validate_checkpoint(
     validation_batch: tuple[Any, ...],
     device: str,
     seed: int,
+    negative_output_penalty_weight: float = 0.0,
 ) -> dict[str, object]:
     if checkpoint_path.name != spec.checkpoint_filename:
         raise V100H26ContractError(
@@ -457,6 +467,13 @@ def _validate_checkpoint(
         )
     if meta.get("random_seed") != seed:
         raise V100H26ContractError("checkpoint random seed mismatch")
+    configured_penalty = float(
+        config.get("negative_output_penalty_weight", 0.0)
+    )
+    if configured_penalty != float(negative_output_penalty_weight):
+        raise V100H26ContractError(
+            "checkpoint negative-output penalty weight mismatch"
+        )
 
     predictor = load_predictor(
         str(checkpoint_path),
@@ -491,6 +508,7 @@ def _validate_checkpoint(
         "checkpoint_size_bytes": checkpoint_path.stat().st_size,
         "prediction_shape": list(points.shape),
         "prediction_finite": True,
+        "negative_output_penalty_weight": configured_penalty,
         "exogenous_schema_fingerprint": schema.fingerprint,
     }
 
@@ -508,11 +526,22 @@ def run_model(
     sample_part_count: int | None,
     preflight_only: bool,
     seed: int,
+    negative_output_penalty_weight: float = 0.0,
 ) -> dict[str, object]:
     if epochs <= 0:
         raise ValueError("epochs must be positive.")
     if batch_size <= 0:
         raise ValueError("batch_size must be positive.")
+    if negative_output_penalty_weight < 0 or not np.isfinite(
+        negative_output_penalty_weight
+    ):
+        raise ValueError(
+            "negative_output_penalty_weight must be finite and >= 0."
+        )
+    if spec.model_key != "exotst_base" and negative_output_penalty_weight != 0:
+        raise ValueError(
+            "negative_output_penalty_weight is supported only for exotst_base."
+        )
     manifest = load_training_input_manifest(
         input_manifest,
         target_source=target_source,
@@ -582,6 +611,9 @@ def run_model(
                 "epochs": epochs,
                 "seed": seed,
                 "loss": "library_point_default",
+                "negative_output_penalty_weight": float(
+                    negative_output_penalty_weight
+                ),
                 "state_selection": "best_validation",
             },
             "feature_contract": {
@@ -608,7 +640,13 @@ def run_model(
             lookback=LOOKBACK,
             horizon=HORIZON,
             models=[spec.model_key],
-            architecture=build_architecture(),
+            architecture=build_architecture(
+                negative_output_penalty_weight=(
+                    negative_output_penalty_weight
+                    if spec.model_key == "exotst_base"
+                    else 0.0
+                )
+            ),
             trainer=TrainerConfig(
                 warmup_epochs=epochs,
                 spike_epochs=0,
@@ -642,6 +680,7 @@ def run_model(
         validation_batch=validation_batch,
         device=device,
         seed=seed,
+        negative_output_penalty_weight=negative_output_penalty_weight,
     )
     model_metrics = result.results.get(spec.model_key, {})
     receipt: dict[str, object] = {
@@ -661,6 +700,9 @@ def run_model(
             "window_stride": WINDOW_STRIDE,
             "epochs": epochs,
             "seed": seed,
+            "negative_output_penalty_weight": float(
+                negative_output_penalty_weight
+            ),
             "state_selection": "best_validation",
         },
         "data_summary": summary,
@@ -690,6 +732,7 @@ def run_all(
     device: str,
     sample_part_count: int | None,
     seed: int,
+    negative_output_penalty_weight: float = 0.0,
     model_specs: tuple[ExogenousQualificationModelSpec, ...] = MODEL_SPECS,
 ) -> dict[str, object]:
     load_training_input_manifest(
@@ -726,6 +769,11 @@ def run_all(
                 sample_part_count=sample_part_count,
                 preflight_only=False,
                 seed=seed,
+                negative_output_penalty_weight=(
+                    negative_output_penalty_weight
+                    if spec.model_key == "exotst_base"
+                    else 0.0
+                ),
             )
             log_path = logs_dir / f"training-{spec.model_key}.log"
             with log_path.open("x", encoding="utf-8") as stream:
@@ -763,6 +811,9 @@ def run_all(
         "target_source_sha256": file_sha256(target_source),
         "input_manifest_sha256": file_sha256(input_manifest),
         "seed": seed,
+        "negative_output_penalty_weight": float(
+            negative_output_penalty_weight
+        ),
         "selected_model_keys": [spec.model_key for spec in model_specs],
         "models": receipts,
     }
@@ -795,6 +846,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--seed", type=int, default=SEED)
     parser.add_argument(
+        "--negative-output-penalty-weight",
+        type=float,
+        default=0.0,
+        help=(
+            "ExoTST point-only output-space squared negative penalty. "
+            "Zero preserves the frozen baseline."
+        ),
+    )
+    parser.add_argument(
         "--model-keys",
         nargs="+",
         choices=tuple(MODEL_SPECS_BY_KEY),
@@ -825,6 +885,9 @@ def main(argv: list[str] | None = None) -> int:
             sample_part_count=args.sample_part_count,
             preflight_only=bool(args.preflight_only),
             seed=int(args.seed),
+            negative_output_penalty_weight=float(
+                args.negative_output_penalty_weight
+            ),
         )
     else:
         if args.preflight_only:
@@ -842,6 +905,9 @@ def main(argv: list[str] | None = None) -> int:
             device=str(args.device),
             sample_part_count=args.sample_part_count,
             seed=int(args.seed),
+            negative_output_penalty_weight=float(
+                args.negative_output_penalty_weight
+            ),
             model_specs=tuple(
                 MODEL_SPECS_BY_KEY[key]
                 for key in (args.model_keys or tuple(MODEL_SPECS_BY_KEY))

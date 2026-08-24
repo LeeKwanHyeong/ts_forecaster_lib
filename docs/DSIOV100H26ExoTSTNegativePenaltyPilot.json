@@ -1,0 +1,78 @@
+{
+  "contract_id": "dsio-v100-h26-exotst-negative-penalty-pilot-v1",
+  "status": "PASS",
+  "decision": {
+    "multiseed_approved": false,
+    "reason": "no_candidate_passed_all_pilot_gates",
+    "selected_negative_output_penalty_weight": null
+  },
+  "training_contract": {
+    "model_key": "exotst_base",
+    "lookback": 52,
+    "horizon": 26,
+    "epochs": 40,
+    "seed": 42,
+    "state_selection": "best_validation_base_point_loss",
+    "penalty_weights": [
+      0.01,
+      0.1,
+      1.0
+    ]
+  },
+  "gate_contract": {
+    "minimum_clip_mae_improvement_percent": 1.0,
+    "minimum_raw_negative_rate_reduction_percent": 50.0,
+    "maximum_absolute_normalized_bias_degradation_percentage_points": 1.0
+  },
+  "control": {
+    "clip_mae": 1.2547960577003365,
+    "clip_normalized_bias": -0.012879953250084964,
+    "raw_negative_rate": 0.2395270868372134
+  },
+  "candidates": [
+    {
+      "negative_output_penalty_weight": 0.01,
+      "clip_mae": 1.2398559196522272,
+      "clip_mae_improvement_percent": 1.1906427308586,
+      "raw_negative_rate": 0.2396709303354873,
+      "raw_negative_rate_reduction_percent": -0.06005312391732022,
+      "clip_normalized_bias": 0.033651768625762454,
+      "absolute_normalized_bias_degradation_percentage_points": 2.077181537567749,
+      "passes_all_gates": false,
+      "checkpoint_sha256": "d65a70b4448cf26fd0636191ad3f2e152a453eef448d2b1380d831b1d569aa7e",
+      "training_seconds": 1218.4958030839916
+    },
+    {
+      "negative_output_penalty_weight": 0.1,
+      "clip_mae": 1.331321900064825,
+      "clip_mae_improvement_percent": -6.098667739260944,
+      "raw_negative_rate": 0.258199079401611,
+      "raw_negative_rate_reduction_percent": -7.795357431574078,
+      "clip_normalized_bias": 0.012809416726822207,
+      "absolute_normalized_bias_degradation_percentage_points": -0.007053652326275729,
+      "passes_all_gates": false,
+      "checkpoint_sha256": "e77c80906f6d1f3b4e59b7083af6dcada67779d74233614c21ca9d937443a7da",
+      "training_seconds": 1221.5175644260016
+    },
+    {
+      "negative_output_penalty_weight": 1.0,
+      "clip_mae": 1.3918272424672802,
+      "clip_mae_improvement_percent": -10.920594141655222,
+      "raw_negative_rate": 0.22211095866159158,
+      "raw_negative_rate_reduction_percent": 7.271047465065242,
+      "clip_normalized_bias": 0.04684935604921719,
+      "absolute_normalized_bias_degradation_percentage_points": 3.3969402799132222,
+      "passes_all_gates": false,
+      "checkpoint_sha256": "c6e56ccccc556cf5727cf1d8c59e68ffb82998d0f93bc0ab3977f63f1b4a4c99",
+      "training_seconds": 1226.012570047984
+    }
+  ],
+  "provenance": {
+    "source_commit": "d6a7ad5c4ceb12be9666970e538f02cb5e1386ee",
+    "source_overlay_sha256": "348e9f17e3e49c3169614507f0b8f27c2033a9b458aee2e20f90901ce3b45993",
+    "target_source_sha256": "f5abf27149a8408f5011b0735fb622aec430ccebcf89f7f4ce797a668aafb416",
+    "input_manifest_sha256": "fce2c853acb3fd3f295f6700b2259ca9246ef9d8caf7e5c0e896102b2f7d2a01",
+    "control_validation_overall_sha256": "79f6d70391b697c402cf60ec615339b4f048928a47df35c49ad100c883966c43",
+    "remote_receipt_file_sha256": "5922f2c205d9402000174c549449e2a529ae78f9e60e65a73469d9284a3bce1d"
+  }
+}

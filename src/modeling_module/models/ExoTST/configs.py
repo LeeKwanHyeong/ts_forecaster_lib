@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal, Optional
+import math
+from typing import Literal
 
 from modeling_module.training.config import TrainingConfig
 
@@ -70,7 +71,20 @@ class ExoTSTConfig(TrainingConfig):
     # -------------------------
     head_type: Literal["point", "dist", "quantile"] = "point"
 
+    # Point-only training regularizer. The model forward already returns
+    # RevIN-denormalized demand, so this penalty is evaluated in output space.
+    negative_output_penalty_weight: float = 0.0
+
     # -------------------------
     # Safety / Debug
     # -------------------------
     strict_shape: bool = True  # lookback/horizon mismatch 시 즉시 에러
+
+    def __post_init__(self) -> None:
+        weight = float(self.negative_output_penalty_weight)
+        if not math.isfinite(weight) or weight < 0.0:
+            raise ValueError(
+                "negative_output_penalty_weight must be finite and >= 0, "
+                f"got {self.negative_output_penalty_weight!r}"
+            )
+        self.negative_output_penalty_weight = weight
