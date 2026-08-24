@@ -217,3 +217,39 @@ not replace this post-processing safety boundary.
 
 These runs establish the development default only. Production-refit epoch
 selection and a production artifact remain separate approval steps.
+
+## Token length 13 convergence qualification
+
+Commit `ad8ee520ce847e90194e218df5bf81bb2948df4f` extended the full-data
+token-length-13 qualification to ten epochs without changing the 6,952-series
+dataset, chronological split, seeds 11/22/33, batch 256, learning rate `1e-4`,
+or best-validation state contract. All three seed receipts passed, and the v2
+aggregate receipt passed with seal
+`f4652cf30feedd7af580f4b4b671dcd1c0c2de2d3e83dd8f5af2f94d3e2d0c48`.
+
+The seed-specific best epochs were 10, 6, and 9. Their best-state MAEs were
+1.2486, 1.2357, and 1.2979, producing mean MAE 1.2608 with standard deviation
+0.0268. The later epochs therefore improved every seed beyond its five-epoch
+state, but their independently selected epochs cannot be used as one fixed
+production-refit schedule.
+
+| Fixed epoch | MAE | MAE seed std | WAPE | sMAPE | Bias | Raw negative rate |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 5 | 1.3523 | 0.0637 | 0.2873 | 0.6038 | 0.2528 | 17.28% |
+| 6 | **1.2914** | **0.0416** | **0.2744** | **0.5930** | 0.2001 | 17.18% |
+| 7 | 1.5742 | 0.1320 | 0.3345 | 0.6546 | **0.0551** | 19.11% |
+| 8 | 1.4136 | 0.1524 | 0.3003 | 0.6344 | 0.2224 | **16.08%** |
+| 9 | 1.3567 | 0.0731 | 0.2882 | 0.6496 | 0.1430 | 16.20% |
+| 10 | 1.4077 | 0.1261 | 0.2991 | 0.6145 | 0.1675 | 17.83% |
+
+Epoch 6 is the recommended fixed production-refit epoch. Relative to epoch 5,
+it reduced mean MAE and WAPE by 4.50%, reduced sMAPE by 1.79%, reduced positive
+bias by 0.0527, and reduced MAE seed variation by 34.75%. Its raw negative rate
+also fell slightly, from 17.28% to 17.18%. Epochs 7 through 10 did not preserve
+the same cross-seed accuracy improvement: epoch 9 was close to epoch 5, while
+epochs 7, 8, and 10 regressed more clearly.
+
+This recommendation selects only the training duration. It does not approve a
+production refit, build a production checkpoint, replace a wheel, or alter the
+port-8011 runtime. The maintained `clip_zero` processing boundary remains
+necessary because the selected fixed epoch still produces negative raw points.
