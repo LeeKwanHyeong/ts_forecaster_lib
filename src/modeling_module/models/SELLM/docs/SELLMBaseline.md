@@ -339,12 +339,21 @@ The raw production-origin canary returned 182,000 finite points with no
 non-finite values, but 111,966 points were negative. The raw negative rate was
 therefore 61.52%, with a minimum of -106.49 and a maximum of 107.74. The
 checkpoint passes artifact integrity, metadata, strict-load, shape, and runtime
-contracts, but it is not approved as an operating default on this evidence
-alone. The existing `clip_zero` boundary remains mandatory, and the accuracy
-and bias impact of this substantially higher production-origin negative rate
-must be evaluated before Demand Engine registration or runtime deployment.
+contracts, but the subsequent full-series analysis rejects it for Demand
+Engine registration and runtime deployment. The existing `clip_zero` boundary
+remains mandatory, but clipping adds 292,419.38 units and creates 73.33% of the
+final clipped quantity. This is a failed raw-model state rather than a routine
+post-processing correction.
 
 The sealed production receipt is
 `/home/leekwanhyeong/artifacts/sellm/production-refit/cfd5879-seed42-e6/production-refit-receipt.json`.
 Its canonical receipt seal is
 `a8643761d93792c12a81d505e838dee4bad88d2c47baf43cdada12ab918cda32`.
+
+The detailed horizon, series, sparsity, scale, magnitude, and trainer-contract
+analysis is recorded in `SELLMProductionNegativeAnalysis.md`. The analysis
+receipt seal is
+`6608d10e56e3f68abef383189e6f7fe850ec1a6dd8aa716840f83bac92add910`.
+Public predictor and direct model outputs matched exactly for all 182,000
+points. The next required step is qualification-production trainer parity, not
+an immediate negative penalty or nonnegative output-head change.
