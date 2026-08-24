@@ -69,6 +69,10 @@ class TrainerConfig:
       `production_refit` requires a train-only loader and saves the final epoch state.
     - `random_seed`: Reproducibility seed recorded in checkpoint metadata. The
       caller remains responsible for seeding its data loader and runtime.
+    - `weight_decay`, `lr_scheduler`, `t_max`: AdamW regularization and learning
+      rate scheduling policy.
+    - `use_amp`, `amp_dtype`: Mixed-precision policy.
+    - `max_grad_norm`: Gradient clipping threshold.
     """
     epochs: Optional[int] = None
     lr: Optional[float] = None
@@ -82,6 +86,12 @@ class TrainerConfig:
     val_use_weights: Optional[bool] = None
     training_mode: Literal["qualification", "production_refit"] = "qualification"
     random_seed: Optional[int] = None
+    weight_decay: Optional[float] = None
+    lr_scheduler: Optional[Literal["cosine", "constant"]] = None
+    t_max: Optional[int] = None
+    use_amp: Optional[bool] = None
+    amp_dtype: Optional[Literal["bf16", "fp16", "fp32"]] = None
+    max_grad_norm: Optional[float] = None
 
 
 @dataclass
@@ -754,6 +764,12 @@ def _normalize_payload(raw: Mapping[str, Any]) -> dict[str, Any]:
             "val_use_weights": "val_use_weights",
             "training_mode": "training_mode",
             "random_seed": "random_seed",
+            "weight_decay": "weight_decay",
+            "lr_scheduler": "lr_scheduler",
+            "t_max": "t_max",
+            "use_amp": "use_amp",
+            "amp_dtype": "amp_dtype",
+            "max_grad_norm": "max_grad_norm",
         },
         "ssl": {
             "mode": "use_ssl_mode",
@@ -1503,6 +1519,12 @@ def train(req: TrainRequest | Mapping[str, Any]) -> TrainResult:
         val_use_weights=bool(val_use_weights if val_use_weights is not None else True),
         training_mode=str(payload.get("training_mode", "qualification")),
         random_seed=payload.get("random_seed"),
+        weight_decay=payload.get("weight_decay"),
+        lr_scheduler=payload.get("lr_scheduler"),
+        t_max=payload.get("t_max"),
+        use_amp=payload.get("use_amp"),
+        amp_dtype=payload.get("amp_dtype"),
+        max_grad_norm=payload.get("max_grad_norm"),
     )
 
     return _make_result(
