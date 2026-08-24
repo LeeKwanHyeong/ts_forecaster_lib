@@ -172,12 +172,48 @@ global architecture default is `legacy_v1`; changing it would alter the legacy
 construction contract. No overlap or boundary-loss option is added to the public
 configuration.
 
+## Full-data token qualification
+
+Commit `6e30114b553ce2323e85ac680f120377e1227c2b` repeated the token-length
+comparison on all 6,952 eligible series. The fixed contract used seeds 11, 22,
+and 33, five epochs, batch 256, learning rate `1e-4`, and best-validation state
+selection. All six case receipts and the aggregate receipt passed their
+canonical JSON seals. The aggregate seal is
+`605c0cf4a1caefa2c4020c2c7e6c0243a4c2c6e78aff66e95c3c7d29fd816e19`.
+
+| Metric | Token length 8 | Token length 13 | Token 13 change |
+| --- | ---: | ---: | ---: |
+| MAE | 1.4605 +/- 0.2717 | **1.3513 +/- 0.0630** | **-7.48%** |
+| WAPE | 0.3103 +/- 0.0577 | **0.2871 +/- 0.0134** | **-7.48%** |
+| sMAPE | **0.5975 +/- 0.0481** | 0.6269 +/- 0.0261 | +4.91% |
+| Bias | **0.1236 +/- 0.1522** | 0.2942 +/- 0.0239 | +0.1706 |
+| Raw negative rate | 21.91% | **15.38%** | **-29.83%** |
+| Training seconds per epoch | 315.35 | **128.67** | **-59.20%** |
+| Inference series per second | 2,881 | **7,268** | **+152.26%** |
+| Peak training allocation | 14.95 GiB | **6.73 GiB** | **-55.00%** |
+| Peak inference allocation | 2.11 GiB | **2.11 GiB** | -0.26% |
+
+Token length 13 improved MAE at 23 of 26 horizons and reduced the raw negative
+rate at every horizon. It also avoided the seed-33 token-length-8 regression:
+the seed-level MAEs were 1.3335, 1.2100, and 1.8381 for token length 8 versus
+1.3967, 1.2622, and 1.3950 for token length 13. The mean improvement therefore
+comes from materially lower seed variance, not from winning every individual
+seed. W22, W23, and W25 remained the three horizons where token length 13 had
+higher MAE.
+
+Token length 13 remains the L52/H26 `paper_v1` development default because the
+primary MAE and WAPE metrics, seed stability, raw output stability, training
+cost, and inference throughput improve together. The higher sMAPE and positive
+bias remain explicit guardrails. Seeds 22 and 33 selected epoch 5 for token
+length 13, so this five-epoch qualification does not establish the final
+production-refit epoch.
+
 The maintained policy is to preserve raw model outputs for diagnostics and
 apply `clip_zero` at the public forecast or Demand Engine processing boundary.
 A hard clamp is not added inside training because it would hide the rollout
-boundary behavior and the bias tradeoff. Token length 13 improves accuracy and
-runtime but slightly increases aggregate raw negative rate, so it does not
-replace this post-processing safety boundary.
+boundary behavior and the bias tradeoff. Although token length 13 reduced the
+full-data raw negative rate, 15.38% of raw points remained negative, so it does
+not replace this post-processing safety boundary.
 
-These runs establish the development default only. Full-data, multi-seed
-qualification is still required before production promotion.
+These runs establish the development default only. Production-refit epoch
+selection and a production artifact remain separate approval steps.
