@@ -173,6 +173,30 @@ def test_paper_model_rolls_out_token_segments_to_exact_horizon():
     assert torch.equal(calls[2][:, -2:, :], torch.full((1, 2, 1), 2.0))
 
 
+def test_paper_l52_h26_token13_uses_exact_segments_without_padding():
+    config = _paper_config(horizon=26)
+    config.lookback = 52
+    config.token_len = 13
+    model = SELLMModel(config)
+    segments, token_count = model._segment(torch.zeros(1, 52))
+    calls: list[torch.Tensor] = []
+
+    def _fixed_decode(self, context):
+        calls.append(context.detach().clone())
+        decoded = torch.zeros_like(context)
+        decoded[:, -self.token_len :, :] = float(len(calls))
+        return decoded
+
+    model._encode_paper_context = MethodType(_fixed_decode, model)
+    output = model(torch.zeros(1, 52, 1))
+
+    assert segments.shape == (1, 4, 13)
+    assert token_count == 4
+    assert len(calls) == 2
+    assert torch.equal(output[:, :13], torch.ones(1, 13, 1))
+    assert torch.equal(output[:, 13:], torch.full((1, 13, 1), 2.0))
+
+
 def test_paper_fallback_output_gradient_and_strict_checkpoint_restore(tmp_path):
     torch.manual_seed(31)
     model = SELLMModel(_paper_config()).eval()
