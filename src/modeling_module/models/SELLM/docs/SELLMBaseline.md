@@ -57,6 +57,42 @@ The comparison reference is `LH325/SE-LLM` commit
 `provenance.py`, but upstream source is not vendored. No license file was present in the
 reviewed upstream snapshot, so the implementation is based on the published equations.
 
-The fallback backend verifies architecture and public API behavior only. Real Qwen loading,
-GPU memory, throughput, accuracy, and full checkpoint artifact policy remain RTX 5090
-qualification work.
+## RTX 5090 Qwen baseline
+
+Commit `a85150df8ffbc6b6da138a09c2670f66439c7a72` was tested with the Python
+runtime used by the service on port 8011. The runtime used PyTorch
+`2.11.0+cu130`, Transformers `5.5.0`, and the local
+`/home/leekwanhyeong/models/Qwen2-0.5B` artifact. Source was loaded through
+`PYTHONPATH`; the installed wheel and running service were not changed.
+
+The L52/H26 paper configuration with two adapted Qwen layers passed load,
+forward, backward, and finite-gradient checks. At `semantic_vocab_size=1024`,
+batch 64 used 10.43 GiB peak training memory and 2.27 GiB peak inference memory.
+Repeated batch-64 inference took 62.6 ms, or about 1,023 series per second.
+
+The official v3 checkpoint smoke artifact was 1.578 GiB. Strict restoration
+reproduced the `[2, 26, 1]` output exactly with zero maximum absolute error.
+
+## Semantic vocabulary capacity
+
+The default semantic vocabulary is 512. It was selected by a controlled 5090
+pilot over 256, 512, and 1024 prototypes using:
+
+- target SHA-256 `f5abf27149a8408f5011b0735fb622aec430ccebcf89f7f4ce797a668aafb416`;
+- train targets ending at 202435 and validation targets from 202436 through 202509;
+- 256 seed-42 sampled series, 13,271 training windows, and 256 validation windows;
+- two epochs, batch 128, learning rate `1e-4`, and MAE plus TSCC KL loss;
+- non-negative clipping only for validation metrics.
+
+| Prototypes | MAE | WAPE | sMAPE | Bias | Peak train VRAM |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 256 | 2.4759 | 0.4756 | 0.6508 | 0.9211 | 9.36 GiB |
+| 512 | **2.3562** | **0.4526** | 0.7199 | **0.1915** | 11.55 GiB |
+| 1024 | 2.9856 | 0.5735 | 0.7894 | 1.8519 | 15.93 GiB |
+
+The 512 profile is the accuracy-oriented default because it produced the best
+MAE, WAPE, and bias. The 256 profile remains the preferred lightweight option
+when lower memory and better sMAPE matter more. The 1024 profile is not the
+default because its additional parameters and memory did not improve pilot
+accuracy. This pilot fixes the initial capacity policy; multi-seed full-data
+qualification is still required before production promotion.

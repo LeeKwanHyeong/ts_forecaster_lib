@@ -49,6 +49,11 @@ def _paper_config(*, horizon: int = 5) -> SELLMConfig:
     )
 
 
+def test_sellm_default_semantic_vocabulary_uses_5090_pilot_capacity():
+    assert SELLMConfig().semantic_vocab_size == 512
+    assert SELLMConfig(semantic_vocab_size=1024).semantic_vocab_size == 1024
+
+
 def test_paper_time_adapter_has_two_temporal_stages_and_zero_init_parity():
     torch.manual_seed(7)
     original = nn.Linear(6, 4, bias=False)
