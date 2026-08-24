@@ -531,6 +531,7 @@ def build_checkpoint_payload(
     }
     for attr in (
         "architecture_variant",
+        "token_len",
         "exogenous_fusion_strategy",
         "upstream_repository",
         "upstream_commit",

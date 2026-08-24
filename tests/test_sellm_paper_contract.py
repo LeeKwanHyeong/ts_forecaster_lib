@@ -224,6 +224,8 @@ def test_paper_fallback_output_gradient_and_strict_checkpoint_restore(tmp_path):
         extra_meta={"model_key": "sellm_base", "family": "sellm"},
     )
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    assert checkpoint["config"]["token_len"] == 2
+    assert checkpoint["meta"]["token_len"] == 2
     assert checkpoint["meta"]["architecture_variant"] == "paper_v1"
     assert checkpoint["meta"]["upstream_repository"] == SELLM_UPSTREAM_REPOSITORY
     assert checkpoint["meta"]["upstream_commit"] == SELLM_UPSTREAM_COMMIT
