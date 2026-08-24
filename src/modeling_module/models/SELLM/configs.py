@@ -34,7 +34,7 @@ class SELLMConfig(TrainingConfig):
     mlp_activation: Literal["relu", "gelu", "tanh"] = "gelu"
 
     # Semantic space / TSCC
-    semantic_vocab_size: int = 512
+    semantic_vocab_size: int = 256
     semantic_top_k: int = 32
     tscc_latent_dim: int = 8
     tscc_hidden_dim: int = 64

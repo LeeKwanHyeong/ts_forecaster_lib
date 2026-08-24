@@ -70,13 +70,15 @@ forward, backward, and finite-gradient checks. At `semantic_vocab_size=1024`,
 batch 64 used 10.43 GiB peak training memory and 2.27 GiB peak inference memory.
 Repeated batch-64 inference took 62.6 ms, or about 1,023 series per second.
 
-The official v3 checkpoint smoke artifact was 1.578 GiB. Strict restoration
-reproduced the `[2, 26, 1]` output exactly with zero maximum absolute error.
+The K1024 v3 checkpoint smoke artifact was 1.578 GiB. The selected K256 default
+uses the same strict artifact contract. A K512 intermediate artifact was 1.288
+GiB. Strict restoration reproduced the `[2, 26, 1]` output exactly with zero
+maximum absolute error.
 
 ## Semantic vocabulary capacity
 
-The default semantic vocabulary is 512. It was selected by a controlled 5090
-pilot over 256, 512, and 1024 prototypes using:
+The default semantic vocabulary is 256. Capacity was evaluated with a controlled
+5090 pilot over 256, 512, and 1024 prototypes using:
 
 - target SHA-256 `f5abf27149a8408f5011b0735fb622aec430ccebcf89f7f4ce797a668aafb416`;
 - train targets ending at 202435 and validation targets from 202436 through 202509;
@@ -84,15 +86,49 @@ pilot over 256, 512, and 1024 prototypes using:
 - two epochs, batch 128, learning rate `1e-4`, and MAE plus TSCC KL loss;
 - non-negative clipping only for validation metrics.
 
+The initial seed-42 run favored K512:
+
 | Prototypes | MAE | WAPE | sMAPE | Bias | Peak train VRAM |
 | ---: | ---: | ---: | ---: | ---: | ---: |
 | 256 | 2.4759 | 0.4756 | 0.6508 | 0.9211 | 9.36 GiB |
 | 512 | **2.3562** | **0.4526** | 0.7199 | **0.1915** | 11.55 GiB |
 | 1024 | 2.9856 | 0.5735 | 0.7894 | 1.8519 | 15.93 GiB |
 
-The 512 profile is the accuracy-oriented default because it produced the best
-MAE, WAPE, and bias. The 256 profile remains the preferred lightweight option
-when lower memory and better sMAPE matter more. The 1024 profile is not the
-default because its additional parameters and memory did not improve pilot
-accuracy. This pilot fixes the initial capacity policy; multi-seed full-data
+The same sampled series and training contract were then repeated with model and
+loader seeds 11, 22, and 33. K256 won MAE and WAPE for every seed:
+
+| Seed | K256 MAE | K512 MAE | K256 WAPE | K512 WAPE |
+| ---: | ---: | ---: | ---: | ---: |
+| 11 | 6.0677 | 6.1183 | 1.1656 | 1.1753 |
+| 22 | 3.7976 | 6.4304 | 0.7295 | 1.2353 |
+| 33 | 2.4398 | 5.8260 | 0.4687 | 1.1192 |
+
+Across those three seeds, K256 had mean MAE 4.1017 and K512 had mean MAE
+6.1249. K256 also used less peak training memory, 9.69 GiB versus 11.55 GiB,
+and produced higher validation throughput. The seed-42 K512 selection was
+therefore rejected. K256 is the maintained default, while K512 remains an
+explicit experiment profile. K1024 remains rejected because its additional
+parameters and memory did not improve the initial pilot accuracy.
+
+## Negative output policy
+
+K512 produced 1,629 negative raw points out of 19,968 validation points across
+seeds 11, 22, and 33, a rate of 8.16%. Applying `clip_zero` reduced MAE from
+7.0915 to 6.1249 and WAPE from 1.3623 to 1.1766. Every clipped row improved
+absolute error because observed demand is non-negative. The tradeoff is that
+bias moved from 3.4444 to 4.4109, so clipping increased the existing positive
+forecast bias.
+
+Negative rates rose to 26.7% for histories with 50-75% zeros and 38.0% for
+histories with 75-100% zeros. W7, W15, and W23 were the three highest-rate
+horizons, aligning with the ends of the model's eight-step autoregressive token
+segments.
+
+The maintained policy is to preserve raw model outputs for diagnostics and
+apply `clip_zero` at the public forecast or Demand Engine processing boundary.
+A hard clamp is not added inside training because it would hide the rollout
+boundary behavior and the bias tradeoff. Token-boundary stabilization should be
+tested separately before changing the model loss or output activation.
+
+These runs establish the development default only. Full-data, multi-seed
 qualification is still required before production promotion.
