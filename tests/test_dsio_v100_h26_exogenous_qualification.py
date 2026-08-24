@@ -104,6 +104,7 @@ def test_worker_command_carries_governed_runtime_values():
         sample_part_count=8,
         preflight_only=True,
         seed=22,
+        negative_output_penalty_weight=0.1,
     )
 
     assert command[0] == "/opt/python"
@@ -111,6 +112,9 @@ def test_worker_command_carries_governed_runtime_values():
     assert command[command.index("--epochs") + 1] == "40"
     assert command[command.index("--sample-part-count") + 1] == "8"
     assert command[command.index("--seed") + 1] == "22"
+    assert command[
+        command.index("--negative-output-penalty-weight") + 1
+    ] == "0.1"
     assert command[-1] == "--preflight-only"
 
 
@@ -123,5 +127,16 @@ def test_h26_architecture_is_frozen_for_all_three_families():
     assert architecture.exotst.patch_len == 13
     assert architecture.exotst.stride == 6
     assert architecture.exotst.d_model == 128
+    assert architecture.exotst.negative_output_penalty_weight == 0.0
     assert architecture.timexer.patch_len == 13
     assert LOOKBACK % architecture.timexer.patch_len == 0
+
+
+def test_h26_architecture_carries_exotst_negative_output_penalty():
+    architecture = build_architecture(negative_output_penalty_weight=0.1)
+
+    assert architecture.exotst.negative_output_penalty_weight == 0.1
+    assert not hasattr(
+        architecture.patchtst,
+        "negative_output_penalty_weight",
+    )

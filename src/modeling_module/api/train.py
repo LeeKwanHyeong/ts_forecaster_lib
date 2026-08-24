@@ -218,6 +218,7 @@ class ExoTSTArchitectureConfig:
     exo_nan_policy: Optional[str] = None
     use_revin: Optional[bool] = None
     subtract_last: Optional[bool] = None
+    negative_output_penalty_weight: Optional[float] = None
 
 
 @dataclass
@@ -554,6 +555,7 @@ _ARCHITECTURE_ALLOWED_KEYS: dict[str, set[str]] = {
         "exo_nan_policy",
         "use_revin",
         "subtract_last",
+        "negative_output_penalty_weight",
     },
     "nhits": {
         "stack_types",

@@ -155,7 +155,10 @@ def _tiny_titan_architecture() -> ArchitectureConfig:
     )
 
 
-def _tiny_exotst_architecture() -> ArchitectureConfig:
+def _tiny_exotst_architecture(
+    *,
+    negative_output_penalty_weight: float | None = None,
+) -> ArchitectureConfig:
     return ArchitectureConfig(
         exotst=ExoTSTArchitectureConfig(
             patch_len=2,
@@ -172,6 +175,7 @@ def _tiny_exotst_architecture() -> ArchitectureConfig:
             exo_nan_policy="zero",
             use_revin=False,
             subtract_last=False,
+            negative_output_penalty_weight=negative_output_penalty_weight,
         )
     )
 
@@ -433,6 +437,57 @@ def test_public_point_train_checkpoint_load_predict_smoke(
         assert restored_state.keys() == checkpoint["state_dict"].keys()
         for key, saved_value in checkpoint["state_dict"].items():
             torch.testing.assert_close(restored_state[key].cpu(), saved_value.cpu())
+
+
+def test_public_exotst_penalty_train_checkpoint_strict_load(tmp_path: Path):
+    torch.manual_seed(19)
+    np.random.seed(19)
+    artifact_dir = tmp_path / "exotst-penalty"
+    exogenous = ExogenousConfig(
+        use_exogenous_mode=True,
+        use_past_exogenous=True,
+        use_future_exogenous=True,
+        past_exo_cont_cols=["exo_known"],
+        future_exo_cont_cols=["exo_known"],
+    )
+
+    result = train(
+        TrainRequest(
+            data=_data_request(exogenous),
+            models=["exotst_base"],
+            trainer=TrainerConfig(
+                epochs=1,
+                lr=1e-3,
+                use_intermittent=False,
+                val_use_weights=False,
+            ),
+            ssl=SSLConfig(mode="sl_only"),
+            runtime=RuntimeConfig(device="cpu"),
+            artifacts=ArtifactConfig(
+                save_dir=str(artifact_dir),
+                auto_save_dir=False,
+            ),
+            architecture=_tiny_exotst_architecture(
+                negative_output_penalty_weight=0.1
+            ),
+        )
+    )
+
+    assert result.primary_ckpt_path is not None
+    checkpoint = torch.load(
+        result.primary_ckpt_path,
+        map_location="cpu",
+        weights_only=False,
+    )
+    assert checkpoint["config"]["negative_output_penalty_weight"] == 0.1
+    predictor = load_predictor(
+        result.primary_ckpt_path,
+        device="cpu",
+        strict=True,
+    )
+    assert predictor.model.cfg.negative_output_penalty_weight == 0.1
+    prediction = predictor.predict(_prediction_payload("exotst_base"))
+    assert np.isfinite(np.asarray(prediction["point"])).all()
 
 
 REMAINING_ARTIFACT_SMOKE_CASES = [

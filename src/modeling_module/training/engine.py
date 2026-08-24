@@ -208,6 +208,7 @@ class CommonTrainer:
             future_exo_cb=None,
             autocast_input=None,
             extra_loss_fn=None,
+            training_only_extra_loss_fn=None,
             use_exogenous_mode=False,
             device
     ):
@@ -235,6 +236,7 @@ class CommonTrainer:
         # Extra hooks / flags
         self.autocast_input = autocast_input or {}
         self.extra_loss_fn = extra_loss_fn
+        self.training_only_extra_loss_fn = training_only_extra_loss_fn
 
         # Exogenous mode: keep backward-compat (explicit arg overrides cfg)
         cfg_exo = bool(getattr(self.cfg, "use_exogenous_mode", False))
@@ -866,6 +868,15 @@ class CommonTrainer:
                 # 추가 손실 함수(Extra Loss) 합산
                 if self.extra_loss_fn is not None:
                     loss = loss + self.extra_loss_fn(x, pred, self.cfg)
+
+                # Training regularizers must not affect validation-based epoch
+                # selection. This hook is intentionally absent from val loops.
+                if train and self.training_only_extra_loss_fn is not None:
+                    loss = loss + self.training_only_extra_loss_fn(
+                        x,
+                        pred,
+                        self.cfg,
+                    )
 
                 # self._nan_stat("loss_raw", loss)
 
