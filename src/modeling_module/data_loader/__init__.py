@@ -79,3 +79,18 @@
 #     value = getattr(mod, attr)
 #     globals()[name] = value  # 캐싱
 #     return value
+
+
+from .icl_episode_data_module import (
+    ICLBatch,
+    ICLEpisodeDataModule,
+    ICLEpisodeDataset,
+    collate_icl_episodes,
+)
+
+__all__ = [
+    "ICLBatch",
+    "ICLEpisodeDataModule",
+    "ICLEpisodeDataset",
+    "collate_icl_episodes",
+]
