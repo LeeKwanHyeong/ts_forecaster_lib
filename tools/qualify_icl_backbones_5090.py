@@ -323,9 +323,27 @@ def _select_series(frame: pl.DataFrame, *, count: int, minimum_rows: int) -> pl.
             f"Only {len(selected)} series satisfy the continuous-history contract; "
             f"required={count}."
         )
-    return weekly.filter(pl.col("oper_part_no").is_in(selected)).sort(
-        "oper_part_no", "demand_dt"
+    selected_weekly = weekly.filter(pl.col("oper_part_no").is_in(selected))
+    boundaries = selected_weekly.group_by("oper_part_no").agg(
+        pl.col("demand_dt").min().alias("start_week"),
+        pl.col("demand_dt").max().alias("end_week"),
     )
+    common_start = int(boundaries["start_week"].max())
+    common_end = int(boundaries["end_week"].min())
+    aligned = selected_weekly.filter(
+        pl.col("demand_dt").is_between(common_start, common_end, closed="both")
+    ).sort("oper_part_no", "demand_dt")
+    aligned_counts = aligned.group_by("oper_part_no").agg(pl.len().alias("row_count"))
+    if (
+        aligned_counts.height != int(count)
+        or int(aligned_counts["row_count"].min()) < int(minimum_rows)
+        or int(aligned_counts["row_count"].n_unique()) != 1
+    ):
+        raise QualificationError(
+            "Selected series do not share enough aligned continuous history for the "
+            f"global temporal split; required_rows={minimum_rows}."
+        )
+    return aligned
 
 
 def _minimum_contiguous_rows(

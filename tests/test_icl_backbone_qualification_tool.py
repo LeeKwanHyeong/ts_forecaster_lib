@@ -59,7 +59,7 @@ def test_qualification_prepares_sealed_h26_and_h27_exogenous_artifacts(
             rows.append(
                 {
                     "oper_part_no": f"part-{part_index}",
-                    "demand_dt": _week(start, offset),
+                    "demand_dt": _week(start, offset + part_index * 4),
                     "demand_qty": float(10 + part_index + offset % 9),
                 }
             )
