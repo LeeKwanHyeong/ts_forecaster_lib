@@ -1155,6 +1155,14 @@ def _run_sellm(
                 "token_len": int(sellm_cfg.token_len),
                 "semantic_vocab_size": int(sellm_cfg.semantic_vocab_size),
                 "final_nonneg": bool(sellm_cfg.final_nonneg),
+                "output_head_mode": str(sellm_cfg.output_head_mode),
+                "output_head_hidden_dim": int(sellm_cfg.output_head_hidden_dim),
+                "output_head_softplus_beta": float(
+                    sellm_cfg.output_head_softplus_beta
+                ),
+                "output_head_initial_nonzero_probability": float(
+                    sellm_cfg.output_head_initial_nonzero_probability
+                ),
                 "negative_output_penalty_weight": float(
                     sellm_cfg.negative_output_penalty_weight
                 ),

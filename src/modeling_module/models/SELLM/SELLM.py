@@ -21,6 +21,7 @@ from modeling_module.models.SELLM.provenance import (
     SELLM_UPSTREAM_COMMIT,
     SELLM_UPSTREAM_REPOSITORY,
 )
+from modeling_module.models.SELLM.output_heads import ZeroInflatedSoftplusHead
 
 
 def _activation(name: str) -> nn.Module:
@@ -216,6 +217,7 @@ class SELLMModel(nn.Module):
         self.token_len = int(cfg.token_len)
         self.use_norm = bool(cfg.use_norm)
         self.final_nonneg = bool(cfg.final_nonneg)
+        self.output_head_mode = str(cfg.output_head_mode)
         self.use_pretrained_llm = bool(cfg.use_pretrained_llm)
         self.icl_enabled = bool(cfg.icl_enabled)
         self.icl_past_exogenous_dim = int(cfg.icl_past_exogenous_dim)
@@ -381,6 +383,18 @@ class SELLMModel(nn.Module):
             )
         else:
             self.future_exo_head = None
+        self.positive_output_head: Optional[nn.Module] = (
+            ZeroInflatedSoftplusHead(
+                horizon=self.horizon,
+                hidden_dim=int(cfg.output_head_hidden_dim),
+                softplus_beta=float(cfg.output_head_softplus_beta),
+                initial_nonzero_probability=float(
+                    cfg.output_head_initial_nonzero_probability
+                ),
+            )
+            if self.output_head_mode == "zero_inflated_softplus"
+            else None
+        )
 
     @classmethod
     def from_config(cls, config: SELLMConfig) -> "SELLMModel":
@@ -547,6 +561,29 @@ class SELLMModel(nn.Module):
                     dim=1,
                 )
         return torch.cat(chunks, dim=1)
+
+    def _apply_output_head(
+        self,
+        forecast: torch.Tensor,
+        *,
+        history: torch.Tensor,
+    ) -> torch.Tensor:
+        """Apply the configured output contract in original demand coordinates."""
+
+        if self.final_nonneg:
+            return F.softplus(forecast)
+        if self.output_head_mode == "identity":
+            return forecast
+        if self.output_head_mode == "softplus":
+            return F.softplus(
+                forecast,
+                beta=float(self.cfg.output_head_softplus_beta),
+            )
+        if self.output_head_mode == "zero_inflated_softplus":
+            if self.positive_output_head is None:
+                raise RuntimeError("SELLM zero-inflated output head is missing.")
+            return self.positive_output_head(forecast, history)
+        raise RuntimeError(f"Unsupported SELLM output head: {self.output_head_mode!r}.")
 
     def _icl_prompt_tokens(
         self,
@@ -718,9 +755,7 @@ class SELLMModel(nn.Module):
         if self.use_norm and means is not None and stdev is not None:
             forecast = forecast * stdev[:, 0, :].unsqueeze(1)
             forecast = forecast + means[:, 0, :].unsqueeze(1)
-        if self.final_nonneg:
-            forecast = F.softplus(forecast)
-        return forecast
+        return self._apply_output_head(forecast, history=query_context)
 
     def forward(
         self,
@@ -802,7 +837,4 @@ class SELLMModel(nn.Module):
             forecast = forecast * stdev[:, 0, :].unsqueeze(1).repeat(1, self.horizon, 1)
             forecast = forecast + means[:, 0, :].unsqueeze(1).repeat(1, self.horizon, 1)
 
-        if self.final_nonneg:
-            forecast = F.softplus(forecast)
-
-        return forecast
+        return self._apply_output_head(forecast, history=x)

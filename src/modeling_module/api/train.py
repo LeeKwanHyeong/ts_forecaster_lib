@@ -322,6 +322,12 @@ class SELLMArchitectureConfig:
     head_hidden_dim: Optional[int] = None
     use_norm: Optional[bool] = None
     final_nonneg: Optional[bool] = None
+    output_head_mode: Optional[
+        Literal["identity", "softplus", "zero_inflated_softplus"]
+    ] = None
+    output_head_hidden_dim: Optional[int] = None
+    output_head_softplus_beta: Optional[float] = None
+    output_head_initial_nonzero_probability: Optional[float] = None
     negative_output_penalty_weight: Optional[float] = None
     icl_enabled: Optional[bool] = None
     icl_past_exogenous_dim: Optional[int] = None
@@ -667,6 +673,10 @@ _ARCHITECTURE_ALLOWED_KEYS: dict[str, set[str]] = {
         "head_hidden_dim",
         "use_norm",
         "final_nonneg",
+        "output_head_mode",
+        "output_head_hidden_dim",
+        "output_head_softplus_beta",
+        "output_head_initial_nonzero_probability",
         "negative_output_penalty_weight",
         "icl_enabled",
         "icl_past_exogenous_dim",
