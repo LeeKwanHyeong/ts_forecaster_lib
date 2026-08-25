@@ -15,6 +15,50 @@ from modeling_module.training.model_trainers.loss_policy import infer_loss_mode
 from modeling_module.training.model_trainers.spike_policy import maybe_make_spike_loader
 
 
+def _sellm_icl_forward(model, batch):
+    from modeling_module.icl.model_adapters import SELLMICLAdapter
+
+    inputs = SELLMICLAdapter().adapt(batch)
+    return model.forward_icl(
+        demonstration_contexts=inputs.demonstration_contexts,
+        demonstration_targets=inputs.demonstration_targets,
+        query_context=inputs.query_context,
+        prompt_mask=inputs.prompt_mask,
+        demonstration_context_exogenous=inputs.demonstration_context_exogenous,
+        demonstration_target_exogenous=inputs.demonstration_target_exogenous,
+        query_context_exogenous=inputs.query_context_exogenous,
+        query_target_exogenous=inputs.query_target_exogenous,
+    )
+
+
+def train_sellm_icl(
+    model,
+    train_loader,
+    val_loader=None,
+    *,
+    trainer_config=None,
+):
+    """Train the SELLM semantic prompt encoder from sealed ICL episodes."""
+
+    from modeling_module.icl.training import ICLTrainerConfig, fit_icl_model
+
+    if not bool(getattr(getattr(model, "cfg", None), "icl_enabled", False)):
+        raise ValueError("SELLM ICL training requires cfg.icl_enabled=True.")
+    manifest = getattr(getattr(train_loader, "dataset", None), "manifest", None)
+    configured_hash = getattr(model.cfg, "icl_exogenous_schema_hash", None)
+    actual_schema = getattr(manifest, "exogenous_schema", None)
+    actual_hash = None if actual_schema is None else actual_schema.fingerprint
+    if configured_hash != actual_hash:
+        raise ValueError("SELLM ICL checkpoint and Episode exogenous schema hash differ.")
+    return fit_icl_model(
+        model,
+        train_loader,
+        val_loader,
+        forward=_sellm_icl_forward,
+        config=trainer_config or ICLTrainerConfig(),
+    )
+
+
 class SELLMAdapter(DefaultAdapter):
     def reg_loss(self, model):
         reg_fn = getattr(model, "reg_loss", None)
@@ -162,3 +206,12 @@ def train_sellm(
         }
     assert best is not None
     return best
+
+
+__all__ = [
+    "SELLMAdapter",
+    "make_sellm_negative_output_penalty",
+    "sellm_negative_output_penalty",
+    "train_sellm",
+    "train_sellm_icl",
+]
