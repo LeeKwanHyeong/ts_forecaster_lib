@@ -129,6 +129,10 @@ def test_autotimes_icl_trainer_and_artifact_forecast_round_trip(tmp_path: Path):
     )
     assert result.epochs_completed == 1
     assert result.best_validation_loss is not None
+    assert len(result.epoch_history) == 1
+    assert result.epoch_history[0]["epoch"] == 1
+    assert result.epoch_history[0]["validation_mae"] is not None
+    assert result.epoch_history[0]["validation_wape"] is not None
     assert all(not parameter.requires_grad for parameter in model.backbone.parameters())
 
     artifact_dir = tmp_path / "episodes"

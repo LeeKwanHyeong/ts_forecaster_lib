@@ -10,10 +10,11 @@ import hashlib
 import json
 import math
 import random
+import struct
 import subprocess
 import sys
 import time
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Final
 
@@ -90,6 +91,8 @@ APPROVED_EXOGENOUS_FEATURES: Final = (
     "lifecycle_source_observed_flag",
 )
 MODEL_KEYS: Final = ("autotimes_base", "sellm_base")
+BACKBONE_MANIFEST_CONTRACT: Final = "modeling_module.local_hf_backbone.v1"
+BACKBONE_MANIFEST_FILENAME: Final = "backbone-manifest.json"
 
 
 class QualificationError(RuntimeError):
@@ -261,6 +264,111 @@ def _load_operation_part_source(
     }
 
 
+def _safetensors_parameter_count(path: Path) -> int:
+    with path.open("rb") as handle:
+        header_size_raw = handle.read(8)
+        if len(header_size_raw) != 8:
+            raise QualificationError("Backbone safetensors header is incomplete.")
+        header_size = struct.unpack("<Q", header_size_raw)[0]
+        header = json.loads(handle.read(header_size).decode("utf-8"))
+    total = 0
+    for name, tensor in header.items():
+        if name == "__metadata__":
+            continue
+        shape = tensor.get("shape")
+        if not isinstance(shape, list) or any(int(value) < 0 for value in shape):
+            raise QualificationError(f"Invalid safetensors shape for {name!r}.")
+        total += math.prod(int(value) for value in shape)
+    return int(total)
+
+
+def _backbone_config_contract(config: dict[str, Any]) -> dict[str, Any]:
+    architectures = config.get("architectures") or []
+    if not isinstance(architectures, list):
+        raise QualificationError("Backbone architectures must be a list.")
+    contract = {
+        "model_type": str(config.get("model_type") or ""),
+        "architectures": [str(value) for value in architectures],
+        "hidden_size": int(config.get("hidden_size") or 0),
+        "num_hidden_layers": int(config.get("num_hidden_layers") or 0),
+        "num_attention_heads": int(config.get("num_attention_heads") or 0),
+        "num_key_value_heads": int(config.get("num_key_value_heads") or 0),
+        "vocab_size": int(config.get("vocab_size") or 0),
+        "torch_dtype": str(config.get("torch_dtype") or ""),
+    }
+    required_positive = (
+        "hidden_size",
+        "num_hidden_layers",
+        "num_attention_heads",
+        "vocab_size",
+    )
+    if not contract["model_type"] or not contract["architectures"]:
+        raise QualificationError("Backbone config lacks model type or architecture.")
+    if any(int(contract[name]) <= 0 for name in required_positive):
+        raise QualificationError("Backbone config contains non-positive dimensions.")
+    return contract
+
+
+def build_backbone_manifest(
+    llm_local_path: Path,
+    *,
+    model_id: str,
+    revision: str,
+    license_id: str,
+) -> dict[str, Any]:
+    excluded = {BACKBONE_MANIFEST_FILENAME}
+    paths = sorted(
+        path
+        for path in llm_local_path.iterdir()
+        if path.is_file() and path.name not in excluded
+    )
+    required = {"LICENSE", "config.json", "tokenizer.json", "model.safetensors"}
+    observed = {path.name for path in paths}
+    missing = sorted(required - observed)
+    if missing:
+        raise QualificationError(f"Backbone seal files are missing: {missing}.")
+    files = {
+        path.name: {"sha256": _file_sha256(path), "size_bytes": path.stat().st_size}
+        for path in paths
+    }
+    config = json.loads((llm_local_path / "config.json").read_text(encoding="utf-8"))
+    payload = {
+        "contract": BACKBONE_MANIFEST_CONTRACT,
+        "model_id": str(model_id),
+        "revision": str(revision),
+        "license": str(license_id),
+        "config": _backbone_config_contract(config),
+        "parameter_count": _safetensors_parameter_count(
+            llm_local_path / "model.safetensors"
+        ),
+        "files": files,
+    }
+    if not payload["model_id"] or not payload["revision"] or not payload["license"]:
+        raise QualificationError("Backbone model id, revision, and license are required.")
+    payload["manifest_sha256"] = _sha256_payload(payload)
+    return payload
+
+
+def write_backbone_manifest(
+    llm_local_path: Path,
+    *,
+    model_id: str,
+    revision: str,
+    license_id: str,
+) -> dict[str, Any]:
+    manifest = build_backbone_manifest(
+        llm_local_path,
+        model_id=model_id,
+        revision=revision,
+        license_id=license_id,
+    )
+    (llm_local_path / BACKBONE_MANIFEST_FILENAME).write_text(
+        json.dumps(manifest, indent=2, ensure_ascii=True, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return manifest
+
+
 def _load_backbone_contract(llm_local_path: Path) -> dict[str, Any]:
     required = ("config.json", "tokenizer.json", "tokenizer_config.json", "model.safetensors")
     files: dict[str, dict[str, Any]] = {}
@@ -270,13 +378,57 @@ def _load_backbone_contract(llm_local_path: Path) -> dict[str, Any]:
             raise QualificationError(f"Backbone file is missing: {name}.")
         files[name] = {"sha256": _file_sha256(path), "size_bytes": path.stat().st_size}
     config = json.loads((llm_local_path / "config.json").read_text(encoding="utf-8"))
-    return {
-        "model_type": str(config.get("model_type") or ""),
-        "hidden_size": int(config.get("hidden_size") or 0),
+    config_contract = _backbone_config_contract(config)
+    parameter_count = _safetensors_parameter_count(
+        llm_local_path / "model.safetensors"
+    )
+    manifest_path = llm_local_path / BACKBONE_MANIFEST_FILENAME
+    manifest: dict[str, Any] | None = None
+    if manifest_path.is_file():
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        expected_seal = str(manifest.get("manifest_sha256") or "")
+        payload = dict(manifest)
+        payload.pop("manifest_sha256", None)
+        if manifest.get("contract") != BACKBONE_MANIFEST_CONTRACT:
+            raise QualificationError("Backbone manifest contract is unsupported.")
+        if _sha256_payload(payload) != expected_seal:
+            raise QualificationError("Backbone manifest seal is invalid.")
+        sealed_files = manifest.get("files")
+        if not isinstance(sealed_files, dict):
+            raise QualificationError("Backbone manifest files must be a mapping.")
+        for name, expected in sealed_files.items():
+            path = llm_local_path / str(name)
+            if not path.is_file():
+                raise QualificationError(f"Sealed backbone file is missing: {name}.")
+            observed = {
+                "sha256": _file_sha256(path),
+                "size_bytes": path.stat().st_size,
+            }
+            if observed != expected:
+                raise QualificationError(f"Sealed backbone file differs: {name}.")
+        if manifest.get("config") != config_contract:
+            raise QualificationError("Backbone manifest config differs from config.json.")
+        if int(manifest.get("parameter_count") or 0) != parameter_count:
+            raise QualificationError("Backbone manifest parameter count differs.")
+        files = sealed_files
+    payload = {
+        "model_id": (
+            str(manifest.get("model_id")) if manifest is not None else llm_local_path.name
+        ),
+        "revision": (
+            str(manifest.get("revision")) if manifest is not None else None
+        ),
+        "license": str(manifest.get("license")) if manifest is not None else None,
+        **config_contract,
+        "parameter_count": parameter_count,
         "frozen": True,
         "files": files,
-        "contract_sha256": _sha256_payload(files),
+        "manifest_sha256": (
+            str(manifest.get("manifest_sha256")) if manifest is not None else None
+        ),
     }
+    payload["contract_sha256"] = _sha256_payload(payload)
+    return payload
 
 
 def _is_contiguous(weeks: list[int]) -> bool:
@@ -311,18 +463,64 @@ def _select_series(frame: pl.DataFrame, *, count: int, minimum_rows: int) -> pl.
         .filter(pl.col("row_count") >= int(minimum_rows))
         .sort(["row_count", "oper_part_no"], descending=[True, False])
     )
-    selected: list[str] = []
-    for part_no in candidates["oper_part_no"].to_list():
-        weeks = weekly.filter(pl.col("oper_part_no") == part_no)["demand_dt"].to_list()
+    candidate_histories = candidates.join(
+        weekly.group_by("oper_part_no").agg(
+            pl.col("demand_dt").sort().alias("weeks")
+        ),
+        on="oper_part_no",
+        how="inner",
+        validate="1:1",
+    )
+    eligible: list[dict[str, Any]] = []
+    for row in candidate_histories.iter_rows(named=True):
+        part_no = str(row["oper_part_no"])
+        weeks = row["weeks"]
         if _is_contiguous([int(value) for value in weeks]):
-            selected.append(str(part_no))
-        if len(selected) == int(count):
-            break
-    if len(selected) != int(count):
+            eligible.append(
+                {
+                    "part_no": part_no,
+                    "start": _iso_week_monday(int(weeks[0])),
+                    "end": _iso_week_monday(int(weeks[-1])),
+                }
+            )
+    if len(eligible) < int(count):
         raise QualificationError(
-            f"Only {len(selected)} series satisfy the continuous-history contract; "
+            f"Only {len(eligible)} series satisfy the continuous-history contract; "
             f"required={count}."
         )
+
+    def common_rows(parts: list[dict[str, Any]]) -> int:
+        common_start = max(item["start"] for item in parts)
+        common_end = min(item["end"] for item in parts)
+        return max((common_end - common_start).days // 7 + 1, 0)
+
+    selected_metadata = eligible[: int(count)]
+    if common_rows(selected_metadata) < int(minimum_rows):
+        best: tuple[int, tuple[str, ...], list[dict[str, Any]]] | None = None
+        for candidate_start in sorted({item["start"] for item in eligible}):
+            required_end = candidate_start + timedelta(weeks=int(minimum_rows) - 1)
+            compatible = [
+                item
+                for item in eligible
+                if item["start"] <= candidate_start and item["end"] >= required_end
+            ]
+            if len(compatible) < int(count):
+                continue
+            group = compatible[: int(count)]
+            score = common_rows(group)
+            identity = tuple(item["part_no"] for item in group)
+            candidate = (score, identity, group)
+            if best is None or score > best[0] or (
+                score == best[0] and identity < best[1]
+            ):
+                best = candidate
+        if best is None:
+            raise QualificationError(
+                "No deterministic series cohort shares enough aligned continuous "
+                f"history; required_series={count}, required_rows={minimum_rows}."
+            )
+        selected_metadata = best[2]
+    selected = [item["part_no"] for item in selected_metadata]
     selected_weekly = weekly.filter(pl.col("oper_part_no").is_in(selected))
     boundaries = selected_weekly.group_by("oper_part_no").agg(
         pl.col("demand_dt").min().alias("start_week"),
@@ -672,6 +870,7 @@ def qualify_one(
     artifact_dir: Path,
     output_dir: Path,
     llm_local_path: Path,
+    backbone_contract: dict[str, Any],
     epochs: int,
     batch_size: int,
     seed: int,
@@ -721,6 +920,7 @@ def qualify_one(
         if result.best_validation_loss is None
         else float(result.best_validation_loss)
     )
+    epoch_history = [dict(item) for item in result.epoch_history]
     memory = {
         "peak_allocated_mib": (
             torch.cuda.max_memory_allocated() / (1024**2)
@@ -747,6 +947,7 @@ def qualify_one(
             "qualification_contract": RECEIPT_CONTRACT,
             "episode_manifest_hash": bundle.manifest.manifest_hash,
             "random_seed": seed,
+            "backbone_contract": backbone_contract,
         },
     )
     checkpoint_sha256 = _file_sha256(checkpoint_path)
@@ -774,7 +975,14 @@ def qualify_one(
         "model_key": model_key,
         "horizon": int(horizon),
         "backbone": {
-            "type": "Qwen2-0.5B",
+            "model_id": backbone_contract["model_id"],
+            "model_type": backbone_contract["model_type"],
+            "hidden_size": backbone_contract["hidden_size"],
+            "num_hidden_layers": backbone_contract["num_hidden_layers"],
+            "parameter_count": backbone_contract["parameter_count"],
+            "revision": backbone_contract["revision"],
+            "manifest_sha256": backbone_contract["manifest_sha256"],
+            "contract_sha256": backbone_contract["contract_sha256"],
             "local_path": str(llm_local_path),
             "load_seconds": backbone_load_seconds,
             "frozen": True,
@@ -785,6 +993,7 @@ def qualify_one(
             "seconds": training_seconds,
             "final_train_loss": final_train_loss,
             "best_validation_loss": best_validation_loss,
+            "epoch_history": epoch_history,
             **memory,
         },
         "accuracy": _accuracy(first.predictions, bundle),
@@ -852,6 +1061,7 @@ def run_qualification(args: argparse.Namespace) -> dict[str, Any]:
                     artifact_dir=output_root / f"h{horizon}" / "episodes",
                     output_dir=output_root / f"h{horizon}" / model_key,
                     llm_local_path=llm_local_path,
+                    backbone_contract=backbone,
                     epochs=int(args.epochs),
                     batch_size=int(args.batch_size),
                     seed=int(args.seed),

@@ -5,16 +5,25 @@ from datetime import date, timedelta
 from pathlib import Path
 
 import polars as pl
+import pytest
+import torch
+from safetensors.torch import save_file
 
 from modeling_module.icl import ICLSplit
 from tools.qualify_icl_backbones_5090 import (
     APPROVED_EXOGENOUS_FEATURES,
+    BACKBONE_MANIFEST_FILENAME,
+    QualificationError,
     _accuracy,
+    _load_backbone_contract,
     _load_operation_part_source,
     _minimum_contiguous_rows,
+    _select_series,
     _sha256_payload,
     _split_target_contract,
+    build_backbone_manifest,
     prepare_bundles,
+    write_backbone_manifest,
 )
 
 
@@ -36,6 +45,29 @@ def _operation_parts(count: int) -> pl.DataFrame:
     )
 
 
+def _local_backbone(path: Path) -> None:
+    path.mkdir()
+    (path / "LICENSE").write_text("Apache License 2.0\n", encoding="utf-8")
+    (path / "config.json").write_text(
+        json.dumps(
+            {
+                "architectures": ["Qwen2ForCausalLM"],
+                "hidden_size": 8,
+                "model_type": "qwen2",
+                "num_attention_heads": 2,
+                "num_hidden_layers": 3,
+                "num_key_value_heads": 1,
+                "torch_dtype": "bfloat16",
+                "vocab_size": 16,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (path / "tokenizer.json").write_text("{}\n", encoding="utf-8")
+    (path / "tokenizer_config.json").write_text("{}\n", encoding="utf-8")
+    save_file({"weight": torch.zeros(8, 4)}, path / "model.safetensors")
+
+
 def test_qualification_minimum_history_matches_non_overlapping_split_contract():
     assert _minimum_contiguous_rows(horizon=26, stride=26) == 286
     assert _minimum_contiguous_rows(horizon=27, stride=26) == 391
@@ -47,6 +79,73 @@ def test_qualification_minimum_history_matches_non_overlapping_split_contract():
         )
         == 339
     )
+
+
+def test_backbone_contract_preserves_unsealed_legacy_directory(tmp_path: Path):
+    model_path = tmp_path / "Qwen2-0.5B"
+    _local_backbone(model_path)
+
+    contract = _load_backbone_contract(model_path)
+
+    assert contract["model_id"] == "Qwen2-0.5B"
+    assert contract["revision"] is None
+    assert contract["hidden_size"] == 8
+    assert contract["num_hidden_layers"] == 3
+    assert contract["parameter_count"] == 32
+    assert contract["manifest_sha256"] is None
+
+
+def test_backbone_manifest_seals_revision_config_and_files(tmp_path: Path):
+    model_path = tmp_path / "Qwen2-1.5B"
+    _local_backbone(model_path)
+
+    written = write_backbone_manifest(
+        model_path,
+        model_id="Qwen/Qwen2-1.5B",
+        revision="8a16abf",
+        license_id="apache-2.0",
+    )
+    contract = _load_backbone_contract(model_path)
+
+    assert (model_path / BACKBONE_MANIFEST_FILENAME).is_file()
+    assert written == build_backbone_manifest(
+        model_path,
+        model_id="Qwen/Qwen2-1.5B",
+        revision="8a16abf",
+        license_id="apache-2.0",
+    )
+    assert contract["model_id"] == "Qwen/Qwen2-1.5B"
+    assert contract["revision"] == "8a16abf"
+    assert contract["license"] == "apache-2.0"
+    assert contract["manifest_sha256"] == written["manifest_sha256"]
+    assert contract["parameter_count"] == 32
+
+    (model_path / "tokenizer.json").write_text('{"changed": true}\n', encoding="utf-8")
+    with pytest.raises(QualificationError, match="differs"):
+        _load_backbone_contract(model_path)
+
+
+def test_series_selection_finds_deterministic_aligned_cohort():
+    starts = {
+        "part-a": (date.fromisocalendar(2019, 1, 1), 30),
+        "part-b": (date.fromisocalendar(2022, 1, 1), 29),
+        "part-c": (date.fromisocalendar(2020, 1, 1), 28),
+        "part-d": (date.fromisocalendar(2020, 1, 1), 28),
+    }
+    rows = [
+        {
+            "oper_part_no": part_no,
+            "demand_dt": _week(start, offset),
+            "demand_qty": 1.0,
+        }
+        for part_no, (start, length) in starts.items()
+        for offset in range(length)
+    ]
+
+    selected = _select_series(pl.DataFrame(rows), count=2, minimum_rows=20)
+
+    assert selected["oper_part_no"].unique().sort().to_list() == ["part-c", "part-d"]
+    assert selected.group_by("oper_part_no").len()["len"].unique().to_list() == [28]
 
 
 def test_qualification_prepares_sealed_h26_and_h27_exogenous_artifacts(
