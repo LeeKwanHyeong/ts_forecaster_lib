@@ -197,8 +197,19 @@ class AutoTimesModel(nn.Module):
             timestamp = nn.functional.normalize(timestamp, dim=-1)
             embeddings = embeddings + self.timestamp_scale * timestamp
 
-        hidden = self.backbone(inputs_embeds=embeddings).last_hidden_state
-        next_normalized = self.detokenizer(hidden[:, -1, :])
+        backbone_parameter = next(self.backbone.parameters(), None)
+        backbone_dtype = (
+            embeddings.dtype
+            if backbone_parameter is None
+            else backbone_parameter.dtype
+        )
+        hidden = self.backbone(
+            inputs_embeds=embeddings.to(dtype=backbone_dtype)
+        ).last_hidden_state
+        detokenizer_parameter = next(self.detokenizer.parameters())
+        next_normalized = self.detokenizer(
+            hidden[:, -1, :].to(dtype=detokenizer_parameter.dtype)
+        )
         next_normalized = next_normalized.reshape(batch, channels, self.token_len).permute(0, 2, 1)
         return next_normalized * stdev + means
 
