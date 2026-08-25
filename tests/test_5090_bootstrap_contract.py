@@ -42,6 +42,7 @@ def _write_candidate_wheel(
     *,
     manifest_overrides: dict[str, object] | None = None,
     extra_members: dict[str, bytes] | None = None,
+    metadata_lines: list[str] | None = None,
 ) -> tuple[Path, str]:
     wheel = directory / "modeling_module-0.1.1-1private-cp312-none-any.whl"
     manifest = {
@@ -68,7 +69,15 @@ def _write_candidate_wheel(
         )
         archive.writestr(
             f"{dist_info}/METADATA",
-            "Metadata-Version: 2.1\nName: modeling-module\nVersion: 0.1.1\n",
+            "\n".join(
+                [
+                    "Metadata-Version: 2.1",
+                    "Name: modeling-module",
+                    "Version: 0.1.1",
+                    *(metadata_lines or []),
+                    "",
+                ]
+            ),
         )
         archive.writestr(
             f"{dist_info}/WHEEL",
@@ -187,6 +196,40 @@ def test_5090_private_wheel_preflight_accepts_the_exact_non_sellm_contract(tmp_p
     assert result["non_sellm"] is True
     assert result["wheel_sha256"] == wheel_sha
     assert result["builder_commit"] == APPROVED_COMMIT
+
+
+@pytest.mark.skipif(
+    sys.implementation.cache_tag != "cpython-312",
+    reason="the deployment verifier intentionally accepts CPython 3.12 only",
+)
+def test_5090_private_wheel_preflight_accepts_sellm_profile(tmp_path):
+    wheel, wheel_sha = _write_candidate_wheel(
+        tmp_path,
+        manifest_overrides={"distribution_profile": "sellm"},
+        metadata_lines=[
+            'Provides-Extra: sellm',
+            'Requires-Dist: accelerate>=0.33; extra == "sellm"',
+            'Requires-Dist: safetensors>=0.4; extra == "sellm"',
+            'Requires-Dist: tokenizers>=0.20; extra == "sellm"',
+            'Requires-Dist: transformers<6,>=4.45; extra == "sellm"',
+        ],
+        extra_members={
+            "modeling_module/models/SELLM/SELLM.pyc": (
+                importlib.util.MAGIC_NUMBER + (b"\x00" * 12)
+            ),
+        },
+    )
+
+    result = wheel_verifier.verify_5090_private_wheel(
+        wheel,
+        expected_commit=APPROVED_COMMIT,
+        expected_sha256=wheel_sha,
+        expected_builder_python=sys.version.split()[0],
+        distribution_profile="sellm",
+    )
+
+    assert result["distribution_profile"] == "sellm"
+    assert result["non_sellm"] is False
 
 
 @pytest.mark.skipif(
