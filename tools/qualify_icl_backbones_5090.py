@@ -470,7 +470,7 @@ def _select_series(frame: pl.DataFrame, *, count: int, minimum_rows: int) -> pl.
         on="oper_part_no",
         how="inner",
         validate="1:1",
-    )
+    ).sort(["row_count", "oper_part_no"], descending=[True, False])
     eligible: list[dict[str, Any]] = []
     for row in candidate_histories.iter_rows(named=True):
         part_no = str(row["oper_part_no"])

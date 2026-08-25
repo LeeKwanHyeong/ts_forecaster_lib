@@ -148,6 +148,24 @@ def test_series_selection_finds_deterministic_aligned_cohort():
     assert selected.group_by("oper_part_no").len()["len"].unique().to_list() == [28]
 
 
+def test_series_selection_preserves_longest_history_priority():
+    start = date.fromisocalendar(2019, 1, 1)
+    lengths = {"part-b": 29, "part-c": 28, "part-a": 30}
+    rows = [
+        {
+            "oper_part_no": part_no,
+            "demand_dt": _week(start, offset),
+            "demand_qty": 1.0,
+        }
+        for part_no, length in lengths.items()
+        for offset in range(length)
+    ]
+
+    selected = _select_series(pl.DataFrame(rows), count=2, minimum_rows=20)
+
+    assert selected["oper_part_no"].unique().sort().to_list() == ["part-a", "part-b"]
+
+
 def test_qualification_prepares_sealed_h26_and_h27_exogenous_artifacts(
     tmp_path: Path,
 ):
