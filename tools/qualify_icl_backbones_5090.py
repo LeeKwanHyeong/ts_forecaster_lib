@@ -328,6 +328,40 @@ def _select_series(frame: pl.DataFrame, *, count: int, minimum_rows: int) -> pl.
     )
 
 
+def _minimum_contiguous_rows(
+    *,
+    horizon: int,
+    stride: int,
+    lookback: int = 52,
+    seasonal_period: int = 52,
+    validation_episodes: int = 1,
+    test_episodes: int = 1,
+) -> int:
+    """Return the shortest history that yields non-overlapping train/val/test targets."""
+
+    if min(horizon, stride, lookback, seasonal_period) <= 0:
+        raise ValueError("ICL history dimensions must be positive.")
+    if validation_episodes < 0 or test_episodes < 0:
+        raise ValueError("ICL holdout episode counts must be non-negative.")
+    total = int(lookback) + int(horizon)
+    query_start = 0
+    while True:
+        historical_start = query_start - total
+        if historical_start >= 0:
+            seasonal_target_start = query_start + int(lookback) - int(seasonal_period)
+            while seasonal_target_start + int(horizon) > historical_start:
+                seasonal_target_start -= int(seasonal_period)
+            if seasonal_target_start - int(lookback) >= 0:
+                break
+        query_start += int(stride)
+
+    non_overlapping_gap = math.ceil(int(horizon) / int(stride)) * int(stride)
+    latest_query_start = query_start + (
+        int(validation_episodes) + int(test_episodes)
+    ) * non_overlapping_gap
+    return latest_query_start + total
+
+
 def _add_approved_exogenous_features(
     frame: pl.DataFrame,
     operation_parts: pl.DataFrame,
@@ -416,9 +450,15 @@ def prepare_bundles(
         target_path,
         columns=["oper_part_no", "demand_dt", "demand_qty"],
     )
-    # The seasonal demonstration must move three annual periods behind the
-    # query target before it no longer overlaps the historical demonstration.
-    minimum_rows = 6 * 52 + max(horizons) + 2 * int(stride)
+    minimum_rows = max(
+        _minimum_contiguous_rows(
+            horizon=int(horizon),
+            stride=int(stride),
+            validation_episodes=(1 if int(horizon) == 26 else 0),
+            test_episodes=1,
+        )
+        for horizon in horizons
+    )
     selected = _select_series(
         frame,
         count=sample_series,
@@ -427,6 +467,7 @@ def prepare_bundles(
     selected = _add_approved_exogenous_features(selected, operation_parts)
     bundles: dict[int, Any] = {}
     for horizon in horizons:
+        validation_episodes = 1 if int(horizon) == 26 else 0
         builder = ExogenousICLDatasetBuilder(
             ExogenousICLBuilderConfig(
                 episode=EndogenousICLBuilderConfig(
@@ -434,7 +475,7 @@ def prepare_bundles(
                     horizon=int(horizon),
                     window_stride=int(stride),
                     seasonal_period=52,
-                    validation_episodes_per_series=1,
+                    validation_episodes_per_series=validation_episodes,
                     test_episodes_per_series=1,
                 ),
                 past_feature_cols=APPROVED_EXOGENOUS_FEATURES,
@@ -542,7 +583,11 @@ def _build_model(model_key: str, config):
 
 def _fit(model_key: str, model, module: ICLEpisodeDataModule, config: ICLTrainerConfig):
     train_loader = module.loader(ICLSplit.TRAIN, shuffle=False)
-    validation_loader = module.loader(ICLSplit.VALIDATION, shuffle=False)
+    validation_loader = (
+        module.loader(ICLSplit.VALIDATION, shuffle=False)
+        if module.bundle.for_split(ICLSplit.VALIDATION)
+        else None
+    )
     if model_key == "autotimes_base":
         return train_autotimes_icl(
             model,
@@ -827,6 +872,7 @@ def run_qualification(args: argparse.Namespace) -> dict[str, Any]:
         "episodes": {
             str(horizon): {
                 "role": "operating" if horizon == 26 else "boundary_diagnostic",
+                "validation_enabled": horizon == 26,
                 "manifest_hash": bundles[horizon].manifest.manifest_hash,
                 "split_counts": dict(bundles[horizon].manifest.split_counts),
                 "split_target_ranges": _split_target_contract(bundles[horizon]),

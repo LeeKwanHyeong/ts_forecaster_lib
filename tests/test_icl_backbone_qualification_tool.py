@@ -11,6 +11,7 @@ from tools.qualify_icl_backbones_5090 import (
     APPROVED_EXOGENOUS_FEATURES,
     _accuracy,
     _load_operation_part_source,
+    _minimum_contiguous_rows,
     _sha256_payload,
     _split_target_contract,
     prepare_bundles,
@@ -32,6 +33,19 @@ def _operation_parts(count: int) -> pl.DataFrame:
             "warranty": [12 + 12 * (index % 4) for index in range(count)],
         },
         schema_overrides={"warranty": pl.Int16},
+    )
+
+
+def test_qualification_minimum_history_matches_non_overlapping_split_contract():
+    assert _minimum_contiguous_rows(horizon=26, stride=26) == 286
+    assert _minimum_contiguous_rows(horizon=27, stride=26) == 391
+    assert (
+        _minimum_contiguous_rows(
+            horizon=27,
+            stride=26,
+            validation_episodes=0,
+        )
+        == 339
     )
 
 
@@ -77,14 +91,23 @@ def test_qualification_prepares_sealed_h26_and_h27_exogenous_artifacts(
             "approved-operation-part-r1"
         )
         assert bundle.manifest.split_counts["test"] == 2
+        assert bundle.manifest.split_counts["validation"] == (
+            2 if horizon == 26 else 0
+        )
         assert len(bundle.for_split(ICLSplit.TEST)[0].query_target.weeks) == horizon
         ranges = _split_target_contract(bundle)
-        assert ranges["train"]["target_end_week"] < ranges["validation"][
-            "target_start_week"
-        ]
-        assert ranges["validation"]["target_end_week"] < ranges["test"][
-            "target_start_week"
-        ]
+        if horizon == 26:
+            assert ranges["train"]["target_end_week"] < ranges["validation"][
+                "target_start_week"
+            ]
+            assert ranges["validation"]["target_end_week"] < ranges["test"][
+                "target_start_week"
+            ]
+        else:
+            assert "validation" not in ranges
+            assert ranges["train"]["target_end_week"] < ranges["test"][
+                "target_start_week"
+            ]
         assert (tmp_path / "qualification" / f"h{horizon}" / "episodes" / "manifest.json").is_file()
 
 

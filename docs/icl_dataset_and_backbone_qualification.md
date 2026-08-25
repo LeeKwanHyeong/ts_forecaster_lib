@@ -43,6 +43,9 @@ hash도 달라지므로 기존 checkpoint와 함께 사용할 수 없습니다.
 - 연속 이력이 충분한 자재를 이력 길이와 자재 코드 순서로 결정적으로 선택합니다.
 - H26을 운영 기준 Episode로 생성하고 H27은 autoregressive horizon 경계 진단에만
   사용합니다.
+- H26은 Train·Validation·Test를 모두 사용합니다. 동일 Source의 연속 이력으로
+  H27까지 세 구간을 만들 수 없으므로 H27 진단은 서로 겹치지 않는 Train·Test만
+  사용하고 Validation 기반 모델 선택은 수행하지 않습니다.
 - Train, Validation, Test의 정답 구간이 서로 겹치지 않도록 경계 Episode를
   제외합니다. Receipt에는 split별 정답 시작·종료 주차를 함께 기록합니다.
 - 외생변수는 임의 수요 기반 값이 아니라 승인된 ISO 달력 12개와
