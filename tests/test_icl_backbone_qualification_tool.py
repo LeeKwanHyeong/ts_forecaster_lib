@@ -18,6 +18,7 @@ from tools.qualify_icl_backbones_5090 import (
     _load_backbone_contract,
     _load_operation_part_source,
     _minimum_contiguous_rows,
+    _model_config,
     _select_series,
     _sha256_payload,
     _split_target_contract,
@@ -79,6 +80,30 @@ def test_qualification_minimum_history_matches_non_overlapping_split_contract():
         )
         == 339
     )
+
+
+@pytest.mark.parametrize(
+    "mode",
+    ["identity", "softplus", "zero_inflated_softplus"],
+)
+def test_qualification_sellm_config_seals_output_head(mode: str, tmp_path: Path):
+    config = _model_config(
+        "sellm_base",
+        horizon=26,
+        llm_local_path=tmp_path / "Qwen2-0.5B",
+        schema_hash="a" * 64,
+        past_exogenous_dim=23,
+        future_exogenous_dim=23,
+        sellm_output_head_mode=mode,
+        sellm_output_head_hidden_dim=12,
+        sellm_output_head_softplus_beta=1.5,
+        sellm_output_head_initial_nonzero_probability=0.25,
+    )
+
+    assert config.output_head_mode == mode
+    assert config.output_head_hidden_dim == 12
+    assert config.output_head_softplus_beta == 1.5
+    assert config.output_head_initial_nonzero_probability == 0.25
 
 
 def test_backbone_contract_preserves_unsealed_legacy_directory(tmp_path: Path):
