@@ -822,7 +822,7 @@ def _fit(model_key: str, model, module: ICLEpisodeDataModule, config: ICLTrainer
     )
 
 
-def _accuracy(predictions: pl.DataFrame, bundle) -> dict[str, float | int]:
+def _accuracy(predictions: pl.DataFrame, bundle) -> dict[str, Any]:
     actual_rows: list[dict[str, Any]] = []
     for episode in bundle.for_split(ICLSplit.TEST):
         for step, values in enumerate(episode.query_target.target):
@@ -841,18 +841,53 @@ def _accuracy(predictions: pl.DataFrame, bundle) -> dict[str, float | int]:
     )
     if joined.height != predictions.height:
         raise QualificationError("Prediction rows do not match sealed query targets.")
-    absolute_error = (pl.col("point") - pl.col("actual")).abs()
-    totals = joined.select(
-        pl.len().alias("points"),
-        absolute_error.mean().alias("mae"),
-        absolute_error.sum().alias("absolute_error_sum"),
-        pl.col("actual").abs().sum().alias("actual_abs_sum"),
-    ).row(0, named=True)
-    denominator = float(totals["actual_abs_sum"])
+    points = joined.get_column("point").to_numpy().astype(np.float64)
+    actual = joined.get_column("actual").to_numpy().astype(np.float64)
+    if not np.isfinite(points).all() or not np.isfinite(actual).all():
+        raise QualificationError("Prediction scoring received non-finite values.")
+
+    def metrics(observed: np.ndarray, expected: np.ndarray) -> dict[str, float | int]:
+        error = observed - expected
+        absolute_error = np.abs(error)
+        actual_scale = float(np.abs(expected).sum())
+        smape_scale = np.abs(observed) + np.abs(expected)
+        smape_terms = np.divide(
+            2.0 * absolute_error,
+            smape_scale,
+            out=np.zeros_like(absolute_error),
+            where=smape_scale > 0.0,
+        )
+        negative_points = int(np.count_nonzero(observed < 0.0))
+        return {
+            "points": int(observed.size),
+            "mae": float(absolute_error.mean()),
+            "wape": float(absolute_error.sum()) / actual_scale if actual_scale else 0.0,
+            "smape": float(smape_terms.mean()),
+            "bias": float(error.sum()) / actual_scale if actual_scale else 0.0,
+            "raw_negative_points": negative_points,
+            "raw_negative_rate": negative_points / int(observed.size),
+            "point_min": float(observed.min()),
+            "point_max": float(observed.max()),
+        }
+
+    overall = metrics(points, actual)
+    series_negative = joined.group_by("episode_id").agg(
+        (pl.col("point") < 0.0).all().alias("all_negative")
+    )
+    horizon_metrics: list[dict[str, float | int]] = []
+    for horizon_step in sorted(joined.get_column("horizon_step").unique().to_list()):
+        horizon = joined.filter(pl.col("horizon_step") == int(horizon_step))
+        item = metrics(
+            horizon.get_column("point").to_numpy().astype(np.float64),
+            horizon.get_column("actual").to_numpy().astype(np.float64),
+        )
+        item["horizon_step"] = int(horizon_step)
+        horizon_metrics.append(item)
     return {
-        "points": int(totals["points"]),
-        "mae": float(totals["mae"]),
-        "wape": float(totals["absolute_error_sum"]) / denominator if denominator else 0.0,
+        **overall,
+        "series": int(series_negative.height),
+        "all_negative_series": int(series_negative.get_column("all_negative").sum()),
+        "horizon_metrics": horizon_metrics,
     }
 
 
@@ -1110,6 +1145,9 @@ def run_qualification(args: argparse.Namespace) -> dict[str, Any]:
             "status": "PASS",
             "sample_series": int(args.sample_series),
             "models": list(model_keys),
+            "epochs": int(args.epochs),
+            "learning_rate": float(args.learning_rate),
+            "batch_size": int(args.batch_size),
             "horizons": list(horizons),
             "primary_horizon": 26,
             "diagnostic_horizons": [value for value in horizons if value != 26],
