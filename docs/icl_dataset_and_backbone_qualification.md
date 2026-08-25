@@ -280,3 +280,38 @@ Qualification은 위에서 봉인한 model ID, revision과 manifest를 사용합
 Qwen2-1.5B는 기본 실행과 모델 선택에서 제외하고 연구용 비교 대상으로만
 유지합니다. 이 backbone 결정은 SELLM checkpoint의 Production 승인을 의미하지
 않습니다.
+
+## Qwen2-0.5B 다중 Seed 운영 적합성 검증
+
+AutoTimes와 SELLM 자체의 안정성을 확인하기 위해 `0c2607a` clean checkout에서
+seed `11`, `22`, `33`을 각각 처음부터 학습했습니다. 모든 실행은 H26,
+256 series, batch 4, 5 epoch와 동일한 Episode manifest
+`2be49f5c09ebc447e22363d93120f5461ebd0f09687ff80e9f81a1c834ca68bf`를
+사용했습니다. AutoTimes LR은 `1e-3`, SELLM LR은 `1e-4`입니다.
+
+운영 승격 기준은 MAE 변동계수 10% 이하, 모든 seed의 절대 bias 10% 이하,
+평균 raw 음수율 10% 이하, strict reload 최대 오차 `1e-6` 이하로 고정했습니다.
+검증 결과는 다음과 같습니다.
+
+| 모델 | MAE 평균 (범위) | WAPE 평균 (범위) | MAE 변동계수 | Bias 평균 (범위) | Raw 음수율 평균 | 판정 |
+|---|---:|---:|---:|---:|---:|---|
+| AutoTimes | 4.656 (3.358~6.053) | 69.19% (49.89~89.94%) | 23.68% | +37.61% (+23.33~+55.02%) | 3.93% | FAIL |
+| SELLM | 3.905 (3.691~4.087) | 58.02% (54.85~60.73%) | 4.17% | +11.75% (+4.29~+16.01%) | 15.49% | FAIL |
+
+AutoTimes는 raw 음수율과 checkpoint 복원은 통과했지만 seed별 정확도 편차가 크고
+모든 seed에서 과대예측했습니다. SELLM은 MAE seed 안정성과 checkpoint 복원은
+통과했지만 평균 raw 음수율이 10%를 넘고 seed 11·33의 bias가 허용 범위를
+벗어났습니다. 두 모델 모두 all-negative series는 없었습니다.
+
+학습 시간은 AutoTimes가 평균 276.7초, SELLM이 평균 46.2초였으며 Peak allocated
+GPU memory는 각각 6,128.9 MiB와 2,844.3 MiB였습니다. SELLM이 정확도와 비용,
+seed 안정성에서는 상대적으로 우수하지만 현재 출력 계약으로는 운영 후보로
+승격하지 않습니다.
+
+봉인 aggregate receipt는 `docs/ICLQwen05BMultiseedQualification.json`에 있으며
+SHA256 seal은
+`26b7ebec1cc6c3457f834a353abc95c5bcf11c4ee3751b91419154e0e8160c14`입니다.
+따라서 이번 결과로 Production refit, SELLM 포함 Wheel 빌드, Demand Engine
+registry 등록과 5090 Runtime 변경을 수행하지 않습니다. 다음 검증은 AutoTimes의
+seed 민감도·과대예측 완화와 SELLM의 count-aware 또는 양수 출력 head를 별도
+후보로 구현한 뒤 같은 gate를 재사용해야 합니다.
