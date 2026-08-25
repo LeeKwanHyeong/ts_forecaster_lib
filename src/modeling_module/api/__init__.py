@@ -56,6 +56,12 @@ from .lifecycle_validation import (
     lifecycle_interval_metrics,
 )
 from .forecast import ForecastRequest, ForecastResult, ForecastRuntimeConfig, forecast
+from .icl import (
+    ICLForecastRequest,
+    ICLForecastResult,
+    ICLForecastRuntimeConfig,
+    forecast_icl,
+)
 from .losses import DistributionLoss
 from .train import (
     ArtifactConfig,
@@ -120,6 +126,9 @@ __all__ = [
     "ForecastRequest",
     "ForecastResult",
     "ForecastRuntimeConfig",
+    "ICLForecastRequest",
+    "ICLForecastResult",
+    "ICLForecastRuntimeConfig",
     "LoadedPredictor",
     "LoaderConfig",
     "PatchMixerArchitectureConfig",
@@ -137,6 +146,7 @@ __all__ = [
     "build_dataset",
     "build_exogenous_schema",
     "forecast",
+    "forecast_icl",
     "fit_cgmm",
     "fit_similar_lifecycle",
     "forecast_cgmm",

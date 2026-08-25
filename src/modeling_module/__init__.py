@@ -60,6 +60,12 @@ from .api.lifecycle_validation import (
     lifecycle_interval_metrics,
 )
 from .api.forecast import ForecastRequest, ForecastResult, ForecastRuntimeConfig, forecast
+from .api.icl import (
+    ICLForecastRequest,
+    ICLForecastResult,
+    ICLForecastRuntimeConfig,
+    forecast_icl,
+)
 from .api.losses import DistributionLoss
 from .api.data import (
     CATEGORICAL_UNK_ID,
@@ -146,6 +152,7 @@ __all__ = [
     'train',
     'predict',
     'forecast',
+    'forecast_icl',
     'load_predictor',
     'DistributionLoss',
     'build_dataloader',
@@ -178,6 +185,9 @@ __all__ = [
     'ForecastRequest',
     'ForecastResult',
     'ForecastRuntimeConfig',
+    'ICLForecastRequest',
+    'ICLForecastResult',
+    'ICLForecastRuntimeConfig',
     'LIFECYCLE_INPUT_CONTRACT_ID',
     'LIFECYCLE_INPUT_CONTRACT_VERSION',
     'LTB_FORECAST_MONTHS',
