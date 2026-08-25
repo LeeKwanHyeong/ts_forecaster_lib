@@ -90,7 +90,11 @@ def _seed_all(seed: int) -> None:
     torch.cuda.manual_seed_all(seed)
 
 
-def _build_datamodule(frame: pl.DataFrame) -> IndexedTemporalDataModule:
+def _build_datamodule(
+    frame: pl.DataFrame,
+    *,
+    seed: int = SEED,
+) -> IndexedTemporalDataModule:
     module = IndexedTemporalDataModule(
         frame,
         lookback=LOOKBACK,
@@ -100,7 +104,7 @@ def _build_datamodule(frame: pl.DataFrame) -> IndexedTemporalDataModule:
         validation_origin=VALIDATION_ORIGIN,
         window_stride=WINDOW_STRIDE,
         training_mode="qualification",
-        seed=SEED,
+        seed=seed,
         require_all_series_eligible=False,
     )
     module.setup()
@@ -112,6 +116,7 @@ def _checkpoint_contract(
     *,
     negative_output_penalty_weight: float = 0.0,
     final_nonneg: bool = False,
+    seed: int = SEED,
 ) -> dict[str, Any]:
     meta = payload.get("meta") or {}
     expected = {
@@ -120,7 +125,7 @@ def _checkpoint_contract(
         "validation_enabled": True,
         "state_selection": "best_validation",
         "configured_epochs": EPOCHS,
-        "random_seed": SEED,
+        "random_seed": seed,
         "batch_size": BATCH_SIZE,
         "negative_output_penalty_weight": negative_output_penalty_weight,
         "final_nonneg": final_nonneg,
@@ -148,6 +153,7 @@ def run_parity(
     num_workers: int,
     negative_output_penalty_weight: float = 0.0,
     final_nonneg: bool = False,
+    seed: int = SEED,
 ) -> dict[str, Any]:
     if output_root.exists():
         raise V100H26ContractError(
@@ -163,9 +169,9 @@ def run_parity(
         target_source,
         columns=["oper_part_no", "demand_dt", "demand_qty"],
     )
-    datamodule = _build_datamodule(frame)
+    datamodule = _build_datamodule(frame, seed=seed)
     output_root.mkdir(parents=True)
-    _seed_all(SEED)
+    _seed_all(seed)
     pin_memory = device.startswith("cuda")
     train_loader = datamodule.get_train_loader(
         batch_size=BATCH_SIZE,
@@ -210,7 +216,7 @@ def run_parity(
                 use_intermittent=False,
                 val_use_weights=False,
                 training_mode="qualification",
-                random_seed=SEED,
+                random_seed=seed,
                 **SELLM_TRAINER_CONTRACT.trainer_kwargs(),
             ),
             ssl=SSLConfig(mode="sl_only"),
@@ -242,6 +248,7 @@ def run_parity(
         checkpoint_payload,
         negative_output_penalty_weight=negative_output_penalty_weight,
         final_nonneg=final_nonneg,
+        seed=seed,
     )
     predictor = load_predictor(str(checkpoint_path), device=device, strict=True)
     metrics, raw, target, inference_seconds = _evaluate(
@@ -256,7 +263,9 @@ def run_parity(
         <= RAW_NEGATIVE_RATE_RANGE[1]
     )
     baseline_run = (
-        negative_output_penalty_weight == 0.0 and not final_nonneg
+        seed == SEED
+        and negative_output_penalty_weight == 0.0
+        and not final_nonneg
     )
     parity_pass = (
         metrics["raw_nonfinite_count"] == 0
@@ -272,7 +281,7 @@ def run_parity(
         "receipt_format_version": 1,
         "status": "PASS" if parity_pass else "FAIL",
         "completed_at_utc": datetime.now(timezone.utc).isoformat(),
-        "contract": "sellm-shared-trainer-seed42-parity-v1",
+        "contract": "sellm-shared-trainer-qualification-v2",
         "source_commit": _source_commit(),
         "target_source": {
             "path": str(target_source),
@@ -292,7 +301,7 @@ def run_parity(
             "validation_origin": VALIDATION_ORIGIN,
             "forecast_origin": FORECAST_ORIGIN,
             "window_stride": WINDOW_STRIDE,
-            "seed": SEED,
+            "seed": seed,
             "batch_size": BATCH_SIZE,
             "epochs": EPOCHS,
             "training_mode": "qualification",
@@ -352,6 +361,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=0.0,
     )
     parser.add_argument("--final-nonneg", action="store_true")
+    parser.add_argument("--seed", type=int, default=SEED)
     return parser
 
 
@@ -368,6 +378,7 @@ def main(argv: list[str] | None = None) -> int:
             args.negative_output_penalty_weight
         ),
         final_nonneg=bool(args.final_nonneg),
+        seed=int(args.seed),
     )
     print(json.dumps(receipt, ensure_ascii=True, sort_keys=True))
     return 0
