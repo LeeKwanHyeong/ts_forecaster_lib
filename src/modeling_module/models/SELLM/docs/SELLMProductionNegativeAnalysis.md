@@ -2,16 +2,16 @@
 
 ## Decision
 
-The checkpoint produced by the first SELLM production refit is retained as a
-sealed forensic artifact but is rejected for Demand Engine registration and
-runtime deployment. Its checkpoint and public inference contracts pass, but
-its output behavior does not pass the operating-model acceptance boundary.
+Both SELLM production-refit checkpoints are retained as sealed forensic
+artifacts but are rejected for Demand Engine registration and runtime
+deployment. Their checkpoint and public inference contracts pass, but their
+output behavior does not pass the operating-model acceptance boundary.
 
 The runtime `clip_zero` policy remains unchanged. It is a required final
-demand-domain guard, but it cannot be treated as a sufficient repair for this
-checkpoint. No negative penalty or nonnegative output head should be selected
-until qualification and production use the same optimizer and numerical
-training contract.
+demand-domain guard, but it cannot be treated as a sufficient repair. The
+shared-trainer rerun proves that trainer mismatch was only part of the problem;
+a model-level negative-output remedy may now be evaluated under controlled
+qualification before another production refit.
 
 ## Evidence boundary
 
@@ -27,6 +27,21 @@ training contract.
   `6608d10e56e3f68abef383189e6f7fe850ec1a6dd8aa716840f83bac92add910`
 - Input: 7,000 series ending at 202509, L52, forecast origin 202510, H26
 - Output: 182,000 W0-W25 raw points
+
+The shared-trainer rerun evidence is:
+
+- Checkpoint:
+  `/home/leekwanhyeong/artifacts/sellm/production-refit/64a2cfe-shared-seed42-e6/weekly_SELLMBase_L52_H26.pt`
+- Checkpoint SHA-256:
+  `f63bd600f16ffb1251dd619097504d21875d83bf509d4a5cbcf1ef34d69dc196`
+- Source commit:
+  `64a2cfe2a5d05931f3b5d04d6307b512ff9d523e`
+- Production receipt seal:
+  `5f63abb0726655f95d0040f48b3209ece497315340318534bd28820754620e2c`
+- Analysis receipt:
+  `/home/leekwanhyeong/artifacts/sellm/production-negative-analysis/64a2cfe-shared/analysis-receipt.json`
+- Analysis receipt seal:
+  `2b77886c459d1a894649dc8df8d7916c41ff0b725e2f8aaabfb7cb6fdf5467fb`
 
 The public predictor and direct model forward output matched exactly for all
 182,000 points. The maximum absolute error and exact mismatch count were both
@@ -134,23 +149,53 @@ negative rate cannot be attributed only to the larger full-data refit. The
 qualification-production trainer mismatch must be removed before evaluating
 model-level remedies.
 
+## Shared-trainer rerun
+
+The controlled rerun used the same optimizer and numerical contract as the
+successful seed-42 qualification. Artifact integrity, strict load, metadata,
+public/direct parity, W0-W25 shape, and finite-output checks all passed.
+
+| Metric | First refit | Shared-trainer refit | Change |
+| --- | ---: | ---: | ---: |
+| Raw negative points | 111,966 | 102,706 | -9,260 |
+| Raw negative rate | 61.52% | 56.43% | -5.09 pp |
+| Series with majority negative | 63.73% | 58.07% | -5.66 pp |
+| Series with all 26 negative | 36.24% | 31.31% | -4.93 pp |
+| Raw forecast total | 106,374.24 | 180,317.03 | +73,942.79 |
+| Clipped forecast total | 398,793.63 | 407,654.06 | +8,860.44 |
+| Quantity added by clipping | 292,419.38 | 227,337.03 | -65,082.34 |
+| Clip-added share of clipped total | 73.33% | 55.77% | -17.56 pp |
+| Raw minimum | -106.49 | -90.46 | +16.03 |
+
+The improvement is real but insufficient. Even W0 remains negative for 37.43%
+of series, and the worst horizons are W14, W20, W24, W25, and W15 at
+60.21-62.04% raw negatives. Low-scale series remain especially unstable: the
+raw negative rates are 78.10% for history mean `(0,0.5]`, 84.18% for
+`(0.5,1]`, and 67.25% for `(1,3]`. The issue also affects larger series and
+cannot be classified as harmless near-zero noise.
+
+True production-origin accuracy remains unknowable because future actuals are
+not available. The shared seed-42 qualification MAE of 1.3810 is the controlled
+accuracy proxy. Production final train loss 1.3972 and raw/clipped volume ratios
+of 15.58%/35.22% versus recent-history-scaled H26 are diagnostics, not accuracy
+claims. The 55.77% clip-created volume is sufficient to reject the artifact.
+
 ## Operating decision
 
-1. Keep the current checkpoint and receipt unchanged for audit and debugging.
-2. Do not register it in Demand Engine, publish it as a production model, or
-   replace any active runtime artifact.
+1. Keep both checkpoints and receipts unchanged for audit and debugging.
+2. Do not register either artifact in Demand Engine, publish it as a production
+   model, or replace any active runtime artifact.
 3. Keep `clip_zero` as the final safety boundary. It remains mathematically
-   safe for MAE on nonnegative demand, but in this run it creates 73.33% of the
-   final quantity and is therefore masking a failed raw model state.
-4. The shared SELLM trainer contract and seed-42 qualification parity are now
-   complete at commit `7587d2e`. The parity run reproduced MAE 1.3810 and a
-   15.19% raw negative rate with a valid strict-load checkpoint and receipt.
-5. Require separate approval before running a new full-data production refit
-   under the shared contract. Do not reuse or relabel the old production
-   checkpoint.
-6. Consider a demand-space negative penalty only if the parity-controlled
-   production refit still has material negatives. The penalty must default to
-   zero and preserve the current checkpoint contract at zero.
+   safe for MAE on nonnegative demand, but it creates 73.33% and 55.77% of the
+   two artifacts' final quantities and is therefore masking failed raw states.
+4. The shared trainer production refit is complete and also rejected. Do not
+   register, publish, or deploy either production checkpoint.
+5. Move the next experiment back to qualification. Compare a zero-default
+   demand-space negative penalty against an output-head alternative without
+   changing Token13, K256, batch 256, seed, split, or trainer contract.
+6. Promote a remedy to multi-seed qualification only if it improves clipped
+   accuracy while substantially reducing raw negatives and positive bias does
+   not regress.
 7. Do not select the existing `final_nonneg=True` softplus head as the first
    remedy. It changes every output, maps a raw zero to positive demand, and can
    increase the already positive qualification bias for intermittent series.

@@ -409,5 +409,55 @@ analysis is recorded in `SELLMProductionNegativeAnalysis.md`. The analysis
 receipt seal is
 `6608d10e56e3f68abef383189e6f7fe850ec1a6dd8aa716840f83bac92add910`.
 Public predictor and direct model outputs matched exactly for all 182,000
-points. The next required step is qualification-production trainer parity, not
-an immediate negative penalty or nonnegative output-head change.
+points.
+
+## Shared-trainer production refit
+
+Commit `64a2cfe2a5d05931f3b5d04d6307b512ff9d523e` repeated the approved
+production refit after qualification and production were unified around the
+same AdamW, weight decay `0.01`, fixed learning rate `1e-4`, FP32, MAE, and
+gradient-clip-30 contract. The data, L52/H26 architecture, token length 13,
+semantic vocabulary 256, batch 256, seed 42, and six-epoch final-state policy
+were unchanged.
+
+The checkpoint passed metadata validation, strict load, W0-W25 shape, finite
+output, SHA-256, and receipt-seal checks. Its final training loss was 1.397190.
+Training took 859.54 seconds at 2,935 windows/s with 6,888.84 MiB peak CUDA
+allocation. Strict load took 1.14 seconds. Full 7,000-series inference took
+1.00 second at 7,003 series/s.
+
+| Production-origin diagnostic | Old trainer | Shared trainer | Change |
+| --- | ---: | ---: | ---: |
+| Raw negative rate | 61.52% | **56.43%** | -5.09 pp |
+| Series with any negative | 73.39% | **70.81%** | -2.57 pp |
+| Series with majority negative | 63.73% | **58.07%** | -5.66 pp |
+| Series with all 26 negative | 36.24% | **31.31%** | -4.93 pp |
+| Raw minimum | -106.49 | **-90.46** | +16.03 |
+| Quantity added by clipping | 292,419.38 | **227,337.03** | -65,082.34 |
+| Clip-added share of clipped total | 73.33% | **55.77%** | -17.56 pp |
+
+The shared trainer materially improves raw-output behavior, proving that the
+old optimizer and numerical mismatch contributed to the failure. It does not
+resolve it. Clipping still creates more than half of the final forecast volume,
+102,706 of 182,000 raw points are negative, and 2,192 series are negative at
+every horizon. The new artifact is therefore rejected for Demand Engine
+registration and runtime deployment.
+
+Production-origin actuals are unavailable, so true production MAE, WAPE,
+sMAPE, and bias cannot be calculated. The controlled seed-42 qualification MAE
+of 1.3810 is the accuracy proxy with known actuals. The production final train
+loss of 1.3972 is an optimization diagnostic only. As a scale sanity check,
+the raw and clipped forecast totals are 15.58% and 35.22% of the recent-history
+mean scaled to H26; clipping is too dominant for the clipped result to qualify
+as trustworthy model output.
+
+The shared-trainer checkpoint is stored at
+`/home/leekwanhyeong/artifacts/sellm/production-refit/64a2cfe-shared-seed42-e6/weekly_SELLMBase_L52_H26.pt`.
+Its SHA-256 is
+`f63bd600f16ffb1251dd619097504d21875d83bf509d4a5cbcf1ef34d69dc196`.
+The production receipt seal is
+`5f63abb0726655f95d0040f48b3209ece497315340318534bd28820754620e2c`.
+The detailed analysis is stored under
+`/home/leekwanhyeong/artifacts/sellm/production-negative-analysis/64a2cfe-shared`,
+with independently verified analysis seal
+`2b77886c459d1a894649dc8df8d7916c41ff0b725e2f8aaabfb7cb6fdf5467fb`.
