@@ -7,6 +7,10 @@ from typing import Literal, Optional
 from modeling_module.training.config import TrainingConfig
 
 
+DEFAULT_SELLM_LLM_MODEL_NAME = "Qwen/Qwen2-0.5B"
+DEFAULT_SELLM_LLM_REVISION = "91d2aff3f957f99e4c74c962f2f408dcc88a18d8"
+
+
 @dataclass
 class SELLMConfig(TrainingConfig):
     """
@@ -44,9 +48,9 @@ class SELLMConfig(TrainingConfig):
     # LLM backbone
     use_pretrained_llm: bool = True
     llm_source: Literal["huggingface", "local"] = "huggingface"
-    llm_model_name: str = "Qwen/Qwen2-0.5B"
+    llm_model_name: str = DEFAULT_SELLM_LLM_MODEL_NAME
     llm_local_path: Optional[str] = None
-    llm_revision: Optional[str] = None
+    llm_revision: Optional[str] = DEFAULT_SELLM_LLM_REVISION
     freeze_llm: bool = True
     use_time_adapter: bool = True
     time_adapter_rank: int = 8

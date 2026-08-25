@@ -6,7 +6,11 @@ from types import ModuleType
 import pytest
 
 from modeling_module.models.SELLM.SELLM import SELLMModel
-from modeling_module.models.SELLM.configs import SELLMConfig
+from modeling_module.models.SELLM.configs import (
+    DEFAULT_SELLM_LLM_MODEL_NAME,
+    DEFAULT_SELLM_LLM_REVISION,
+    SELLMConfig,
+)
 
 
 class _FakeAutoModel:
@@ -24,6 +28,15 @@ def _install_fake_transformers(monkeypatch) -> None:
     setattr(module, "AutoModel", _FakeAutoModel)
     monkeypatch.setitem(sys.modules, "transformers", module)
     _FakeAutoModel.calls = []
+
+
+def test_sellm_default_backbone_is_sealed_qwen2_0_5b():
+    cfg = SELLMConfig()
+
+    assert cfg.llm_model_name == DEFAULT_SELLM_LLM_MODEL_NAME
+    assert cfg.llm_model_name == "Qwen/Qwen2-0.5B"
+    assert cfg.llm_revision == DEFAULT_SELLM_LLM_REVISION
+    assert cfg.llm_revision == "91d2aff3f957f99e4c74c962f2f408dcc88a18d8"
 
 
 def test_load_llm_uses_hugging_face_model_and_revision(monkeypatch):

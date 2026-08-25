@@ -69,12 +69,15 @@ request = TrainRequest(
 )
 ```
 
-Omit `llm_revision` to follow the repository's default revision. Pinning an
-immutable commit is recommended for reproducible training and deployment.
+`SELLMConfig` defaults to the sealed Qwen2-0.5B revision shown above. Override
+the revision only for an explicitly isolated research comparison; maintained
+qualification and deployment artifacts must keep the pinned revision.
 
 ## Notes
 
 - `SELLM` is a direct forecasting model family, not a POSTTIME-style forecast reviser.
+- The maintained default LLM backbone is `Qwen/Qwen2-0.5B` at revision
+  `91d2aff3f957f99e4c74c962f2f408dcc88a18d8`. Qwen2-1.5B is research-only.
 - Select `architecture_variant="paper_v1"` for the paper-based endogenous model. The
   `legacy_v1` default exists only so checkpoints created before architecture versioning
   retain their original state-dict contract.
