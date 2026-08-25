@@ -56,6 +56,9 @@ from modeling_module.utils.checkpoint import save_model  # noqa: E402
 
 
 RECEIPT_CONTRACT: Final = "modeling_module.icl_backbone_qualification.v2"
+MODEL_RESULT_RECEIPT_CONTRACT: Final = (
+    "modeling_module.icl_backbone_qualification_result.v1"
+)
 CALENDAR_SOURCE_REVISION: Final = "deterministic-iso-calendar-v1"
 OPERATION_PART_SNAPSHOT_CONTRACT: Final = "demand-engine-operation-part-snapshot-v1"
 OPERATION_PART_SNAPSHOT_COLUMNS: Final = (
@@ -872,6 +875,7 @@ def qualify_one(
     llm_local_path: Path,
     backbone_contract: dict[str, Any],
     epochs: int,
+    learning_rate: float,
     batch_size: int,
     seed: int,
     device: str,
@@ -905,7 +909,7 @@ def qualify_one(
         module,
         ICLTrainerConfig(
             epochs=epochs,
-            lr=1e-3,
+            lr=learning_rate,
             weight_decay=0.0,
             device=device,
             max_grad_norm=1.0,
@@ -990,6 +994,7 @@ def qualify_one(
         "parameters": counts,
         "training": {
             "epochs": int(epochs),
+            "learning_rate": float(learning_rate),
             "seconds": training_seconds,
             "final_train_loss": final_train_loss,
             "best_validation_loss": best_validation_loss,
@@ -1050,24 +1055,39 @@ def run_qualification(args: argparse.Namespace) -> dict[str, Any]:
         exogenous_source_revision=exogenous_source_revision,
     )
     results: list[dict[str, Any]] = []
+    model_keys = tuple(str(value) for value in args.models)
     for horizon in horizons:
         bundle = bundles[horizon]
-        for model_key in MODEL_KEYS:
-            results.append(
-                qualify_one(
-                    model_key=model_key,
-                    horizon=horizon,
-                    bundle=bundle,
-                    artifact_dir=output_root / f"h{horizon}" / "episodes",
-                    output_dir=output_root / f"h{horizon}" / model_key,
-                    llm_local_path=llm_local_path,
-                    backbone_contract=backbone,
-                    epochs=int(args.epochs),
-                    batch_size=int(args.batch_size),
-                    seed=int(args.seed),
-                    device=str(args.device),
-                )
+        for model_key in model_keys:
+            result = qualify_one(
+                model_key=model_key,
+                horizon=horizon,
+                bundle=bundle,
+                artifact_dir=output_root / f"h{horizon}" / "episodes",
+                output_dir=output_root / f"h{horizon}" / model_key,
+                llm_local_path=llm_local_path,
+                backbone_contract=backbone,
+                epochs=int(args.epochs),
+                learning_rate=float(args.learning_rate),
+                batch_size=int(args.batch_size),
+                seed=int(args.seed),
+                device=str(args.device),
             )
+            result_receipt = {
+                "contract": MODEL_RESULT_RECEIPT_CONTRACT,
+                "source_commit": _source_commit(args.source_commit),
+                "episode_manifest_hash": bundle.manifest.manifest_hash,
+                "backbone_contract_sha256": backbone["contract_sha256"],
+                "result": result,
+            }
+            result_receipt["receipt_sha256"] = _sha256_payload(result_receipt)
+            result_path = output_root / f"h{horizon}" / model_key / "result-receipt.json"
+            result_path.write_text(
+                json.dumps(result_receipt, indent=2, ensure_ascii=True, sort_keys=True)
+                + "\n",
+                encoding="utf-8",
+            )
+            results.append(result)
     receipt = {
         "contract": RECEIPT_CONTRACT,
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
@@ -1089,6 +1109,7 @@ def run_qualification(args: argparse.Namespace) -> dict[str, Any]:
         "qualification": {
             "status": "PASS",
             "sample_series": int(args.sample_series),
+            "models": list(model_keys),
             "horizons": list(horizons),
             "primary_horizon": 26,
             "diagnostic_horizons": [value for value in horizons if value != 26],
@@ -1129,7 +1150,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--sample-series", type=int, default=4)
     parser.add_argument("--stride", type=int, default=26)
     parser.add_argument("--epochs", type=int, default=1)
+    parser.add_argument("--learning-rate", type=float, default=1e-3)
     parser.add_argument("--batch-size", type=int, default=2)
+    parser.add_argument("--models", nargs="+", choices=MODEL_KEYS, default=list(MODEL_KEYS))
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--expected-device", default="NVIDIA GeForce RTX 5090")
@@ -1139,8 +1162,16 @@ def _parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = _parser().parse_args()
-    if int(args.sample_series) <= 0 or int(args.epochs) <= 0 or int(args.batch_size) <= 0:
-        raise QualificationError("sample-series, epochs, and batch-size must be positive.")
+    if (
+        int(args.sample_series) <= 0
+        or int(args.epochs) <= 0
+        or int(args.batch_size) <= 0
+        or not math.isfinite(float(args.learning_rate))
+        or float(args.learning_rate) <= 0.0
+    ):
+        raise QualificationError(
+            "sample-series, epochs, batch-size, and learning-rate must be positive."
+        )
     receipt = run_qualification(args)
     print(
         json.dumps(
