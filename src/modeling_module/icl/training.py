@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import copy
 import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable, Iterable
@@ -73,7 +72,7 @@ def _run_epoch(
 
     grad_context = torch.enable_grad() if training else torch.inference_mode()
     with grad_context:
-        for batch in loader:
+        for batch_index, batch in enumerate(loader, start=1):
             from modeling_module.data_loader.icl_episode_data_module import ICLBatch
 
             if not isinstance(batch, ICLBatch):
@@ -88,10 +87,15 @@ def _run_epoch(
                     f"{tuple(prediction.shape)} != {tuple(batch.query_target.shape)}."
                 )
             if not torch.isfinite(prediction).all():
-                raise RuntimeError("ICL model produced a non-finite prediction.")
+                raise RuntimeError(
+                    "ICL model produced a non-finite prediction at "
+                    f"batch_index={batch_index}."
+                )
             loss = F.mse_loss(prediction, batch.query_target)
             if not torch.isfinite(loss):
-                raise RuntimeError("ICL training loss became non-finite.")
+                raise RuntimeError(
+                    f"ICL training loss became non-finite at batch_index={batch_index}."
+                )
             if training:
                 loss.backward()
                 if max_grad_norm is not None:
@@ -189,7 +193,10 @@ def fit_icl_model(
         )
         if selection_loss < best_loss:
             best_loss = selection_loss
-            best_state = copy.deepcopy(model.state_dict())
+            best_state = {
+                name: value.detach().cpu().clone()
+                for name, value in model.state_dict().items()
+            }
 
     if best_state is None:
         raise RuntimeError("ICL trainer did not produce a model state.")
