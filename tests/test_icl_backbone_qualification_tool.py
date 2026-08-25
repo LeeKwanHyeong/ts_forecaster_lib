@@ -261,7 +261,17 @@ def test_qualification_accuracy_uses_sealed_query_targets(tmp_path: Path):
 
     metrics = _accuracy(predictions, bundle)
 
-    assert metrics == {"points": 26, "mae": 0.0, "wape": 0.0}
+    assert metrics["points"] == 26
+    assert metrics["series"] == 1
+    assert metrics["mae"] == 0.0
+    assert metrics["wape"] == 0.0
+    assert metrics["smape"] == 0.0
+    assert metrics["bias"] == 0.0
+    assert metrics["raw_negative_points"] == 0
+    assert metrics["raw_negative_rate"] == 0.0
+    assert metrics["all_negative_series"] == 0
+    assert len(metrics["horizon_metrics"]) == 26
+    assert all(item["mae"] == 0.0 for item in metrics["horizon_metrics"])
 
 
 def test_qualification_verifies_operation_part_source_revision(tmp_path: Path):
