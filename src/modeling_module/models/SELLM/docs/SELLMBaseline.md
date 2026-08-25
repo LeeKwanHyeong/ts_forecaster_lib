@@ -311,6 +311,60 @@ The three qualification aggregate seals are:
 - batch 512: `6243928ef7972dba110c9c079f5977e550ccbd368e17e646faf48edf22a20996`;
 - batch 1024: `2a3e04f099faf006d85daf6ea6c1244c1fe30854ac63b4b137e4971cc88b49a8`.
 
+## Shared-trainer seed-42 parity
+
+Commit `7587d2ef996f7fdaa010725f8b4fef39dd06e418` removed the
+qualification-production optimization mismatch. SELLM qualification and all
+future production refits now consume one explicit trainer contract:
+
+| Setting | Shared value |
+| --- | --- |
+| Optimizer | AdamW |
+| Learning rate | fixed `1e-4` |
+| Weight decay | `0.01` |
+| Scheduler | constant |
+| Numerical mode | FP32, AMP disabled |
+| Point loss | MAE |
+| Gradient clipping | global norm `30.0` |
+
+The public `TrainerConfig`, internal `TrainingConfig`, optimizer builder, AMP
+policy, checkpoint metadata, production-refit runner, and qualification parity
+runner now carry these fields explicitly. Existing non-SELLM runs preserve
+their prior default cosine and AMP policies unless callers override them.
+
+The RTX 5090 `ai_env` parity run used the unchanged L52/H26 chronological
+qualification data, 375,072 training windows, 6,952 validation series, token
+length 13, semantic vocabulary 256, batch 256, seed 42, and six epochs. The
+shared trainer selected epoch 4 by validation loss and produced:
+
+| Metric | Historical seed-42 baseline | Shared trainer | Change |
+| --- | ---: | ---: | ---: |
+| MAE | 1.3977 | **1.3810** | **-1.20%** |
+| WAPE | 0.2970 | **0.2934** | **-1.20%** |
+| sMAPE | 0.6175 | **0.5903** | **-4.40%** |
+| Bias | +0.4548 | **+0.3864** | -0.0684 |
+| Raw negative rate | 14.09% | 15.19% | +1.10 pp |
+
+All 180,752 validation points were finite. The raw minimum was `-8.9638`.
+MAE remained within the predefined 3% parity boundary and the raw negative
+rate remained inside the predefined 14-17% range. Training took 773.88 seconds,
+strict-load inference over all validation series took 0.95 seconds, and peak
+CUDA allocation was 9,702,106,112 bytes.
+
+The qualification checkpoint SHA-256 is
+`e3100816eeded0683b10011b0c71db4221eafe2b9887c6ed30344862f20eb478`.
+The sealed receipt is stored at
+`/home/leekwanhyeong/artifacts/sellm/shared-trainer-parity/7587d2e-seed42/qualification-parity-receipt.json`.
+Its independently verified canonical seal is
+`b676952023155fb60e6655fdc6785b2232f8f5d438301b2862022ebea1d704f5`.
+
+This result validates trainer parity only. The checkpoint is a qualification
+artifact with `state_selection=best_validation`; it is not a production-refit
+checkpoint and is not approved for Demand Engine registration. The prior
+production checkpoint remains rejected because it was trained under the old
+cosine/AMP/weight-decay contract. A new parity-controlled production refit is
+the next approval boundary.
+
 ## Production refit artifact
 
 Commit `cfd58795daa77d046b790967ef5b942c17f926bc` ran the approved SELLM

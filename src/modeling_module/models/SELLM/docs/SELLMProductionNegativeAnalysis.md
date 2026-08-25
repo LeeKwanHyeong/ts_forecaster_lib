@@ -142,12 +142,12 @@ model-level remedies.
 3. Keep `clip_zero` as the final safety boundary. It remains mathematically
    safe for MAE on nonnegative demand, but in this run it creates 73.33% of the
    final quantity and is therefore masking a failed raw model state.
-4. Unify qualification and production around one SELLM training path with
-   explicit weight decay, LR scheduler policy, AMP policy, loss, seed, and
-   optimizer-update metadata.
-5. Re-run seed-42 qualification through that path before another full-data
-   production refit. Output, gradient, checkpoint, and optimizer metadata must
-   remain reproducible.
+4. The shared SELLM trainer contract and seed-42 qualification parity are now
+   complete at commit `7587d2e`. The parity run reproduced MAE 1.3810 and a
+   15.19% raw negative rate with a valid strict-load checkpoint and receipt.
+5. Require separate approval before running a new full-data production refit
+   under the shared contract. Do not reuse or relabel the old production
+   checkpoint.
 6. Consider a demand-space negative penalty only if the parity-controlled
    production refit still has material negatives. The penalty must default to
    zero and preserve the current checkpoint contract at zero.
