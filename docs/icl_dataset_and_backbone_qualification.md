@@ -275,5 +275,8 @@ SELLM `e10dc0370c36857d601069c5c137fd4fe0b9e292e233f7cfb4fc7ebe86ec0576`이며
 각각 `7f4d055e00a4600e74387ca29253f51cbfbda7e465a5a6d27315a2efb0a20c01`,
 `acaf4af7358fac09e63ff367b40f01dff2dc9eacb7bd4ddf75302216c2f4cc6f`입니다.
 
-현재 기본 backbone 후보는 Qwen2-0.5B입니다. Qwen2-1.5B는 다중 seed에서 명확하고
-반복 가능한 정확도 우위가 확인될 때만 다시 승격 후보로 검토합니다.
+기본 ICL backbone은 Qwen2-0.5B로 확정합니다. AutoTimes와 SELLM의 운영 후보
+Qualification은 위에서 봉인한 model ID, revision과 manifest를 사용합니다.
+Qwen2-1.5B는 기본 실행과 모델 선택에서 제외하고 연구용 비교 대상으로만
+유지합니다. 이 backbone 결정은 SELLM checkpoint의 Production 승인을 의미하지
+않습니다.

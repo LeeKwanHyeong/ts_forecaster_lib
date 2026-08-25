@@ -520,3 +520,14 @@ existing checkpoint SHA-256
 is retained only as a rejected compatibility artifact. A SELLM-inclusive Wheel
 may be released to distribute and test the implementation, but that Wheel does
 not authorize Demand Engine registration or production inference for SELLM.
+
+## ICL Backbone Decision
+
+The maintained default backbone is `Qwen/Qwen2-0.5B` at revision
+`91d2aff3f957f99e4c74c962f2f408dcc88a18d8`. On the sealed 256-series,
+seed-42 H26 comparison, Qwen2-1.5B did not provide a consistent accuracy gain
+for AutoTimes or SELLM while increasing peak GPU memory by about 130%.
+Qwen2-1.5B remains available only for isolated research comparisons.
+
+This selects the LLM backbone contract; it does not change the rejected SELLM
+production-checkpoint decision above.
