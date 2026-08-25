@@ -4,6 +4,7 @@ import hashlib
 import json
 from datetime import date, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import polars as pl
@@ -69,6 +70,35 @@ def test_autotimes_mock_backbone_autoregressive_horizon_contract(horizon: int):
     assert all(not parameter.requires_grad for parameter in model.backbone.parameters())
     assert any(parameter.requires_grad for parameter in model.tokenizer.parameters())
     assert model.backbone.training is False
+
+
+class _BF16Backbone(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.config = SimpleNamespace(hidden_size=16)
+        self.dtype_anchor = torch.nn.Parameter(
+            torch.zeros((), dtype=torch.bfloat16)
+        )
+        self.last_input_dtype = None
+
+    def forward(self, *, inputs_embeds: torch.Tensor):
+        self.last_input_dtype = inputs_embeds.dtype
+        return SimpleNamespace(last_hidden_state=inputs_embeds)
+
+
+def test_autotimes_bridges_bfloat16_backbone_and_float32_tokenizers():
+    backbone = _BF16Backbone()
+    model = AutoTimesModel(_config(26), backbone=backbone).train()
+    output = model(torch.randn(2, 52, 1))
+    output.sum().backward()
+
+    assert backbone.last_input_dtype == torch.bfloat16
+    assert output.dtype == torch.float32
+    assert output.shape == (2, 26, 1)
+    assert any(
+        parameter.grad is not None
+        for parameter in model.tokenizer.parameters()
+    )
 
 
 def test_autotimes_timestamp_artifact_hash_and_window_contract(tmp_path: Path):
