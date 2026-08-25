@@ -44,6 +44,14 @@ class ICLTrainingResult:
     best_validation_loss: float | None
     final_train_loss: float
     epochs_completed: int
+    epoch_history: tuple[dict[str, float | int | None], ...] = ()
+
+
+@dataclass(frozen=True)
+class _ICLEpochStats:
+    loss: float
+    mae: float
+    wape: float
 
 
 def _run_epoch(
@@ -54,11 +62,14 @@ def _run_epoch(
     device: torch.device,
     optimizer: torch.optim.Optimizer | None,
     max_grad_norm: float | None,
-) -> float:
+) -> _ICLEpochStats:
     training = optimizer is not None
     model.train(training)
     total_loss = 0.0
     total_examples = 0
+    total_absolute_error = 0.0
+    total_absolute_target = 0.0
+    total_points = 0
 
     grad_context = torch.enable_grad() if training else torch.inference_mode()
     with grad_context:
@@ -92,10 +103,23 @@ def _run_epoch(
             batch_size = int(batch.query_target.shape[0])
             total_loss += float(loss.detach()) * batch_size
             total_examples += batch_size
+            total_absolute_error += float(
+                torch.abs(prediction.detach() - batch.query_target).sum()
+            )
+            total_absolute_target += float(torch.abs(batch.query_target).sum())
+            total_points += int(batch.query_target.numel())
 
     if total_examples == 0:
         raise ValueError("ICL trainer received an empty loader.")
-    return total_loss / total_examples
+    return _ICLEpochStats(
+        loss=total_loss / total_examples,
+        mae=total_absolute_error / total_points,
+        wape=(
+            total_absolute_error / total_absolute_target
+            if total_absolute_target > 0.0
+            else 0.0
+        ),
+    )
 
 
 def fit_icl_model(
@@ -123,8 +147,9 @@ def fit_icl_model(
     best_loss = float("inf")
     best_state: dict[str, torch.Tensor] | None = None
     final_train_loss = float("nan")
-    for _ in range(int(cfg.epochs)):
-        final_train_loss = _run_epoch(
+    epoch_history: list[dict[str, float | int | None]] = []
+    for epoch in range(1, int(cfg.epochs) + 1):
+        train_stats = _run_epoch(
             model,
             train_loader,
             forward=forward,
@@ -132,9 +157,11 @@ def fit_icl_model(
             optimizer=optimizer,
             max_grad_norm=cfg.max_grad_norm,
         )
+        final_train_loss = train_stats.loss
+        validation_stats: _ICLEpochStats | None = None
         selection_loss = final_train_loss
         if val_loader is not None:
-            selection_loss = _run_epoch(
+            validation_stats = _run_epoch(
                 model,
                 val_loader,
                 forward=forward,
@@ -142,6 +169,24 @@ def fit_icl_model(
                 optimizer=None,
                 max_grad_norm=None,
             )
+            selection_loss = validation_stats.loss
+        epoch_history.append(
+            {
+                "epoch": epoch,
+                "train_loss": train_stats.loss,
+                "train_mae": train_stats.mae,
+                "train_wape": train_stats.wape,
+                "validation_loss": (
+                    None if validation_stats is None else validation_stats.loss
+                ),
+                "validation_mae": (
+                    None if validation_stats is None else validation_stats.mae
+                ),
+                "validation_wape": (
+                    None if validation_stats is None else validation_stats.wape
+                ),
+            }
+        )
         if selection_loss < best_loss:
             best_loss = selection_loss
             best_state = copy.deepcopy(model.state_dict())
@@ -155,6 +200,7 @@ def fit_icl_model(
         best_validation_loss=(best_loss if val_loader is not None else None),
         final_train_loss=final_train_loss,
         epochs_completed=int(cfg.epochs),
+        epoch_history=tuple(epoch_history),
     )
 
 
