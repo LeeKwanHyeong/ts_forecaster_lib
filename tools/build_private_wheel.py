@@ -27,7 +27,8 @@ DIST_DIR = REPO_ROOT / "dist"
 PRIVATE_DIST_DIR = DIST_DIR / "private"
 DEFAULT_PRIVATE_BUILD_TAG = "1private"
 PRIVATE_BUILD_MANIFEST = "PRIVATE-BUILD.json"
-PRIVATE_DISTRIBUTION_PROFILE = "non-sellm"
+DEFAULT_PRIVATE_DISTRIBUTION_PROFILE = "non-sellm"
+PRIVATE_DISTRIBUTION_PROFILES = frozenset({"non-sellm", "sellm"})
 _BUILD_TAG_RE = re.compile(r"^[0-9][0-9A-Za-z_]*$")
 _NATIVE_SUFFIXES = frozenset({".dll", ".dylib", ".pyd", ".so"})
 _SELLM_DEPENDENCIES = frozenset(
@@ -55,6 +56,14 @@ def is_sellm_payload(rel_path: str) -> bool:
         any(part.casefold() == "sellm" for part in path.parts)
         or path.name.casefold() in {"sellm_train.py", "sellm_train.pyc"}
     )
+
+
+def validate_distribution_profile(profile: str) -> str:
+    normalized = str(profile).strip().casefold()
+    if normalized not in PRIVATE_DISTRIBUTION_PROFILES:
+        choices = ", ".join(sorted(PRIVATE_DISTRIBUTION_PROFILES))
+        raise ValueError(f"Distribution profile must be one of {choices}; got {profile!r}.")
+    return normalized
 
 
 def is_public_source(rel_path: str) -> bool:
@@ -184,11 +193,12 @@ def write_private_build_manifest(
     *,
     source_wheel: Path,
     build_tag: str,
+    distribution_profile: str,
 ) -> Path:
     commit, dirty = _builder_git_provenance()
     manifest = {
         "format_version": 1,
-        "distribution_profile": PRIVATE_DISTRIBUTION_PROFILE,
+        "distribution_profile": validate_distribution_profile(distribution_profile),
         "build_tag": validate_private_build_tag(build_tag),
         "python_tag": private_python_tag(),
         "abi_tag": "none",
@@ -209,7 +219,12 @@ def write_private_build_manifest(
     return manifest_path
 
 
-def stage_clean_wheel_source(stage_root: Path) -> Path:
+def stage_clean_wheel_source(
+    stage_root: Path,
+    *,
+    distribution_profile: str = DEFAULT_PRIVATE_DISTRIBUTION_PROFILE,
+) -> Path:
+    profile = validate_distribution_profile(distribution_profile)
     stage_root.mkdir(parents=True, exist_ok=True)
     for filename in _WHEEL_BUILD_FILES:
         source = REPO_ROOT / filename
@@ -220,18 +235,20 @@ def stage_clean_wheel_source(stage_root: Path) -> Path:
     if not package_source.is_dir():
         raise FileNotFoundError(f"Package source directory does not exist: {package_source}")
 
+    ignored_payloads = [
+        "__pycache__",
+        "*.pyc",
+        "*.pyo",
+        ".DS_Store",
+        "*.egg-info",
+    ]
+    if profile == "non-sellm":
+        ignored_payloads.extend(["SELLM", "sellm_train.py"])
+
     shutil.copytree(
         package_source,
         stage_root / "src" / "modeling_module",
-        ignore=shutil.ignore_patterns(
-            "__pycache__",
-            "*.pyc",
-            "*.pyo",
-            ".DS_Store",
-            "*.egg-info",
-            "SELLM",
-            "sellm_train.py",
-        ),
+        ignore=shutil.ignore_patterns(*ignored_payloads),
     )
     return stage_root
 
@@ -275,14 +292,22 @@ def sanitize_non_sellm_metadata(unpacked_root: Path) -> Path:
     return metadata_path
 
 
-def build_public_wheel(*, no_isolation: bool, dest_dir: Path | None = None) -> Path:
+def build_public_wheel(
+    *,
+    no_isolation: bool,
+    dest_dir: Path | None = None,
+    distribution_profile: str = DEFAULT_PRIVATE_DISTRIBUTION_PROFILE,
+) -> Path:
     output_dir = (dest_dir or DIST_DIR).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     with (
         tempfile.TemporaryDirectory(prefix="public-wheel-source-") as source_tmp,
         tempfile.TemporaryDirectory(prefix="public-wheel-output-") as output_tmp,
     ):
-        source_root = stage_clean_wheel_source(Path(source_tmp))
+        source_root = stage_clean_wheel_source(
+            Path(source_tmp),
+            distribution_profile=distribution_profile,
+        )
         staged_output = Path(output_tmp)
         cmd = [sys.executable, "-m", "build", "--wheel", "--outdir", str(staged_output)]
         if no_isolation:
@@ -406,8 +431,14 @@ def assert_compatible_bytecode(archive: ZipFile) -> None:
         )
 
 
-def assert_private_wheel_metadata(wheel_path: Path, *, build_tag: str) -> None:
+def assert_private_wheel_metadata(
+    wheel_path: Path,
+    *,
+    build_tag: str,
+    distribution_profile: str = DEFAULT_PRIVATE_DISTRIBUTION_PROFILE,
+) -> None:
     expected_build = validate_private_build_tag(build_tag)
+    profile = validate_distribution_profile(distribution_profile)
     expected_tag = private_compatibility_tag()
     expected_suffix = f"-{expected_build}-{expected_tag}.whl"
     if not wheel_path.name.endswith(expected_suffix):
@@ -419,9 +450,11 @@ def assert_private_wheel_metadata(wheel_path: Path, *, build_tag: str) -> None:
         sellm_members = sorted(
             name for name in archive.namelist() if is_sellm_payload(name)
         )
-        if sellm_members:
+        if profile == "non-sellm" and sellm_members:
             joined = ", ".join(sellm_members[:10])
             raise RuntimeError(f"Private wheel contains SELLM payloads: {joined}")
+        if profile == "sellm" and not sellm_members:
+            raise RuntimeError("SELLM wheel contains no SELLM payloads")
         unexpected_sources = sorted(
             name
             for name in archive.namelist()
@@ -472,15 +505,26 @@ def assert_private_wheel_metadata(wheel_path: Path, *, build_tag: str) -> None:
                 and canonicalize_name(Requirement(value).name) in _SELLM_DEPENDENCIES
             )
         ]
-        if exposed_sellm_metadata:
+        if profile == "non-sellm" and exposed_sellm_metadata:
             raise RuntimeError(
                 "Private wheel metadata exposes SELLM dependencies: "
                 f"{exposed_sellm_metadata[:5]}"
             )
+        if profile == "sellm":
+            dependency_names = {
+                canonicalize_name(Requirement(value).name)
+                for value in package_metadata.get_all("Requires-Dist", [])
+            }
+            missing_dependencies = sorted(_SELLM_DEPENDENCIES - dependency_names)
+            if missing_dependencies:
+                raise RuntimeError(
+                    "SELLM wheel metadata is missing dependencies: "
+                    f"{missing_dependencies}"
+                )
 
     manifest = read_private_build_manifest(wheel_path)
     expected_manifest = {
-        "distribution_profile": PRIVATE_DISTRIBUTION_PROFILE,
+        "distribution_profile": profile,
         "build_tag": expected_build,
         "python_tag": private_python_tag(),
         "abi_tag": "none",
@@ -497,9 +541,18 @@ def assert_private_wheel_metadata(wheel_path: Path, *, build_tag: str) -> None:
         raise RuntimeError(f"Private wheel build manifest mismatch: {mismatches}")
 
 
-def verify_private_wheel_install(wheel_path: Path) -> dict[str, Any]:
+def verify_private_wheel_install(
+    wheel_path: Path,
+    *,
+    distribution_profile: str = DEFAULT_PRIVATE_DISTRIBUTION_PROFILE,
+) -> dict[str, Any]:
+    profile = validate_distribution_profile(distribution_profile)
     manifest = read_private_build_manifest(wheel_path)
-    assert_private_wheel_metadata(wheel_path, build_tag=manifest["build_tag"])
+    assert_private_wheel_metadata(
+        wheel_path,
+        build_tag=manifest["build_tag"],
+        distribution_profile=profile,
+    )
 
     with tempfile.TemporaryDirectory(prefix="private-wheel-install-") as install_tmp:
         install_root = Path(install_tmp)
@@ -576,6 +629,19 @@ print(json.dumps({
             text=True,
         )
 
+        profile_assertions = (
+            """
+assert hasattr(modeling_module, "SELLMArchitectureConfig")
+assert "sellm_base" in registry.MODEL_SPECS
+assert "sellm" in registry.TRAINING_FAMILY_DEFAULTS
+"""
+            if profile == "sellm"
+            else """
+assert not hasattr(modeling_module, "SELLMArchitectureConfig")
+assert not any("sellm" in key.casefold() for key in registry.MODEL_SPECS)
+assert not any("sellm" in family.casefold() for family in registry.TRAINING_FAMILY_DEFAULTS)
+"""
+        )
         smoke_code = """
 import json
 import sys
@@ -596,9 +662,7 @@ assert target in package_path.parents, (target, package_path)
 assert target in registry_path.parents, (target, registry_path)
 assert registry_path.suffix == ".pyc", registry_path
 assert callable(train)
-assert not hasattr(modeling_module, "SELLMArchitectureConfig")
-assert not any("sellm" in key.casefold() for key in registry.MODEL_SPECS)
-assert not any("sellm" in family.casefold() for family in registry.TRAINING_FAMILY_DEFAULTS)
+__PROFILE_ASSERTIONS__
 assert TrainRequest(models=["patchtst_base"]).models == ["patchtst_base"]
 assert DistributionLoss(distribution="Normal").param_names == ["-loc", "-scale"]
 
@@ -627,9 +691,11 @@ print(json.dumps({
     "package_path": str(package_path),
     "registry_path": str(registry_path),
     "manifest": manifest,
-    "non_sellm": True,
+    "distribution_profile": "__DISTRIBUTION_PROFILE__",
 }, sort_keys=True))
 """
+        smoke_code = smoke_code.replace("__PROFILE_ASSERTIONS__", profile_assertions)
+        smoke_code = smoke_code.replace("__DISTRIBUTION_PROFILE__", profile)
         completed = subprocess.run(
             [sys.executable, "-I", "-c", smoke_code, str(site_dir)],
             cwd=install_root,
@@ -639,6 +705,7 @@ print(json.dumps({
             text=True,
         )
         result = json.loads(completed.stdout.strip().splitlines()[-1])
+        result["non_sellm"] = profile == "non-sellm"
         result["clean_install"] = json.loads(
             clean_install.stdout.strip().splitlines()[-1]
         )
@@ -652,15 +719,21 @@ def build_private_wheel(
     build_number: str = DEFAULT_PRIVATE_BUILD_TAG,
     dest_dir: Path | None = None,
     verify_install: bool = True,
+    distribution_profile: str = DEFAULT_PRIVATE_DISTRIBUTION_PROFILE,
 ) -> Path:
     build_tag = validate_private_build_tag(build_number)
-    source_wheel = wheel_path or build_public_wheel(no_isolation=no_isolation)
+    profile = validate_distribution_profile(distribution_profile)
+    source_wheel = wheel_path or build_public_wheel(
+        no_isolation=no_isolation,
+        distribution_profile=profile,
+    )
     output_dir = dest_dir or PRIVATE_DIST_DIR
 
     with tempfile.TemporaryDirectory(prefix="private-wheel-") as tmpdir:
         unpack_root = unpack_wheel(source_wheel, Path(tmpdir))
-        remove_sellm_payload(unpack_root)
-        sanitize_non_sellm_metadata(unpack_root)
+        if profile == "non-sellm":
+            remove_sellm_payload(unpack_root)
+            sanitize_non_sellm_metadata(unpack_root)
         convert_internal_sources_to_sourceless(unpack_root)
         assert_only_public_python_sources(unpack_root)
         assert_platform_independent_layout(unpack_root)
@@ -668,6 +741,7 @@ def build_private_wheel(
             unpack_root,
             source_wheel=source_wheel,
             build_tag=build_tag,
+            distribution_profile=profile,
         )
         private_wheel = pack_private_wheel(
             unpack_root,
@@ -675,9 +749,16 @@ def build_private_wheel(
             build_number=build_tag,
         )
 
-    assert_private_wheel_metadata(private_wheel, build_tag=build_tag)
+    assert_private_wheel_metadata(
+        private_wheel,
+        build_tag=build_tag,
+        distribution_profile=profile,
+    )
     if verify_install:
-        verify_private_wheel_install(private_wheel)
+        verify_private_wheel_install(
+            private_wheel,
+            distribution_profile=profile,
+        )
     return private_wheel
 
 
@@ -687,6 +768,12 @@ def parse_args() -> argparse.Namespace:
             "Build a private wheel that keeps only public API sources as .py and converts "
             "internal modules to .pyc."
         )
+    )
+    parser.add_argument(
+        "--distribution-profile",
+        choices=sorted(PRIVATE_DISTRIBUTION_PROFILES),
+        default=DEFAULT_PRIVATE_DISTRIBUTION_PROFILE,
+        help="Wheel capability profile; the default preserves the non-SELLM artifact.",
     )
     parser.add_argument(
         "--wheel",
@@ -730,6 +817,7 @@ def main() -> int:
         build_number=args.build_number,
         dest_dir=args.dest_dir,
         verify_install=not args.skip_install_check,
+        distribution_profile=args.distribution_profile,
     )
     print(private_wheel)
     return 0

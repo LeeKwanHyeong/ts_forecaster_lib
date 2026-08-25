@@ -1,14 +1,21 @@
 from __future__ import annotations
 
+import argparse
 import hashlib
 import importlib.util
 import json
+import os
 import re
+import subprocess
 import sys
+import tempfile
 from email.parser import Parser
 from pathlib import Path, PurePosixPath
 from typing import Any
 from zipfile import ZipFile
+
+from packaging.requirements import Requirement
+from packaging.utils import canonicalize_name
 
 
 _PRIVATE_WHEEL_RE = re.compile(
@@ -17,6 +24,11 @@ _PRIVATE_WHEEL_RE = re.compile(
 _HEX_40_RE = re.compile(r"^[0-9a-f]{40}$")
 _HEX_64_RE = re.compile(r"^[0-9a-f]{64}$")
 _NATIVE_SUFFIXES = (".so", ".pyd", ".dll", ".dylib")
+_DISTRIBUTION_PROFILES = frozenset({"non-sellm", "sellm"})
+_SELLM_DEPENDENCIES = frozenset(
+    canonicalize_name(name)
+    for name in ("accelerate", "safetensors", "tokenizers", "transformers")
+)
 
 
 def _sha256(path: Path) -> str:
@@ -44,7 +56,11 @@ def verify_5090_private_wheel(
     expected_commit: str,
     expected_sha256: str,
     expected_builder_python: str = "3.12.13",
+    distribution_profile: str = "non-sellm",
 ) -> dict[str, Any]:
+    profile = str(distribution_profile).strip().casefold()
+    if profile not in _DISTRIBUTION_PROFILES:
+        raise RuntimeError(f"unsupported distribution profile: {distribution_profile!r}")
     wheel = Path(wheel_path).resolve()
     if not wheel.is_file():
         raise RuntimeError(f"private wheel not found: {wheel}")
@@ -94,8 +110,10 @@ def verify_5090_private_wheel(
                 f"{native_members[:5]}"
             )
         sellm_members = sorted(name for name in names if _is_sellm_member(name))
-        if sellm_members:
+        if profile == "non-sellm" and sellm_members:
             raise RuntimeError(f"non-SELLM wheel contains SELLM members: {sellm_members[:5]}")
+        if profile == "sellm" and not sellm_members:
+            raise RuntimeError("SELLM wheel contains no SELLM members")
 
         manifest_name = _single_member(names, ".dist-info/PRIVATE-BUILD.json")
         metadata_name = _single_member(names, ".dist-info/METADATA")
@@ -110,8 +128,18 @@ def verify_5090_private_wheel(
             *package_metadata.get_all("Provides-Extra", []),
             *package_metadata.get_all("Requires-Dist", []),
         ]
-        if any("sellm" in value.casefold() for value in dependency_metadata):
+        if profile == "non-sellm" and any(
+            "sellm" in value.casefold() for value in dependency_metadata
+        ):
             raise RuntimeError("non-SELLM wheel metadata exposes SELLM dependencies")
+        if profile == "sellm":
+            dependency_names = {
+                canonicalize_name(Requirement(value).name)
+                for value in package_metadata.get_all("Requires-Dist", [])
+            }
+            missing = sorted(_SELLM_DEPENDENCIES - dependency_names)
+            if missing:
+                raise RuntimeError(f"SELLM wheel metadata is missing dependencies: {missing}")
 
         wheel_lines = set(wheel_metadata.splitlines())
         if "Build: 1private" not in wheel_lines:
@@ -156,7 +184,7 @@ def verify_5090_private_wheel(
             raise RuntimeError(f"private wheel contains incompatible bytecode: {bad_magic[:5]}")
 
     expected_manifest = {
-        "distribution_profile": "non-sellm",
+        "distribution_profile": profile,
         "build_tag": "1private",
         "python_tag": "cp312",
         "abi_tag": "none",
@@ -184,20 +212,107 @@ def verify_5090_private_wheel(
         "python_tag": manifest["python_tag"],
         "bytecode_count": len(bytecode_names),
         "public_source_count": len(public_sources),
-        "non_sellm": True,
+        "distribution_profile": profile,
+        "non_sellm": profile == "non-sellm",
     }
 
 
-def main() -> None:
-    if len(sys.argv) != 4:
-        raise SystemExit(
-            "usage: verify_5090_private_wheel.py WHEEL_PATH EXPECTED_COMMIT EXPECTED_SHA256"
+def verify_sellm_checkpoint_from_wheel(
+    wheel_path: str | Path,
+    *,
+    checkpoint_path: str | Path,
+) -> dict[str, Any]:
+    wheel = Path(wheel_path).resolve()
+    checkpoint = Path(checkpoint_path).resolve()
+    if not checkpoint.is_file():
+        raise RuntimeError(f"SELLM checkpoint not found: {checkpoint}")
+
+    with tempfile.TemporaryDirectory(prefix="sellm-wheel-strict-load-") as tmpdir:
+        target = Path(tmpdir) / "site"
+        env = os.environ.copy()
+        env.pop("PYTHONPATH", None)
+        env["PYTHONNOUSERSITE"] = "1"
+        subprocess.run(
+            [
+                sys.executable,
+                "-I",
+                "-m",
+                "pip",
+                "install",
+                "--no-deps",
+                "--no-index",
+                "--target",
+                str(target),
+                str(wheel),
+            ],
+            cwd=tmpdir,
+            env=env,
+            check=True,
         )
-    result = verify_5090_private_wheel(
-        sys.argv[1],
-        expected_commit=sys.argv[2],
-        expected_sha256=sys.argv[3],
+        code = """
+import json
+import sys
+from pathlib import Path
+
+target = Path(sys.argv[1]).resolve()
+checkpoint = Path(sys.argv[2]).resolve()
+sys.path.insert(0, str(target))
+
+import modeling_module
+from modeling_module import load_predictor
+
+assert target in Path(modeling_module.__file__).resolve().parents
+assert hasattr(modeling_module, "SELLMArchitectureConfig")
+predictor = load_predictor(str(checkpoint), device="cpu", strict=True)
+config = predictor.config
+get_value = config.get if isinstance(config, dict) else lambda key: getattr(config, key)
+assert predictor.model_key == "sellm_base", predictor.model_key
+assert int(get_value("lookback")) == 52
+assert int(get_value("horizon")) == 26
+print(json.dumps({
+    "checkpoint": str(checkpoint),
+    "model_key": predictor.model_key,
+    "lookback": int(get_value("lookback")),
+    "horizon": int(get_value("horizon")),
+    "strict_load": True,
+}, sort_keys=True))
+"""
+        completed = subprocess.run(
+            [sys.executable, "-I", "-c", code, str(target), str(checkpoint)],
+            cwd=tmpdir,
+            env=env,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    return json.loads(completed.stdout.strip().splitlines()[-1])
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("wheel_path", type=Path)
+    parser.add_argument("expected_commit")
+    parser.add_argument("expected_sha256")
+    parser.add_argument(
+        "--distribution-profile",
+        choices=sorted(_DISTRIBUTION_PROFILES),
+        default="non-sellm",
     )
+    parser.add_argument("--checkpoint", type=Path)
+    args = parser.parse_args()
+    result = verify_5090_private_wheel(
+        args.wheel_path,
+        expected_commit=args.expected_commit,
+        expected_sha256=args.expected_sha256,
+        distribution_profile=args.distribution_profile,
+    )
+    if args.checkpoint is not None:
+        if args.distribution_profile != "sellm":
+            raise RuntimeError("--checkpoint requires --distribution-profile sellm")
+        result["checkpoint"] = verify_sellm_checkpoint_from_wheel(
+            args.wheel_path,
+            checkpoint_path=args.checkpoint,
+        )
     print("WHEEL_PREFLIGHT_RESULT=" + json.dumps(result, sort_keys=True))
 
 

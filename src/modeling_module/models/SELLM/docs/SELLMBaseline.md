@@ -461,3 +461,62 @@ The detailed analysis is stored under
 `/home/leekwanhyeong/artifacts/sellm/production-negative-analysis/64a2cfe-shared`,
 with independently verified analysis seal
 `2b77886c459d1a894649dc8df8d7916c41ff0b725e2f8aaabfb7cb6fdf5467fb`.
+
+## Active-operation-part production decision
+
+Commit `b01a0f450b0bd924408ddf449a0cd5e13d412de4` repeated the production-origin
+analysis after Demand Engine removed lifecycle-complete operation parts. The
+read-only input contains 4,270 active parts at W0 `202510`, giving 111,020
+L52/H26 forecast points. The existing shared-trainer checkpoint remained
+strict-load compatible, but its raw-output behavior still failed the operating
+gate:
+
+| Diagnostic | Active-part result |
+| --- | ---: |
+| Raw negative points | 39,407 / 111,020 (35.50%) |
+| Series with any negative | 2,242 / 4,270 (52.51%) |
+| Series with all 26 horizons negative | 422 / 4,270 (9.88%) |
+| Raw output total | 328,877.59 |
+| Zero-clipped output total | 399,904.56 |
+| Quantity introduced by clipping | 71,026.97 (17.76%) |
+| Raw range | -84.82 to 106.28 |
+
+The analysis receipt is stored at
+`/home/leekwanhyeong/artifacts/sellm/active-lifecycle-reevaluation/b01a0f4-existing-checkpoint/analysis-receipt.json`.
+Lifecycle filtering materially improves the result compared with the former
+7,000-series canary, but clipping still changes too much of the forecast for
+the checkpoint to be registered as an approved operating model.
+
+Three output-penalty candidates were then trained under the same seed-42,
+L52/H26, token-13, vocabulary-256, batch-256, six-epoch qualification contract:
+
+| Penalty weight | MAE | WAPE | sMAPE | Bias | Raw negative rate |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 0.01 | 1.3004 | 0.2763 | 0.5793 | +0.0434 | 19.49% |
+| 0.10 | 1.4019 | 0.2978 | 0.6446 | +0.4115 | 12.70% |
+| 1.00 | **1.2545** | **0.2665** | **0.5736** | **-0.0346** | 21.33% |
+
+None reduced the raw negative rate by the required 50% while preserving the
+accuracy and bias guards. The penalty remains an opt-in research setting with
+default `0.0`; it is not part of the maintained SELLM checkpoint.
+
+A Softplus nonnegative output head removed raw negatives completely. It was
+therefore checked over seeds 11, 22, and 33 rather than accepted from one seed:
+
+| Seed | MAE | WAPE | sMAPE | Bias | Raw negative rate |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 11 | 1.3572 | 0.2883 | 0.7936 | +0.1971 | 0.00% |
+| 22 | **1.2130** | **0.2577** | **0.7767** | **+0.1654** | 0.00% |
+| 33 | 1.4369 | 0.3053 | 0.8255 | +0.2420 | 0.00% |
+| Mean | 1.3357 | 0.2838 | 0.7986 | +0.2015 | 0.00% |
+
+Compared with the historical unconstrained token-13 epoch-6 multi-seed
+baseline, the nonnegative head worsened mean MAE and WAPE by about 3.4% and
+mean sMAPE by about 34.7%. It is rejected as the production architecture.
+
+The final decision is **no approved SELLM production checkpoint**. The
+existing checkpoint SHA-256
+`f63bd600f16ffb1251dd619097504d21875d83bf509d4a5cbcf1ef34d69dc196`
+is retained only as a rejected compatibility artifact. A SELLM-inclusive Wheel
+may be released to distribute and test the implementation, but that Wheel does
+not authorize Demand Engine registration or production inference for SELLM.
