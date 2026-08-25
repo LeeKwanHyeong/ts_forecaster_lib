@@ -72,7 +72,37 @@ python tools/qualify_icl_backbones_5090.py \
   --output-root /artifacts/icl-backbone-qualification/run-id
 ```
 
-## 실제 외생변수 Qualification 기준선
+## 누수 방지 강화 후 Qualification 기준선
+
+`9cdb709` clean checkout과 `ai_env`에서 동일 Source, Seed 42, 4개 자재,
+1 epoch 조건으로 다시 실행했습니다.
+
+| 구분 | 값 |
+|---|---|
+| Source Commit | `9cdb709b3ddeed3991e2f8b0ac5ef5b5ce213ef5` |
+| Receipt SHA256 | `3031a027e739d52b5875f3ddc74b6448cceee8b6f2a1e435302df4f9bd63762b` |
+| H26 Manifest | `41651cad878a0091f43e73865e0631bedebd487b353f2dde87113aec9711840a` |
+| H27 Manifest | `62b6cde5fbd791ae6204e71d3dd64d0b057f72041d68d1a01c9cb697b1719e98` |
+
+H26 Train 정답은 `202208~202333`, Validation은 `202334~202407`, Test는
+`202408~202433`입니다. H27 진단 Train 정답은 `202308~202334`, Test는
+`202408~202434`이며 Validation은 사용하지 않았습니다. 선택된 자재는 Episode
+생성 전에 공통 주차 교집합으로 정렬했으므로 자재 간에도 split 정답 구간이
+겹치지 않습니다.
+
+| 모델 | Horizon | WAPE | MAE | Peak GPU | Reload 최대 오차 |
+|---|---:|---:|---:|---:|---:|
+| AutoTimes | H26 | 161.2% | 11.069 | 3,575.6 MiB | 0.0 |
+| SELLM | H26 | 136.8% | 9.392 | 2,484.5 MiB | 0.0 |
+| AutoTimes | H27 | 178.6% | 12.025 | 3,783.3 MiB | 0.0 |
+| SELLM | H27 | 114.0% | 7.677 | 3,178.5 MiB | 0.0 |
+
+네 checkpoint의 물리 SHA256, Episode Parquet SHA256, manifest hash와 receipt seal을
+독립적으로 다시 계산해 모두 일치함을 확인했습니다. 이 결과는 누수 없는 실행
+계약과 checkpoint 재현성의 현재 기준선입니다. 표본과 epoch가 작으므로 Production
+모델 승격 근거로는 사용하지 않습니다.
+
+## 선행 외생변수 Qualification 증적 (Superseded)
 
 5090에서 `DSE/C100/V100/V100`의 다음 원천을 사용해 H26/H27를 검증했습니다.
 이 실행은 split 정답 구간 비중첩 검사를 추가하기 전에 만들어진 선행 증적입니다.
