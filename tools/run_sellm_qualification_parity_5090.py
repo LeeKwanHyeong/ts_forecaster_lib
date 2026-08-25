@@ -107,7 +107,11 @@ def _build_datamodule(frame: pl.DataFrame) -> IndexedTemporalDataModule:
     return module
 
 
-def _checkpoint_contract(payload: dict[str, Any]) -> dict[str, Any]:
+def _checkpoint_contract(
+    payload: dict[str, Any],
+    *,
+    negative_output_penalty_weight: float = 0.0,
+) -> dict[str, Any]:
     meta = payload.get("meta") or {}
     expected = {
         "model_key": MODEL_KEY,
@@ -117,6 +121,7 @@ def _checkpoint_contract(payload: dict[str, Any]) -> dict[str, Any]:
         "configured_epochs": EPOCHS,
         "random_seed": SEED,
         "batch_size": BATCH_SIZE,
+        "negative_output_penalty_weight": negative_output_penalty_weight,
         **SELLM_TRAINER_CONTRACT.as_metadata(),
     }
     drift = {
@@ -139,6 +144,7 @@ def run_parity(
     llm_local_path: Path,
     device: str,
     num_workers: int,
+    negative_output_penalty_weight: float = 0.0,
 ) -> dict[str, Any]:
     if output_root.exists():
         raise V100H26ContractError(
@@ -187,7 +193,12 @@ def run_parity(
             lookback=LOOKBACK,
             horizon=HORIZON,
             models=[MODEL_KEY],
-            architecture=_architecture(llm_local_path),
+            architecture=_architecture(
+                llm_local_path,
+                negative_output_penalty_weight=(
+                    negative_output_penalty_weight
+                ),
+            ),
             trainer=TrainerConfig(
                 warmup_epochs=EPOCHS,
                 spike_epochs=0,
@@ -223,7 +234,10 @@ def run_parity(
         map_location="cpu",
         weights_only=False,
     )
-    checkpoint_contract = _checkpoint_contract(checkpoint_payload)
+    checkpoint_contract = _checkpoint_contract(
+        checkpoint_payload,
+        negative_output_penalty_weight=negative_output_penalty_weight,
+    )
     predictor = load_predictor(str(checkpoint_path), device=device, strict=True)
     metrics, raw, target, inference_seconds = _evaluate(
         predictor.model,
@@ -236,10 +250,16 @@ def run_parity(
         <= metrics["raw_negative_rate"]
         <= RAW_NEGATIVE_RATE_RANGE[1]
     )
+    baseline_run = negative_output_penalty_weight == 0.0
     parity_pass = (
-        mae_relative_drift <= MAX_MAE_RELATIVE_DRIFT
-        and negative_rate_pass
-        and metrics["raw_nonfinite_count"] == 0
+        metrics["raw_nonfinite_count"] == 0
+        and (
+            not baseline_run
+            or (
+                mae_relative_drift <= MAX_MAE_RELATIVE_DRIFT
+                and negative_rate_pass
+            )
+        )
     )
     receipt: dict[str, Any] = {
         "receipt_format_version": 1,
@@ -271,6 +291,7 @@ def run_parity(
             "training_mode": "qualification",
             "validation_enabled": True,
             "state_selection": "best_validation",
+            "negative_output_penalty_weight": negative_output_penalty_weight,
             **SELLM_TRAINER_CONTRACT.as_metadata(),
         },
         "checkpoint": {
@@ -284,6 +305,7 @@ def run_parity(
             "raw_negative_rate": BASELINE_RAW_NEGATIVE_RATE,
         },
         "parity": {
+            "baseline_run": baseline_run,
             "mae_relative_drift": mae_relative_drift,
             "max_mae_relative_drift": MAX_MAE_RELATIVE_DRIFT,
             "raw_negative_rate_range": list(RAW_NEGATIVE_RATE_RANGE),
@@ -316,6 +338,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--llm-local-path", type=Path, required=True)
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--num-workers", type=int, default=8)
+    parser.add_argument(
+        "--negative-output-penalty-weight",
+        type=float,
+        default=0.0,
+    )
     return parser
 
 
@@ -328,6 +355,9 @@ def main(argv: list[str] | None = None) -> int:
         llm_local_path=args.llm_local_path.expanduser().resolve(),
         device=str(args.device),
         num_workers=int(args.num_workers),
+        negative_output_penalty_weight=float(
+            args.negative_output_penalty_weight
+        ),
     )
     print(json.dumps(receipt, ensure_ascii=True, sort_keys=True))
     return 0

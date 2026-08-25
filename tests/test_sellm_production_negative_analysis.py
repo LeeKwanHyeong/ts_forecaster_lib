@@ -3,19 +3,50 @@ from __future__ import annotations
 import json
 
 import numpy as np
+import polars as pl
 import pytest
 
+from tools.dsio_v100_h26_contract import V100H26ContractError
 from tools.run_sellm_production_refit_5090 import HORIZON
 from tools.analyze_sellm_production_negatives_5090 import (
     HISTORY_MEAN_LABELS,
     ZERO_RATIO_LABELS,
     _group_summary,
+    _filter_histories,
+    _load_included_part_ids,
     _history_mean_bins,
     _horizon_summary,
     _negative_magnitude_summary,
     _qualification_summary,
     _zero_ratio_bins,
 )
+
+
+def test_included_part_filter_preserves_target_order_and_source_identity(tmp_path):
+    source = tmp_path / "active-parts.parquet"
+    pl.DataFrame({"oper_part_no": ["P3", "P1", "P3"]}).write_parquet(source)
+    included, identity = _load_included_part_ids(source)
+    histories = np.arange(24).reshape(3, 4, 2)
+
+    filtered, ordered = _filter_histories(
+        histories,
+        ["P1", "P2", "P3"],
+        included,
+    )
+
+    assert ordered == ["P1", "P3"]
+    assert np.array_equal(filtered, histories[[0, 2]])
+    assert identity["part_count"] == 2
+    assert len(identity["sha256"]) == 64
+
+
+def test_included_part_filter_rejects_unknown_ids():
+    with pytest.raises(V100H26ContractError, match="absent from target source"):
+        _filter_histories(
+            np.zeros((1, 2, 1)),
+            ["P1"],
+            ["P2"],
+        )
 
 
 def test_zero_ratio_and_history_scale_bins_are_stable():

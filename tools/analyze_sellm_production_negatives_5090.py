@@ -86,6 +86,53 @@ def _safe_ratio(numerator: float, denominator: float) -> float | None:
     return float(numerator / denominator)
 
 
+def _load_included_part_ids(path: Path) -> tuple[list[str], dict[str, Any]]:
+    suffix = path.suffix.lower()
+    if suffix == ".parquet":
+        frame = pl.read_parquet(path)
+    elif suffix == ".csv":
+        frame = pl.read_csv(path)
+    else:
+        raise V100H26ContractError(
+            "included-part source must be Parquet or CSV: " + str(path)
+        )
+    if "oper_part_no" not in frame.columns:
+        raise V100H26ContractError(
+            "included-part source must contain oper_part_no"
+        )
+    values = frame.get_column("oper_part_no").cast(pl.String)
+    if values.null_count() != 0:
+        raise V100H26ContractError("included oper_part_no values cannot be null")
+    part_ids = values.unique(maintain_order=True).to_list()
+    if not part_ids:
+        raise V100H26ContractError("included-part source is empty")
+    return part_ids, {
+        "path": str(path),
+        "sha256": file_sha256(path),
+        "part_count": len(part_ids),
+    }
+
+
+def _filter_histories(
+    histories: np.ndarray,
+    part_ids: Sequence[str],
+    included_part_ids: Sequence[str],
+) -> tuple[np.ndarray, list[str]]:
+    positions = {part_id: index for index, part_id in enumerate(part_ids)}
+    if len(positions) != len(part_ids):
+        raise V100H26ContractError("target source contains duplicate series IDs")
+    included = set(included_part_ids)
+    missing = sorted(included - positions.keys())
+    if missing:
+        raise V100H26ContractError(
+            "included-part source contains IDs absent from target source: "
+            + ", ".join(missing[:10])
+        )
+    ordered = [part_id for part_id in part_ids if part_id in included]
+    indices = [positions[part_id] for part_id in ordered]
+    return histories[indices], ordered
+
+
 def _zero_ratio_bins(values: np.ndarray) -> np.ndarray:
     return np.select(
         [
@@ -303,6 +350,7 @@ def analyze(
     qualification_receipts: Sequence[Path],
     device: str,
     batch_size: int,
+    included_parts: Path | None = None,
 ) -> dict[str, Any]:
     if output_root.exists():
         raise V100H26ContractError(
@@ -312,6 +360,16 @@ def analyze(
     datamodule = _build_datamodule(_load_target(target_source))
     histories = _latest_histories(datamodule)
     part_ids = [series.part_id for series in datamodule._series]
+    included_parts_source = None
+    if included_parts is not None:
+        included_part_ids, included_parts_source = _load_included_part_ids(
+            included_parts
+        )
+        histories, part_ids = _filter_histories(
+            histories,
+            part_ids,
+            included_part_ids,
+        )
     predictor = load_predictor(str(checkpoint), device=device, strict=True)
     raw, parity = _predict_public_and_direct(
         predictor,
@@ -430,6 +488,7 @@ def analyze(
             "path": str(target_source),
             "sha256": file_sha256(target_source),
         },
+        "included_parts_source": included_parts_source,
         "forecast_contract": {
             "history_end_week": TRAIN_END_WEEK,
             "forecast_origin": FORECAST_ORIGIN,
@@ -479,6 +538,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--batch-size", type=int, default=BATCH_SIZE)
+    parser.add_argument("--included-parts", type=Path)
     return parser
 
 
@@ -494,6 +554,11 @@ def main(argv: list[str] | None = None) -> int:
         ],
         device=str(args.device),
         batch_size=int(args.batch_size),
+        included_parts=(
+            args.included_parts.expanduser().resolve()
+            if args.included_parts is not None
+            else None
+        ),
     )
     print(json.dumps(receipt["summary"], ensure_ascii=True, sort_keys=True))
     return 0

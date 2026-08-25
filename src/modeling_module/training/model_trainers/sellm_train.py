@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import copy
+import math
 from typing import Optional
+
+import torch
+import torch.nn.functional as F
 
 from modeling_module.training.adapters import DefaultAdapter
 from modeling_module.training.config import StageConfig, TrainingConfig, apply_stage
@@ -17,6 +21,48 @@ class SELLMAdapter(DefaultAdapter):
         if callable(reg_fn):
             return reg_fn()
         return None
+
+
+def sellm_negative_output_penalty(
+    prediction: torch.Tensor,
+    *,
+    weight: float,
+) -> torch.Tensor:
+    """Penalize negative point forecasts in demand coordinates."""
+
+    if not torch.is_tensor(prediction):
+        raise TypeError("SELLM negative-output penalty requires a tensor prediction.")
+    if prediction.ndim not in (2, 3):
+        raise ValueError(
+            "SELLM point prediction must be rank 2 or 3, "
+            f"got shape={tuple(prediction.shape)}"
+        )
+    penalty_weight = float(weight)
+    if not math.isfinite(penalty_weight) or penalty_weight <= 0.0:
+        raise ValueError(
+            "SELLM negative-output penalty weight must be finite and > 0, "
+            f"got {weight!r}"
+        )
+    return penalty_weight * F.relu(-prediction).square().mean()
+
+
+def make_sellm_negative_output_penalty(model, *, loss_mode: str):
+    """Build the training-only penalty hook, preserving the zero-weight baseline."""
+
+    cfg = getattr(model, "cfg", None)
+    weight = float(getattr(cfg, "negative_output_penalty_weight", 0.0))
+    if weight == 0.0:
+        return None
+    if loss_mode != "point":
+        raise ValueError(
+            "negative_output_penalty_weight is supported only for SELLM "
+            f"point training, got loss_mode={loss_mode!r}"
+        )
+
+    def penalty(_x, prediction, _cfg):
+        return sellm_negative_output_penalty(prediction, weight=weight)
+
+    return penalty
 
 
 def train_sellm(
@@ -35,6 +81,10 @@ def train_sellm(
     loss_mode = infer_loss_mode(train_cfg)
     if loss_mode != "point":
         raise NotImplementedError(f"[train_sellm] SELLM v1 supports only point loss, got {loss_mode!r}.")
+    negative_output_penalty_fn = make_sellm_negative_output_penalty(
+        model,
+        loss_mode=loss_mode,
+    )
 
     amp_device, amp_enabled, amp_dtype = amp_type_set(train_cfg)
     autocast_input = dict(device_type=amp_device, enabled=amp_enabled, dtype=amp_dtype)
@@ -76,6 +126,7 @@ def train_sellm(
             future_exo_cb=None,
             autocast_input=autocast_input,
             extra_loss_fn=None,
+            training_only_extra_loss_fn=negative_output_penalty_fn,
             use_exogenous_mode=bool(getattr(train_cfg, "use_exogenous_mode", False)),
             device=device,
         )
