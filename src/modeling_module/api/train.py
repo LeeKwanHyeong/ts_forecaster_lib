@@ -323,6 +323,10 @@ class SELLMArchitectureConfig:
     use_norm: Optional[bool] = None
     final_nonneg: Optional[bool] = None
     negative_output_penalty_weight: Optional[float] = None
+    icl_enabled: Optional[bool] = None
+    icl_past_exogenous_dim: Optional[int] = None
+    icl_future_exogenous_dim: Optional[int] = None
+    icl_exogenous_schema_hash: Optional[str] = None
 
 
 @dataclass
@@ -664,6 +668,10 @@ _ARCHITECTURE_ALLOWED_KEYS: dict[str, set[str]] = {
         "use_norm",
         "final_nonneg",
         "negative_output_penalty_weight",
+        "icl_enabled",
+        "icl_past_exogenous_dim",
+        "icl_future_exogenous_dim",
+        "icl_exogenous_schema_hash",
     },
     "autotimes": {
         "token_len",

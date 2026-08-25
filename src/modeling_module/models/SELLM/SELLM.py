@@ -10,6 +10,8 @@ import torch.nn.functional as F
 
 from modeling_module.models.SELLM.configs import SELLMConfig
 from modeling_module.models.SELLM.backbone import (
+    ICLExogenousPromptEncoder,
+    ICLSemanticPromptEncoder,
     PaperSegmentMLP,
     PaperTSCC,
     VocabularySemanticProjection,
@@ -198,6 +200,8 @@ def add_time_adapter(model: nn.Module, *, rank: int, num_layers: int) -> nn.Modu
 class SELLMModel(nn.Module):
     """Semantic-enhanced LLM forecaster aligned with the library's [B, L, C] contract."""
 
+    model_key = "sellm_base"
+
     def __init__(self, cfg: SELLMConfig):
         super().__init__()
         self.cfg = cfg
@@ -213,6 +217,9 @@ class SELLMModel(nn.Module):
         self.use_norm = bool(cfg.use_norm)
         self.final_nonneg = bool(cfg.final_nonneg)
         self.use_pretrained_llm = bool(cfg.use_pretrained_llm)
+        self.icl_enabled = bool(cfg.icl_enabled)
+        self.icl_past_exogenous_dim = int(cfg.icl_past_exogenous_dim)
+        self.icl_future_exogenous_dim = int(cfg.icl_future_exogenous_dim)
 
         if self.lookback <= 0:
             raise ValueError(f"lookback must be positive, got {self.lookback}")
@@ -322,6 +329,18 @@ class SELLMModel(nn.Module):
             int(cfg.mlp_hidden_dim),
             float(cfg.dropout),
             str(cfg.mlp_activation),
+        )
+        self.icl_prompt_encoder: Optional[nn.Module] = (
+            ICLSemanticPromptEncoder(self.d_model) if self.icl_enabled else None
+        )
+        self.icl_exogenous_prompt_encoder: Optional[ICLExogenousPromptEncoder] = (
+            ICLExogenousPromptEncoder(
+                self.icl_past_exogenous_dim,
+                self.icl_future_exogenous_dim,
+                self.d_model,
+            )
+            if self.icl_past_exogenous_dim
+            else None
         )
         if self.architecture_variant == "paper_v1":
             self.tscc = PaperTSCC(
@@ -467,11 +486,22 @@ class SELLMModel(nn.Module):
             return None
         return kl * weight
 
-    def _encode_paper_context(self, context: torch.Tensor) -> torch.Tensor:
+    def _encode_paper_context(
+        self,
+        context: torch.Tensor,
+        prompt_tokens: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         batch_size, _, n_vars = context.shape
         flat = context.permute(0, 2, 1).reshape(batch_size * n_vars, -1)
         segments, _ = self._segment(flat)
         time_tokens = self.ts_encoder(segments)
+        if prompt_tokens is not None:
+            if int(prompt_tokens.shape[0]) != int(time_tokens.shape[0]):
+                raise ValueError("SELLM ICL prompt batch does not match query channels.")
+            time_tokens = torch.cat(
+                [prompt_tokens.to(dtype=time_tokens.dtype), time_tokens],
+                dim=1,
+            )
         prototypes = self._make_semantic_prototypes(
             time_tokens.device,
             time_tokens.dtype,
@@ -491,12 +521,22 @@ class SELLMModel(nn.Module):
         decoded = self.ts_decoder(encoded)
         return decoded.reshape(batch_size, n_vars, -1).permute(0, 2, 1).contiguous()
 
-    def _paper_forecast(self, context: torch.Tensor) -> torch.Tensor:
+    def _paper_forecast(
+        self,
+        context: torch.Tensor,
+        prompt_tokens: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         chunks: list[torch.Tensor] = []
         remaining = self.horizon
         rolling_context = context
         while remaining > 0:
-            reconstructed = self._encode_paper_context(rolling_context)
+            if prompt_tokens is None:
+                reconstructed = self._encode_paper_context(rolling_context)
+            else:
+                reconstructed = self._encode_paper_context(
+                    rolling_context,
+                    prompt_tokens=prompt_tokens,
+                )
             next_segment = reconstructed[:, -self.token_len :, :]
             take = min(remaining, self.token_len)
             chunks.append(next_segment[:, :take, :])
@@ -507,6 +547,180 @@ class SELLMModel(nn.Module):
                     dim=1,
                 )
         return torch.cat(chunks, dim=1)
+
+    def _icl_prompt_tokens(
+        self,
+        demonstration_contexts: torch.Tensor,
+        demonstration_targets: torch.Tensor,
+        prompt_mask: torch.Tensor,
+        demonstration_context_exogenous: Optional[torch.Tensor] = None,
+        demonstration_target_exogenous: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        if self.icl_prompt_encoder is None:
+            raise RuntimeError("SELLM checkpoint was not configured for ICL execution.")
+        if demonstration_contexts.ndim != 4 or demonstration_targets.ndim != 4:
+            raise ValueError("SELLM ICL demonstrations must be [B,K,L,C] and [B,K,H,C].")
+        batch, prompt_count, _, channels = demonstration_contexts.shape
+        if int(channels) != self.y_dim:
+            raise ValueError("SELLM ICL demonstration channels do not match the config.")
+
+        def encode(values: torch.Tensor) -> torch.Tensor:
+            length = int(values.shape[2])
+            flat = values.permute(0, 1, 3, 2).reshape(
+                batch * prompt_count * channels,
+                length,
+            )
+            segments, token_count = self._segment(flat)
+            encoded = self.ts_encoder(segments)
+            return encoded.reshape(
+                batch,
+                prompt_count,
+                channels,
+                token_count,
+                self.d_model,
+            ).permute(0, 2, 1, 3, 4)
+
+        context_tokens = encode(demonstration_contexts)
+        target_tokens = encode(demonstration_targets)
+        prompts = self.icl_prompt_encoder(
+            context_tokens,
+            target_tokens,
+            prompt_mask,
+        )
+        if self.icl_exogenous_prompt_encoder is not None:
+            if (
+                demonstration_context_exogenous is None
+                or demonstration_target_exogenous is None
+            ):
+                raise ValueError("SELLM ICL exogenous checkpoint requires prompt features.")
+            exogenous_prompts = self.icl_exogenous_prompt_encoder.demonstrations(
+                demonstration_context_exogenous,
+                demonstration_target_exogenous,
+                prompt_mask,
+            )
+            exogenous_prompts = exogenous_prompts[:, None, :, :].expand(
+                batch,
+                channels,
+                prompt_count,
+                self.d_model,
+            )
+            prompts = prompts + exogenous_prompts
+        return prompts.reshape(batch * channels, prompt_count, self.d_model)
+
+    def forward_icl(
+        self,
+        *,
+        demonstration_contexts: torch.Tensor,
+        demonstration_targets: torch.Tensor,
+        query_context: torch.Tensor,
+        prompt_mask: torch.Tensor,
+        demonstration_context_exogenous: Optional[torch.Tensor] = None,
+        demonstration_target_exogenous: Optional[torch.Tensor] = None,
+        query_context_exogenous: Optional[torch.Tensor] = None,
+        query_target_exogenous: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Forecast one query using labeled, same-series semantic prompts."""
+
+        if not self.icl_enabled:
+            raise RuntimeError("SELLM checkpoint was not configured for ICL execution.")
+        if query_context.ndim != 3:
+            raise ValueError("SELLM ICL query_context must be [B,L,C].")
+        if tuple(query_context.shape[1:]) != (self.lookback, self.y_dim):
+            raise ValueError("SELLM ICL query context does not match lookback/y_dim.")
+        if prompt_mask.ndim != 2 or not bool(prompt_mask.all()):
+            raise ValueError("SELLM ICL v1 requires a populated [B,K] prompt mask.")
+        if not torch.isfinite(query_context).all():
+            raise ValueError("SELLM ICL query context must contain finite values only.")
+
+        if self.use_norm:
+            means = query_context.mean(dim=1, keepdim=True).detach()
+            centered = query_context - means
+            stdev = torch.sqrt(
+                torch.var(centered, dim=1, keepdim=True, unbiased=False) + 1e-5
+            )
+            query_norm = centered / stdev
+            prompt_context_norm = (
+                demonstration_contexts - means[:, None, :, :]
+            ) / stdev[:, None, :, :]
+            prompt_target_norm = (
+                demonstration_targets - means[:, None, :, :]
+            ) / stdev[:, None, :, :]
+        else:
+            means = None
+            stdev = None
+            query_norm = query_context
+            prompt_context_norm = demonstration_contexts
+            prompt_target_norm = demonstration_targets
+
+        prompt_tokens = self._icl_prompt_tokens(
+            prompt_context_norm,
+            prompt_target_norm,
+            prompt_mask,
+            demonstration_context_exogenous,
+            demonstration_target_exogenous,
+        )
+        if self.icl_exogenous_prompt_encoder is not None:
+            if query_context_exogenous is None or query_target_exogenous is None:
+                raise ValueError("SELLM ICL exogenous checkpoint requires query features.")
+            query_exogenous_tokens = self.icl_exogenous_prompt_encoder.query(
+                query_context_exogenous,
+                query_target_exogenous,
+            )
+            batch, _, channels = query_context.shape
+            query_exogenous_tokens = query_exogenous_tokens[:, None, :, :].expand(
+                batch,
+                channels,
+                -1,
+                self.d_model,
+            ).reshape(batch * channels, -1, self.d_model)
+            prompt_tokens = torch.cat([prompt_tokens, query_exogenous_tokens], dim=1)
+        elif any(
+            value is not None
+            for value in (
+                demonstration_context_exogenous,
+                demonstration_target_exogenous,
+                query_context_exogenous,
+                query_target_exogenous,
+            )
+        ):
+            raise ValueError("SELLM checkpoint was configured without ICL exogenous inputs.")
+        if self.architecture_variant == "paper_v1":
+            forecast = self._paper_forecast(query_norm, prompt_tokens=prompt_tokens)
+        else:
+            batch_size, _, n_vars = query_norm.shape
+            flat = query_norm.permute(0, 2, 1).reshape(batch_size * n_vars, -1)
+            segments, _ = self._segment(flat)
+            time_tokens = self.ts_encoder(segments)
+            combined = torch.cat(
+                [prompt_tokens.to(dtype=time_tokens.dtype), time_tokens],
+                dim=1,
+            )
+            prototypes = self._make_semantic_prototypes(
+                combined.device,
+                combined.dtype,
+            )
+            fused = self.tscc(combined, prototypes)
+            if self.llm is not None:
+                encoded = self.llm(inputs_embeds=fused).last_hidden_state
+            elif self.fallback_encoder is not None:
+                encoded = self.fallback_encoder(fused)
+            else:
+                encoded = fused
+            pooled = torch.cat([encoded.mean(dim=1), encoded[:, -1, :]], dim=-1)
+            if self.pool_head is None:
+                raise RuntimeError("legacy_v1 pooling head is missing.")
+            forecast = self.pool_head(pooled).reshape(
+                batch_size,
+                n_vars,
+                self.horizon,
+            ).permute(0, 2, 1).contiguous()
+
+        if self.use_norm and means is not None and stdev is not None:
+            forecast = forecast * stdev[:, 0, :].unsqueeze(1)
+            forecast = forecast + means[:, 0, :].unsqueeze(1)
+        if self.final_nonneg:
+            forecast = F.softplus(forecast)
+        return forecast
 
     def forward(
         self,

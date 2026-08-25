@@ -61,6 +61,10 @@ class SELLMConfig(TrainingConfig):
     use_norm: bool = True
     final_nonneg: bool = False
     negative_output_penalty_weight: float = 0.0
+    icl_enabled: bool = False
+    icl_past_exogenous_dim: int = 0
+    icl_future_exogenous_dim: int = 0
+    icl_exogenous_schema_hash: Optional[str] = None
 
     def __post_init__(self) -> None:
         weight = float(self.negative_output_penalty_weight)
@@ -70,3 +74,24 @@ class SELLMConfig(TrainingConfig):
                 f"got {self.negative_output_penalty_weight!r}"
             )
         self.negative_output_penalty_weight = weight
+        past_dim = int(self.icl_past_exogenous_dim)
+        future_dim = int(self.icl_future_exogenous_dim)
+        if past_dim < 0 or future_dim < 0:
+            raise ValueError("SELLM ICL exogenous dimensions must be non-negative.")
+        if (past_dim == 0) != (future_dim == 0):
+            raise ValueError("SELLM ICL requires both past and future exogenous features.")
+        schema_hash = str(self.icl_exogenous_schema_hash or "").strip()
+        if bool(past_dim) != bool(schema_hash):
+            raise ValueError(
+                "SELLM ICL exogenous dimensions and schema hash must be configured together."
+            )
+        if past_dim and not bool(self.icl_enabled):
+            raise ValueError("SELLM ICL exogenous configuration requires icl_enabled=True.")
+        if schema_hash and (
+            len(schema_hash) != 64
+            or any(character not in "0123456789abcdef" for character in schema_hash)
+        ):
+            raise ValueError("SELLM ICL exogenous schema hash must be lowercase SHA256.")
+        self.icl_past_exogenous_dim = past_dim
+        self.icl_future_exogenous_dim = future_dim
+        self.icl_exogenous_schema_hash = schema_hash or None

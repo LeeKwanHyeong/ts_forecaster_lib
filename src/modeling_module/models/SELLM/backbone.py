@@ -191,6 +191,91 @@ class PaperTSCC(nn.Module):
         return anomaly_output + deanomaly_output
 
 
+class ICLSemanticPromptEncoder(nn.Module):
+    """Convert labeled numeric demonstrations into masked semantic prompt tokens."""
+
+    def __init__(self, d_model: int) -> None:
+        super().__init__()
+        self.projection = nn.Sequential(
+            nn.Linear(int(d_model) * 2, int(d_model)),
+            nn.GELU(),
+            nn.Linear(int(d_model), int(d_model)),
+        )
+        self.norm = nn.LayerNorm(int(d_model))
+
+    def forward(
+        self,
+        context_tokens: torch.Tensor,
+        target_tokens: torch.Tensor,
+        prompt_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        """Return one semantic token per demonstration and target channel."""
+
+        if context_tokens.ndim != 5 or target_tokens.ndim != 5:
+            raise ValueError("SELLM ICL token inputs must be [B,C,K,N,D].")
+        if context_tokens.shape[:3] != target_tokens.shape[:3]:
+            raise ValueError("SELLM ICL context and target prompt dimensions must match.")
+        if prompt_mask.shape != (
+            int(context_tokens.shape[0]),
+            int(context_tokens.shape[2]),
+        ):
+            raise ValueError("SELLM ICL prompt mask must be [B,K].")
+        context_summary = context_tokens.mean(dim=3)
+        target_summary = target_tokens.mean(dim=3)
+        prompt = self.norm(
+            self.projection(torch.cat([context_summary, target_summary], dim=-1))
+        )
+        mask = prompt_mask[:, None, :, None].to(
+            device=prompt.device,
+            dtype=prompt.dtype,
+        )
+        return prompt * mask
+
+
+class ICLExogenousPromptEncoder(nn.Module):
+    """Encode observed-past and known-future features as semantic prompt tokens."""
+
+    def __init__(self, past_dim: int, future_dim: int, d_model: int) -> None:
+        super().__init__()
+        self.past_dim = int(past_dim)
+        self.future_dim = int(future_dim)
+        self.past_projection = nn.Linear(self.past_dim, int(d_model))
+        self.future_projection = nn.Linear(self.future_dim, int(d_model))
+        self.demo_norm = nn.LayerNorm(int(d_model))
+        self.query_norm = nn.LayerNorm(int(d_model))
+
+    def demonstrations(
+        self,
+        past: torch.Tensor,
+        future: torch.Tensor,
+        prompt_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        if past.ndim != 4 or future.ndim != 4:
+            raise ValueError("SELLM demonstration exogenous tensors must be [B,K,T,E].")
+        if past.shape[:2] != future.shape[:2] or past.shape[:2] != prompt_mask.shape:
+            raise ValueError("SELLM demonstration exogenous prompt dimensions differ.")
+        if int(past.shape[-1]) != self.past_dim or int(future.shape[-1]) != self.future_dim:
+            raise ValueError("SELLM demonstration exogenous width does not match config.")
+        token = self.demo_norm(
+            self.past_projection(past).mean(dim=2)
+            + self.future_projection(future).mean(dim=2)
+        )
+        return token * prompt_mask[..., None].to(dtype=token.dtype)
+
+    def query(self, past: torch.Tensor, future: torch.Tensor) -> torch.Tensor:
+        if past.ndim != 3 or future.ndim != 3:
+            raise ValueError("SELLM query exogenous tensors must be [B,T,E].")
+        if int(past.shape[0]) != int(future.shape[0]):
+            raise ValueError("SELLM query exogenous batch dimensions differ.")
+        if int(past.shape[-1]) != self.past_dim or int(future.shape[-1]) != self.future_dim:
+            raise ValueError("SELLM query exogenous width does not match config.")
+        tokens = torch.cat(
+            [self.past_projection(past), self.future_projection(future)],
+            dim=1,
+        )
+        return self.query_norm(tokens)
+
+
 class PaperTimeProjectionAdapter(nn.Module):
     """Two-LSTM temporal residual for an attention key or value projection."""
 
