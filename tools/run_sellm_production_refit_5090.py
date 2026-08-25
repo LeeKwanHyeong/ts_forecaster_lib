@@ -139,6 +139,7 @@ def _architecture(
     llm_local_path: Path,
     *,
     negative_output_penalty_weight: float = 0.0,
+    final_nonneg: bool = False,
 ) -> ArchitectureConfig:
     return ArchitectureConfig(
         sellm=SELLMArchitectureConfig(
@@ -159,7 +160,7 @@ def _architecture(
             time_adapter_rank=8,
             time_adapter_layers=2,
             use_norm=True,
-            final_nonneg=False,
+            final_nonneg=final_nonneg,
             negative_output_penalty_weight=negative_output_penalty_weight,
         )
     )
@@ -168,6 +169,7 @@ def _architecture(
 def _expected_metadata(
     *,
     negative_output_penalty_weight: float = 0.0,
+    final_nonneg: bool = False,
 ) -> dict[str, Any]:
     return {
         "model_key": MODEL_KEY,
@@ -182,6 +184,7 @@ def _expected_metadata(
         "token_len": TOKEN_LEN,
         "semantic_vocab_size": SEMANTIC_VOCAB_SIZE,
         "negative_output_penalty_weight": negative_output_penalty_weight,
+        "final_nonneg": final_nonneg,
         **SELLM_TRAINER_CONTRACT.as_metadata(),
     }
 
@@ -190,6 +193,7 @@ def _validate_checkpoint_payload(
     payload: dict[str, Any],
     *,
     negative_output_penalty_weight: float = 0.0,
+    final_nonneg: bool = False,
 ) -> dict[str, Any]:
     config = payload.get("config") or payload.get("cfg_state") or {}
     meta = payload.get("meta") or {}
@@ -206,6 +210,7 @@ def _validate_checkpoint_payload(
         "time_adapter_layers": 2,
         "random_seed": SEED,
         "negative_output_penalty_weight": negative_output_penalty_weight,
+        "final_nonneg": final_nonneg,
     }
     config_drift = {
         key: {"expected": expected, "actual": config.get(key)}
@@ -215,7 +220,8 @@ def _validate_checkpoint_payload(
     meta_drift = {
         key: {"expected": expected, "actual": meta.get(key)}
         for key, expected in _expected_metadata(
-            negative_output_penalty_weight=negative_output_penalty_weight
+            negative_output_penalty_weight=negative_output_penalty_weight,
+            final_nonneg=final_nonneg,
         ).items()
         if meta.get(key) != expected
     }
@@ -231,7 +237,8 @@ def _validate_checkpoint_payload(
         "config": expected_config,
         "meta": {
             **_expected_metadata(
-                negative_output_penalty_weight=negative_output_penalty_weight
+                negative_output_penalty_weight=negative_output_penalty_weight,
+                final_nonneg=final_nonneg,
             ),
             "final_train_loss": final_train_loss,
         },
@@ -279,6 +286,7 @@ def _preflight(
     input_manifest: Path,
     llm_local_path: Path,
     negative_output_penalty_weight: float = 0.0,
+    final_nonneg: bool = False,
 ) -> tuple[dict[str, Any], IndexedTemporalDataModule]:
     manifest = load_training_input_manifest(
         input_manifest,
@@ -321,6 +329,7 @@ def _preflight(
             "semantic_vocab_size": SEMANTIC_VOCAB_SIZE,
             "semantic_top_k": SEMANTIC_TOP_K,
             "negative_output_penalty_weight": negative_output_penalty_weight,
+            "final_nonneg": final_nonneg,
             "training_mode": "production_refit",
             "validation_enabled": False,
             "state_selection": "final_epoch",
@@ -340,12 +349,14 @@ def run_refit(
     num_workers: int,
     preflight_only: bool,
     negative_output_penalty_weight: float = 0.0,
+    final_nonneg: bool = False,
 ) -> dict[str, Any]:
     preflight, datamodule = _preflight(
         target_source=target_source,
         input_manifest=input_manifest,
         llm_local_path=llm_local_path,
         negative_output_penalty_weight=negative_output_penalty_weight,
+        final_nonneg=final_nonneg,
     )
     if preflight_only:
         return preflight
@@ -383,6 +394,7 @@ def run_refit(
                     negative_output_penalty_weight=(
                         negative_output_penalty_weight
                     ),
+                    final_nonneg=final_nonneg,
                 ),
                 trainer=TrainerConfig(
                     warmup_epochs=EPOCHS,
@@ -422,6 +434,7 @@ def run_refit(
         checkpoint_contract = _validate_checkpoint_payload(
             payload,
             negative_output_penalty_weight=negative_output_penalty_weight,
+            final_nonneg=final_nonneg,
         )
         del payload, result, train_loader
         gc.collect()
@@ -536,6 +549,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.0,
     )
+    parser.add_argument("--final-nonneg", action="store_true")
     return parser
 
 
@@ -552,6 +566,7 @@ def main(argv: list[str] | None = None) -> int:
         negative_output_penalty_weight=float(
             args.negative_output_penalty_weight
         ),
+        final_nonneg=bool(args.final_nonneg),
     )
     print(json.dumps(receipt, ensure_ascii=True, sort_keys=True))
     return 0

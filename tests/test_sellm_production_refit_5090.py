@@ -19,6 +19,7 @@ from tools.run_sellm_production_refit_5090 import (
     TOKEN_LEN,
     TRAIN_END_WEEK,
     _build_datamodule,
+    _architecture,
     _expected_metadata,
     _latest_histories,
     _validate_checkpoint_payload,
@@ -54,6 +55,7 @@ def _checkpoint_payload() -> dict:
             "time_adapter_layers": 2,
             "random_seed": SEED,
             "negative_output_penalty_weight": 0.0,
+            "final_nonneg": False,
         },
         "meta": {
             **_expected_metadata(),
@@ -107,3 +109,13 @@ def test_qwen_path_is_an_explicit_runtime_input():
     ).read_text(encoding="utf-8")
 
     assert 'parser.add_argument("--llm-local-path"' in parser_source
+
+
+def test_output_constraint_is_explicit_and_defaults_off(tmp_path):
+    baseline = _architecture(tmp_path).sellm
+    constrained = _architecture(tmp_path, final_nonneg=True).sellm
+
+    assert baseline is not None
+    assert constrained is not None
+    assert baseline.final_nonneg is False
+    assert constrained.final_nonneg is True
