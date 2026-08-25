@@ -1165,6 +1165,90 @@ def _run_sellm(
     _store_result(results, result_name="SELLM", best=best, model_key="sellm_base", family_key="sellm")
 
 
+def _run_autotimes(
+    *,
+    results: Dict[str, Dict],
+    freq: str,
+    train_loader,
+    val_loader,
+    point_train_cfg: TrainingConfig,
+    stages: List[StageConfig],
+    device: str,
+    lookback: int,
+    horizon: int,
+    use_exogenous_mode: bool,
+    save_root: Optional[Path] = None,
+    requested_artifact_keys: Optional[Iterable[str]] = None,
+    architecture_override: Optional[Mapping[str, Any]] = None,
+    **kwargs,
+):
+    """Run the endogenous, point-only AutoTimes artifact."""
+
+    requested = _requested_target_set(requested_artifact_keys)
+    if not _wants_artifact(requested, "autotimes_base"):
+        return
+    if use_exogenous_mode:
+        raise RuntimeError("[total_train] autotimes_base supports endogenous inputs only.")
+    loss_obj = getattr(point_train_cfg, "loss", None)
+    mode = infer_supervised_mode(loss_obj)
+    if mode != "point":
+        raise NotImplementedError(
+            f"[total_train] autotimes_base supports point mode only, got {mode!r}."
+        )
+
+    from modeling_module.models.AutoTimes.configs import AutoTimesConfig
+    from modeling_module.models.model_builder import build_autotimes
+    from modeling_module.training.model_trainers.autotimes_train import train_autotimes
+
+    cfg_kwargs = asdict(point_train_cfg)
+    cfg_kwargs["loss"] = loss_obj
+    cfg_kwargs.update(y_dim=1, use_exogenous_mode=False)
+    if architecture_override:
+        cfg_kwargs.update(
+            {key: value for key, value in dict(architecture_override).items() if value is not None}
+        )
+    autotimes_cfg = AutoTimesConfig(**cfg_kwargs)
+    autotimes_model = build_autotimes(autotimes_cfg).to(device)
+    autotimes_train_cfg = replace(point_train_cfg, use_exogenous_mode=False)
+
+    print(
+        f"AutoTimes ({freq.capitalize()}) backbone={autotimes_cfg.backbone_type} "
+        f"token_len={autotimes_cfg.token_len} horizon={autotimes_cfg.horizon}"
+    )
+    best = train_autotimes(
+        model=autotimes_model,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        stages=list(stages),
+        train_cfg=autotimes_train_cfg,
+        device=device,
+    )
+
+    if save_root:
+        ckpt_path = _make_ckpt_path(save_root, freq, "AutoTimesBase", lookback, horizon)
+        save_model(
+            autotimes_model,
+            autotimes_cfg,
+            ckpt_path,
+            extra_meta={
+                "model_key": "autotimes_base",
+                "family_key": "autotimes",
+                "token_len": int(autotimes_cfg.token_len),
+                "backbone_type": str(autotimes_cfg.backbone_type),
+                **_training_checkpoint_meta(autotimes_train_cfg, stages, best),
+            },
+        )
+        best["ckpt_path"] = str(ckpt_path)
+
+    _store_result(
+        results,
+        result_name="AutoTimes",
+        best=best,
+        model_key="autotimes_base",
+        family_key="autotimes",
+    )
+
+
 def _run_patchtst(
     *,
     results: Dict[str, Dict],
@@ -2023,6 +2107,7 @@ MODEL_REGISTRY: Dict[str, Callable] = {
     "timemixer": _run_timemixer,
     "timexer": _run_timexer,
     "sellm": _run_sellm,
+    "autotimes": _run_autotimes,
 }
 
 
@@ -2291,6 +2376,8 @@ def run_total_train(
             # TimeXer v1 intentionally ignores the library's future-exo fallback callback.
             kwargs.update(dict(patch_len=freq_spec.patch_len, exo_dim=0, future_exo_cb=None))
         elif m == "sellm":
+            kwargs.update(dict(patch_len=freq_spec.patch_len))
+        elif m == "autotimes":
             kwargs.update(dict(patch_len=freq_spec.patch_len))
 
         MODEL_REGISTRY[m](**kwargs)

@@ -61,6 +61,12 @@ sellm = [
     "tokenizers>=0.20",
     "transformers>=4.45,<6",
 ]
+autotimes = [
+    "accelerate>=0.33",
+    "safetensors>=0.4",
+    "tokenizers>=0.20",
+    "transformers>=4.45,<6",
+]
 all = [
     "ipykernel",
     "jupyterlab",
@@ -81,6 +87,7 @@ include = ["modeling_module*"]
 
 [tool.setuptools.package-data]
 "modeling_module.models.TimeMixer" = ["LICENSE.upstream", "upstream_manifest.json"]
+"modeling_module.models.AutoTimes" = ["LICENSE.upstream", "docs/README.md", "upstream_manifest.json"]
 
 [tool.setuptools.exclude-package-data]
 "*" = ["*.pyc", "*.pyo", ".DS_Store"]

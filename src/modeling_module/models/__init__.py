@@ -41,6 +41,7 @@ __all__ = [
     "build_nhits",
     "build_timemixer",
     "build_timexer",
+    "build_autotimes",
     "build_cgmm",
     "build_similar_lifecycle",
     "CGMMConfig",
@@ -68,6 +69,7 @@ if TYPE_CHECKING:
         build_patchTST_quantile,
         build_patchTST_quantile_exogenous,
         build_timexer,
+        build_autotimes,
     )
     from .PatchMixer.common.configs import PatchMixerConfig, PatchMixerExogenousConfig
     from .CGMM.configs import CGMMConfig
@@ -94,6 +96,7 @@ _LAZY = {
     "build_nhits": (".model_builder", "build_nhits"),
     "build_timemixer": (".model_builder", "build_timemixer"),
     "build_timexer": (".model_builder", "build_timexer"),
+    "build_autotimes": (".model_builder", "build_autotimes"),
     "PatchMixerConfig": (
         ".PatchMixer.common.configs",
         "PatchMixerConfig",
