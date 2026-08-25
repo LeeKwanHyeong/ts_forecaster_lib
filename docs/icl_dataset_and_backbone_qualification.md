@@ -224,3 +224,56 @@ Receipt SHA256은 각각
 이 단일 seed 256-series 결과는 1.5B 확장 실행 기준선이며 Production 승격
 근거는 아닙니다. 모델 선택에는 동일 조건의 0.5B 비교와 다중 seed 검증이
 추가로 필요합니다.
+
+## Qwen2-0.5B 동일 조건 비교
+
+Backbone 크기 효과만 분리하기 위해 Qwen2-1.5B 확장 실행과 같은 256-series,
+Episode split, seed 42, batch 4, 5 epoch를 사용했습니다. AutoTimes LR은 `1e-3`,
+SELLM LR은 `1e-4`로 동일하게 유지했습니다. 네 실행의 H26 Episode manifest는
+모두 `2be49f5c09ebc447e22363d93120f5461ebd0f09687ff80e9f81a1c834ca68bf`
+입니다.
+
+기존 `/home/leekwanhyeong/models/Qwen2-0.5B` 파일을 새로 다운로드하지 않고
+공식 revision `91d2aff3f957f99e4c74c962f2f408dcc88a18d8`과 Apache-2.0
+라이선스로 봉인했습니다. Parameter count는 `494,032,768`, model safetensors
+SHA256은 `9cd8fc8c85a197b8c551d6b931b5709fe2611889d6b44945876472fecdf77cad`,
+backbone manifest SHA256은
+`d2541896d94b231d9ba121cd11a024286e2aaffbcaa0b55f83908717eabf6942`입니다.
+Offline local-only load와 forward도 통과했습니다.
+
+### Epoch별 Validation
+
+| 모델 | Backbone | 최적 Epoch | Validation MAE | Validation WAPE |
+|---|---|---:|---:|---:|
+| AutoTimes | Qwen2-0.5B | 5 | **2.083** | **20.9%** |
+| AutoTimes | Qwen2-1.5B | 4 | 2.090 | 21.0% |
+| SELLM | Qwen2-0.5B | 4 | **2.176** | **21.9%** |
+| SELLM | Qwen2-1.5B | 5 | 2.178 | 21.9% |
+
+AutoTimes 0.5B는 epoch 5까지 개선됐습니다. SELLM 0.5B는 epoch 4가 최저점이고
+epoch 5에서 소폭 악화됐습니다. 동일 조건에서 1.5B의 최적 Validation MAE는
+AutoTimes가 0.31%, SELLM이 0.06% 나빠 사실상 동등한 범위입니다.
+
+### Test·비용 비교
+
+| 모델 | Backbone | Test MAE | Test WAPE | 학습 시간 | Peak GPU |
+|---|---|---:|---:|---:|---:|
+| AutoTimes | Qwen2-0.5B | 3.780 | 56.2% | 280.1s | 6,128.9 MiB |
+| AutoTimes | Qwen2-1.5B | **3.735** | **55.5%** | 333.3s | 14,165.1 MiB |
+| SELLM | Qwen2-0.5B | **3.977** | **59.1%** | 47.4s | 2,844.3 MiB |
+| SELLM | Qwen2-1.5B | 4.083 | 60.7% | 61.1s | 6,554.1 MiB |
+
+AutoTimes 1.5B는 Test MAE·WAPE를 1.17% 개선했지만 학습시간이 19.0%, Peak GPU가
+131.1% 증가했습니다. SELLM 1.5B는 Test MAE·WAPE가 2.68% 악화됐고 학습시간은
+28.8%, Peak GPU는 130.4% 증가했습니다. 따라서 현재 단일 seed 기준으로는
+1.5B가 비용 증가를 정당화할 만큼 일관된 정확도 개선을 제공하지 않습니다.
+
+Qwen2-0.5B checkpoint SHA256은 AutoTimes
+`94fbcfbc100388e54a9668cc72341e8145134861f198d9902b39fa392c1866de`,
+SELLM `e10dc0370c36857d601069c5c137fd4fe0b9e292e233f7cfb4fc7ebe86ec0576`이며
+두 checkpoint의 strict reload 최대 오차는 0입니다. Aggregate receipt SHA256은
+각각 `7f4d055e00a4600e74387ca29253f51cbfbda7e465a5a6d27315a2efb0a20c01`,
+`acaf4af7358fac09e63ff367b40f01dff2dc9eacb7bd4ddf75302216c2f4cc6f`입니다.
+
+현재 기본 backbone 후보는 Qwen2-0.5B입니다. Qwen2-1.5B는 다중 seed에서 명확하고
+반복 가능한 정확도 우위가 확인될 때만 다시 승격 후보로 검토합니다.
