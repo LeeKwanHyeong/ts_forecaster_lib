@@ -260,6 +260,27 @@ def build_sellm(cfg):
     cfg = _ensure_sellm_config(cfg)
     return SELLMModel.from_config(cfg)
 
+
+def _ensure_autotimes_config(cfg: Any):
+    from modeling_module.models.AutoTimes.configs import AutoTimesConfig
+
+    if isinstance(cfg, AutoTimesConfig):
+        return cfg
+    if isinstance(cfg, Mapping):
+        return AutoTimesConfig(**dict(cfg))
+    if is_dataclass(cfg):
+        return AutoTimesConfig(**asdict(cfg))
+    if hasattr(cfg, "__dict__"):
+        return AutoTimesConfig(**dict(vars(cfg)))
+    raise TypeError(f"Unsupported config type for AutoTimes: {type(cfg)}")
+
+
+def build_autotimes(cfg):
+    """Build the frozen-backbone AutoTimes point forecaster."""
+    from modeling_module.models.AutoTimes.autotimes import AutoTimesModel
+
+    return AutoTimesModel.from_config(_ensure_autotimes_config(cfg))
+
 def _ensure_exotst_config(cfg: Union[ExoTSTConfig, dict, Any]) -> ExoTSTConfig:
     """
     Normalize various config inputs into ExoTSTConfig.

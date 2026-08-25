@@ -326,6 +326,34 @@ class SELLMArchitectureConfig:
 
 
 @dataclass
+class AutoTimesArchitectureConfig:
+    """AutoTimes frozen-backbone architecture and timestamp artifact overrides."""
+
+    token_len: Optional[int] = None
+    backbone_type: Optional[Literal["mock", "llama", "gpt2", "opt"]] = None
+    llm_source: Optional[Literal["huggingface", "local"]] = None
+    llm_model_name: Optional[str] = None
+    llm_local_path: Optional[str] = None
+    llm_revision: Optional[str] = None
+    local_files_only: Optional[bool] = None
+    freeze_llm: Optional[bool] = None
+    hidden_size: Optional[int] = None
+    mock_layers: Optional[int] = None
+    mock_heads: Optional[int] = None
+    mlp_hidden_dim: Optional[int] = None
+    mlp_hidden_layers: Optional[int] = None
+    mlp_activation: Optional[Literal["relu", "gelu", "tanh"]] = None
+    dropout: Optional[float] = None
+    mix_timestamp_embeddings: Optional[bool] = None
+    timestamp_artifact_path: Optional[str] = None
+    timestamp_artifact_sha256: Optional[str] = None
+    icl_enabled: Optional[bool] = None
+    icl_past_exogenous_dim: Optional[int] = None
+    icl_future_exogenous_dim: Optional[int] = None
+    icl_exogenous_schema_hash: Optional[str] = None
+
+
+@dataclass
 class ArchitectureConfig:
     """
     Family-level model architecture overrides.
@@ -345,6 +373,7 @@ class ArchitectureConfig:
     timemixer: Optional[TimeMixerArchitectureConfig | Mapping[str, Any]] = None
     timexer: Optional[TimexerArchitectureConfig | Mapping[str, Any]] = None
     sellm: Optional[SELLMArchitectureConfig | Mapping[str, Any]] = None
+    autotimes: Optional[AutoTimesArchitectureConfig | Mapping[str, Any]] = None
 
 
 @dataclass
@@ -636,6 +665,30 @@ _ARCHITECTURE_ALLOWED_KEYS: dict[str, set[str]] = {
         "final_nonneg",
         "negative_output_penalty_weight",
     },
+    "autotimes": {
+        "token_len",
+        "backbone_type",
+        "llm_source",
+        "llm_model_name",
+        "llm_local_path",
+        "llm_revision",
+        "local_files_only",
+        "freeze_llm",
+        "hidden_size",
+        "mock_layers",
+        "mock_heads",
+        "mlp_hidden_dim",
+        "mlp_hidden_layers",
+        "mlp_activation",
+        "dropout",
+        "mix_timestamp_embeddings",
+        "timestamp_artifact_path",
+        "timestamp_artifact_sha256",
+        "icl_enabled",
+        "icl_past_exogenous_dim",
+        "icl_future_exogenous_dim",
+        "icl_exogenous_schema_hash",
+    },
 }
 
 
@@ -660,6 +713,8 @@ def _family_from_training_target(name: str) -> str:
         return "timexer"
     if canonical == "sellm" or canonical.startswith("sellm_"):
         return "sellm"
+    if canonical == "autotimes" or canonical.startswith("autotimes_"):
+        return "autotimes"
     raise ValueError(f"Unsupported architecture override target: {name!r}")
 
 
@@ -1541,6 +1596,7 @@ def train(req: TrainRequest | Mapping[str, Any]) -> TrainResult:
 __all__ = [
     "ArtifactConfig",
     "ArchitectureConfig",
+    "AutoTimesArchitectureConfig",
     "ExoTSTArchitectureConfig",
     "NHITSArchitectureConfig",
     "PatchMixerArchitectureConfig",

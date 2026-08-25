@@ -66,6 +66,7 @@ from .losses import DistributionLoss
 from .train import (
     ArtifactConfig,
     ArchitectureConfig,
+    AutoTimesArchitectureConfig,
     ExoTSTArchitectureConfig,
     NHITSArchitectureConfig,
     PatchMixerArchitectureConfig,
@@ -87,6 +88,7 @@ if SELLM_AVAILABLE:
 __all__ = [
     "ArtifactConfig",
     "ArchitectureConfig",
+    "AutoTimesArchitectureConfig",
     "CATEGORICAL_UNK_ID",
     "CategoricalVocabulary",
     "CategoricalVocabularyArtifact",

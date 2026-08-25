@@ -259,6 +259,18 @@ MODEL_SPECS: dict[str, ModelSpec] = {
         exogenous_inputs=("past_cont",),
         fusion_strategy="global_token_cross_attention",
     ),
+    "autotimes_base": ModelSpec(
+        key="autotimes_base",
+        family="autotimes",
+        builder_module="modeling_module.models.model_builder",
+        builder_attr="build_autotimes",
+        label="AutoTimes Base",
+        aliases=("autotimes", "autotimesbase"),
+        class_names=("AutoTimesModel",),
+        checkpoint_aliases=("AutoTimes", "AutoTimesBase"),
+        exogenous_policy="none",
+        fusion_strategy="frozen_llm_numeric_tokens",
+    ),
 }
 
 if SELLM_AVAILABLE:
@@ -358,6 +370,7 @@ TRAINING_FAMILY_DEFAULTS: dict[str, tuple[str, ...]] = {
     "nhits": ("nhits_base",),
     "timemixer": ("timemixer",),
     "timexer": ("timexer_base",),
+    "autotimes": ("autotimes_base",),
 }
 
 if SELLM_AVAILABLE:
@@ -428,6 +441,7 @@ TRAINING_FAMILY_ALIASES: dict[str, tuple[str, ...]] = {
     "nhits": ("nhits", "n-hits"),
     "timemixer": ("timemixer",),
     "timexer": ("timexer",),
+    "autotimes": ("autotimes",),
 }
 
 if SELLM_AVAILABLE:

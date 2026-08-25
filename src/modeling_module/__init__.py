@@ -2,6 +2,7 @@ from ._internal.optional_features import SELLM_AVAILABLE
 from .api.train import (
     ArtifactConfig,
     ArchitectureConfig,
+    AutoTimesArchitectureConfig,
     ExoTSTArchitectureConfig,
     NHITSArchitectureConfig,
     PatchMixerArchitectureConfig,
@@ -168,6 +169,7 @@ __all__ = [
     'RuntimeConfig',
     'ArtifactConfig',
     'ArchitectureConfig',
+    'AutoTimesArchitectureConfig',
     'PatchTSTArchitectureConfig',
     'TitanArchitectureConfig',
     'PatchMixerArchitectureConfig',
