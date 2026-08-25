@@ -94,6 +94,11 @@ APPROVED_EXOGENOUS_FEATURES: Final = (
     "lifecycle_source_observed_flag",
 )
 MODEL_KEYS: Final = ("autotimes_base", "sellm_base")
+SELLM_OUTPUT_HEAD_MODES: Final = (
+    "identity",
+    "softplus",
+    "zero_inflated_softplus",
+)
 BACKBONE_MANIFEST_CONTRACT: Final = "modeling_module.local_hf_backbone.v1"
 BACKBONE_MANIFEST_FILENAME: Final = "backbone-manifest.json"
 
@@ -745,6 +750,10 @@ def _model_config(
     schema_hash: str,
     past_exogenous_dim: int,
     future_exogenous_dim: int,
+    sellm_output_head_mode: str = "identity",
+    sellm_output_head_hidden_dim: int = 16,
+    sellm_output_head_softplus_beta: float = 1.0,
+    sellm_output_head_initial_nonzero_probability: float = 0.5,
 ):
     common = {
         "lookback": 52,
@@ -788,6 +797,12 @@ def _model_config(
             dropout=0.0,
             head_hidden_dim=128,
             use_norm=True,
+            output_head_mode=sellm_output_head_mode,
+            output_head_hidden_dim=sellm_output_head_hidden_dim,
+            output_head_softplus_beta=sellm_output_head_softplus_beta,
+            output_head_initial_nonzero_probability=(
+                sellm_output_head_initial_nonzero_probability
+            ),
         )
     raise QualificationError(f"Unsupported qualification model: {model_key}.")
 
@@ -914,6 +929,10 @@ def qualify_one(
     batch_size: int,
     seed: int,
     device: str,
+    sellm_output_head_mode: str = "identity",
+    sellm_output_head_hidden_dim: int = 16,
+    sellm_output_head_softplus_beta: float = 1.0,
+    sellm_output_head_initial_nonzero_probability: float = 0.5,
 ) -> dict[str, Any]:
     schema = bundle.manifest.exogenous_schema
     if schema is None:
@@ -926,6 +945,12 @@ def qualify_one(
         schema_hash=schema.fingerprint,
         past_exogenous_dim=len(schema.past_feature_names),
         future_exogenous_dim=len(schema.future_feature_names),
+        sellm_output_head_mode=sellm_output_head_mode,
+        sellm_output_head_hidden_dim=sellm_output_head_hidden_dim,
+        sellm_output_head_softplus_beta=sellm_output_head_softplus_beta,
+        sellm_output_head_initial_nonzero_probability=(
+            sellm_output_head_initial_nonzero_probability
+        ),
     )
     load_started = time.perf_counter()
     model = _build_model(model_key, model_config)
@@ -1027,6 +1052,18 @@ def qualify_one(
             "frozen": True,
         },
         "parameters": counts,
+        "output_head": (
+            {
+                "mode": str(model_config.output_head_mode),
+                "hidden_dim": int(model_config.output_head_hidden_dim),
+                "softplus_beta": float(model_config.output_head_softplus_beta),
+                "initial_nonzero_probability": float(
+                    model_config.output_head_initial_nonzero_probability
+                ),
+            }
+            if model_key == "sellm_base"
+            else None
+        ),
         "training": {
             "epochs": int(epochs),
             "learning_rate": float(learning_rate),
@@ -1107,6 +1144,14 @@ def run_qualification(args: argparse.Namespace) -> dict[str, Any]:
                 batch_size=int(args.batch_size),
                 seed=int(args.seed),
                 device=str(args.device),
+                sellm_output_head_mode=str(args.sellm_output_head_mode),
+                sellm_output_head_hidden_dim=int(args.sellm_output_head_hidden_dim),
+                sellm_output_head_softplus_beta=float(
+                    args.sellm_output_head_softplus_beta
+                ),
+                sellm_output_head_initial_nonzero_probability=float(
+                    args.sellm_output_head_initial_nonzero_probability
+                ),
             )
             result_receipt = {
                 "contract": MODEL_RESULT_RECEIPT_CONTRACT,
@@ -1154,6 +1199,14 @@ def run_qualification(args: argparse.Namespace) -> dict[str, Any]:
             "lookback": 52,
             "stride": int(args.stride),
             "seed": int(args.seed),
+            "sellm_output_head": {
+                "mode": str(args.sellm_output_head_mode),
+                "hidden_dim": int(args.sellm_output_head_hidden_dim),
+                "softplus_beta": float(args.sellm_output_head_softplus_beta),
+                "initial_nonzero_probability": float(
+                    args.sellm_output_head_initial_nonzero_probability
+                ),
+            },
             "exogenous_source_revision": exogenous_source_revision,
         },
         "episodes": {
@@ -1191,6 +1244,18 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--learning-rate", type=float, default=1e-3)
     parser.add_argument("--batch-size", type=int, default=2)
     parser.add_argument("--models", nargs="+", choices=MODEL_KEYS, default=list(MODEL_KEYS))
+    parser.add_argument(
+        "--sellm-output-head-mode",
+        choices=SELLM_OUTPUT_HEAD_MODES,
+        default="identity",
+    )
+    parser.add_argument("--sellm-output-head-hidden-dim", type=int, default=16)
+    parser.add_argument("--sellm-output-head-softplus-beta", type=float, default=1.0)
+    parser.add_argument(
+        "--sellm-output-head-initial-nonzero-probability",
+        type=float,
+        default=0.5,
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--expected-device", default="NVIDIA GeForce RTX 5090")
@@ -1206,9 +1271,25 @@ def main() -> None:
         or int(args.batch_size) <= 0
         or not math.isfinite(float(args.learning_rate))
         or float(args.learning_rate) <= 0.0
+        or int(args.sellm_output_head_hidden_dim) <= 0
+        or not math.isfinite(float(args.sellm_output_head_softplus_beta))
+        or float(args.sellm_output_head_softplus_beta) <= 0.0
+        or not math.isfinite(
+            float(args.sellm_output_head_initial_nonzero_probability)
+        )
+        or not 0.0
+        < float(args.sellm_output_head_initial_nonzero_probability)
+        < 1.0
     ):
         raise QualificationError(
-            "sample-series, epochs, batch-size, and learning-rate must be positive."
+            "Qualification dimensions and output-head settings are invalid."
+        )
+    if (
+        str(args.sellm_output_head_mode) != "identity"
+        and "autotimes_base" in args.models
+    ):
+        raise QualificationError(
+            "A non-identity SELLM output head cannot be applied to AutoTimes."
         )
     receipt = run_qualification(args)
     print(
