@@ -35,8 +35,10 @@ hash도 달라지므로 기존 checkpoint와 함께 사용할 수 없습니다.
 
 ## 5090 Qualification 기준
 
-`tools/qualify_icl_backbones_5090.py`는 Mock 모델이 아닌 로컬
-`Qwen2-0.5B`를 AutoTimes와 SELLM의 실제 backbone으로 사용합니다.
+`tools/qualify_icl_backbones_5090.py`는 Mock 모델이 아닌 봉인된 로컬 Hugging Face
+모델을 AutoTimes와 SELLM의 실제 backbone으로 사용합니다. 기존 Qwen2-0.5B
+디렉터리는 계속 지원하고, seal manifest가 있는 모델은 revision, 라이선스, 구조,
+파라미터 수와 파일 SHA256까지 검증합니다.
 
 - 입력은 승인 Manifest와 SHA256이 일치하는 V100 수요 Parquet과 봉인된
   Operation Part/Warranty Snapshot만 사용합니다.
@@ -135,3 +137,90 @@ H26 Train 정답은 `202208~202333`, Validation은 `202334~202407`, Test는
 오차는 0이었습니다. 다만 표본과 epoch가 작고 WAPE가 높으므로 이 결과는 실제
 외생변수 전달과 당시 코드의 재현성 검증에만 사용하며 모델 승격 근거나 현재
 누수 방지 계약의 통과 증적으로 사용하지 않습니다.
+
+## Qwen2-1.5B 확장 Qualification 기준선
+
+### Backbone seal과 4-series smoke
+
+RTX 5090의 `/home/leekwanhyeong/models/Qwen2-1.5B`에 다음 backbone을 고정했습니다.
+`HF_HUB_OFFLINE=1`, `TRANSFORMERS_OFFLINE=1`, `local_files_only=True` 조건에서
+tokenizer, 가중치 load와 forward가 정상 동작했습니다.
+
+| 구분 | 값 |
+|---|---|
+| Model ID | `Qwen/Qwen2-1.5B` |
+| Revision | `8a16abf2848eda07cc5253dec660bf1ce007ad7a` |
+| License | `apache-2.0` |
+| Hidden size / layers | `1536 / 28` |
+| Parameter count | `1,543,714,304` |
+| Model safetensors SHA256 | `6f3a62caedc5c5278275bf5eed428806eeac8df927a3d333c3c850402c24cdeb` |
+| Backbone manifest SHA256 | `e538d044d4a4ca50e17e353e368730d54827936c8a884645f1041cb383fc78a3` |
+
+`c250893` clean checkout에서 기존 0.5B smoke와 동일한 4개 자재, seed 42,
+1 epoch로 실행했습니다. H26/H27 Episode manifest는 각각
+`41651cad878a0091f43e73865e0631bedebd487b353f2dde87113aec9711840a`,
+`62b6cde5fbd791ae6204e71d3dd64d0b057f72041d68d1a01c9cb697b1719e98`
+로 기존 기준선과 정확히 일치합니다. Receipt SHA256은
+`01e3839297837bae91652f7e0386aaef3a1757b7eb766043355a25d23da40a78`입니다.
+
+| 모델 | Horizon | WAPE | MAE | Peak GPU | Reload 최대 오차 |
+|---|---:|---:|---:|---:|---:|
+| AutoTimes | H26 | 277.2% | 19.028 | 8,484.3 MiB | 0.0 |
+| SELLM | H26 | 108.6% | 7.453 | 6,494.0 MiB | 0.0 |
+| AutoTimes | H27 | 211.2% | 14.217 | 9,026.3 MiB | 0.0 |
+| SELLM | H27 | 98.7% | 6.642 | 7,053.6 MiB | 0.0 |
+
+4-series 결과에서 1.5B가 모든 모델을 일관되게 개선한 것은 아닙니다. SELLM은
+0.5B보다 좋아졌지만 AutoTimes는 나빠졌으므로 backbone 크기만으로 모델 우위를
+판정하지 않습니다. H27은 계속 horizon 경계 진단으로만 사용합니다.
+
+### Batch size 결정
+
+H26 batch probe에서 batch 8은 AutoTimes가 24,296.2 MiB allocated,
+29,786.0 MiB reserved를 사용해 32GB GPU의 실행 여유가 부족했습니다. Batch 4는
+AutoTimes 14,165.1/17,088.0 MiB, SELLM 6,554.2/7,676.0 MiB로 안정적이어서
+256-series 확장 기준을 batch 4로 고정했습니다. Best validation state를 CPU에
+보관한 이후 AutoTimes 실행 중 GPU 사용량도 약 14.9 GiB로 유지됐습니다.
+
+### H26 256-series 수렴 결과
+
+`8d28d43` clean checkout, seed 42, batch 4에서 256개 자재를 사용했습니다. 두
+모델의 Episode manifest는
+`2be49f5c09ebc447e22363d93120f5461ebd0f09687ff80e9f81a1c834ca68bf`
+로 동일합니다. AutoTimes는 LR `1e-3`, SELLM은 LR `1e-4`를 사용했습니다.
+
+| 모델 | Epoch | Validation MAE | Validation WAPE |
+|---|---:|---:|---:|
+| AutoTimes | 1 | 5.008 | 50.3% |
+| AutoTimes | 2 | 2.631 | 26.4% |
+| AutoTimes | 3 | 2.355 | 23.7% |
+| AutoTimes | 4 | **2.090** | **21.0%** |
+| AutoTimes | 5 | 2.443 | 24.6% |
+| SELLM | 1 | 2.606 | 26.2% |
+| SELLM | 2 | 2.773 | 27.9% |
+| SELLM | 3 | 2.452 | 24.6% |
+| SELLM | 4 | 2.396 | 24.1% |
+| SELLM | 5 | **2.178** | **21.9%** |
+
+| 모델 | Test MAE | Test WAPE | 학습 시간 | Peak GPU | Checkpoint SHA256 |
+|---|---:|---:|---:|---:|---|
+| AutoTimes | 3.735 | 55.5% | 333.3s | 14,165.1 MiB | `fb13283e344537a0352619de36a01e452b5db674d9f5d04157f3236134512e89` |
+| SELLM | 4.083 | 60.7% | 61.1s | 6,554.1 MiB | `4ebc20013dc72236d0eedead4c61b8d58ed23dd25720c64a4f426c1c7bbc641a` |
+
+AutoTimes는 epoch 4가 Validation MAE·WAPE 최저점이고 epoch 5에서 악화됐으므로
+현재 고정 epoch 후보는 4입니다. SELLM은 epoch 5까지 개선이 이어져 5가 현재
+최선이지만 수렴 종료점은 아닙니다. 후속 실험에서는 SELLM만 6~10 epoch 범위를
+확인해야 합니다.
+
+SELLM은 LR `1e-3`에서 non-finite가 발생했고, `3e-4`도 1 epoch는 통과했지만
+5-epoch 실행 중 다시 실패했습니다. `1e-4`에서만 5 epoch 전체가 안정적으로
+완료됐으므로 Qwen2-1.5B SELLM 확장 기준 LR은 `1e-4`입니다. 두 최종 checkpoint는
+strict reload 예측 최대 오차 0을 확인했습니다. AutoTimes와 SELLM의 aggregate
+Receipt SHA256은 각각
+`1bbde6639b8f09051cffed78cc1b313e767cce642cf6f75ba5b5f07af585c616`,
+`db36824aa6ac783623f8e50fcaeaf7f1d3440d64afdc9c0202911397fd3aea61`
+입니다.
+
+이 단일 seed 256-series 결과는 1.5B 확장 실행 기준선이며 Production 승격
+근거는 아닙니다. 모델 선택에는 동일 조건의 0.5B 비교와 다중 seed 검증이
+추가로 필요합니다.
