@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Literal, Optional
 
@@ -59,3 +60,13 @@ class SELLMConfig(TrainingConfig):
     head_hidden_dim: int = 128
     use_norm: bool = True
     final_nonneg: bool = False
+    negative_output_penalty_weight: float = 0.0
+
+    def __post_init__(self) -> None:
+        weight = float(self.negative_output_penalty_weight)
+        if not math.isfinite(weight) or weight < 0.0:
+            raise ValueError(
+                "negative_output_penalty_weight must be finite and >= 0, "
+                f"got {self.negative_output_penalty_weight!r}"
+            )
+        self.negative_output_penalty_weight = weight

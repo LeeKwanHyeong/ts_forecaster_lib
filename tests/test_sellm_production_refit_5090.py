@@ -53,6 +53,7 @@ def _checkpoint_payload() -> dict:
             "use_time_adapter": True,
             "time_adapter_layers": 2,
             "random_seed": SEED,
+            "negative_output_penalty_weight": 0.0,
         },
         "meta": {
             **_expected_metadata(),

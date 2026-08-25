@@ -135,7 +135,11 @@ def _build_datamodule(frame: pl.DataFrame) -> IndexedTemporalDataModule:
     return module
 
 
-def _architecture(llm_local_path: Path) -> ArchitectureConfig:
+def _architecture(
+    llm_local_path: Path,
+    *,
+    negative_output_penalty_weight: float = 0.0,
+) -> ArchitectureConfig:
     return ArchitectureConfig(
         sellm=SELLMArchitectureConfig(
             architecture_variant="paper_v1",
@@ -156,11 +160,15 @@ def _architecture(llm_local_path: Path) -> ArchitectureConfig:
             time_adapter_layers=2,
             use_norm=True,
             final_nonneg=False,
+            negative_output_penalty_weight=negative_output_penalty_weight,
         )
     )
 
 
-def _expected_metadata() -> dict[str, Any]:
+def _expected_metadata(
+    *,
+    negative_output_penalty_weight: float = 0.0,
+) -> dict[str, Any]:
     return {
         "model_key": MODEL_KEY,
         "training_mode": "production_refit",
@@ -173,11 +181,16 @@ def _expected_metadata() -> dict[str, Any]:
         "batch_size": BATCH_SIZE,
         "token_len": TOKEN_LEN,
         "semantic_vocab_size": SEMANTIC_VOCAB_SIZE,
+        "negative_output_penalty_weight": negative_output_penalty_weight,
         **SELLM_TRAINER_CONTRACT.as_metadata(),
     }
 
 
-def _validate_checkpoint_payload(payload: dict[str, Any]) -> dict[str, Any]:
+def _validate_checkpoint_payload(
+    payload: dict[str, Any],
+    *,
+    negative_output_penalty_weight: float = 0.0,
+) -> dict[str, Any]:
     config = payload.get("config") or payload.get("cfg_state") or {}
     meta = payload.get("meta") or {}
     expected_config = {
@@ -192,6 +205,7 @@ def _validate_checkpoint_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "use_time_adapter": True,
         "time_adapter_layers": 2,
         "random_seed": SEED,
+        "negative_output_penalty_weight": negative_output_penalty_weight,
     }
     config_drift = {
         key: {"expected": expected, "actual": config.get(key)}
@@ -200,7 +214,9 @@ def _validate_checkpoint_payload(payload: dict[str, Any]) -> dict[str, Any]:
     }
     meta_drift = {
         key: {"expected": expected, "actual": meta.get(key)}
-        for key, expected in _expected_metadata().items()
+        for key, expected in _expected_metadata(
+            negative_output_penalty_weight=negative_output_penalty_weight
+        ).items()
         if meta.get(key) != expected
     }
     if config_drift or meta_drift:
@@ -213,7 +229,12 @@ def _validate_checkpoint_payload(payload: dict[str, Any]) -> dict[str, Any]:
         raise V100H26ContractError("final_train_loss must be finite")
     return {
         "config": expected_config,
-        "meta": {**_expected_metadata(), "final_train_loss": final_train_loss},
+        "meta": {
+            **_expected_metadata(
+                negative_output_penalty_weight=negative_output_penalty_weight
+            ),
+            "final_train_loss": final_train_loss,
+        },
     }
 
 
@@ -257,6 +278,7 @@ def _preflight(
     target_source: Path,
     input_manifest: Path,
     llm_local_path: Path,
+    negative_output_penalty_weight: float = 0.0,
 ) -> tuple[dict[str, Any], IndexedTemporalDataModule]:
     manifest = load_training_input_manifest(
         input_manifest,
@@ -298,6 +320,7 @@ def _preflight(
             "token_len": TOKEN_LEN,
             "semantic_vocab_size": SEMANTIC_VOCAB_SIZE,
             "semantic_top_k": SEMANTIC_TOP_K,
+            "negative_output_penalty_weight": negative_output_penalty_weight,
             "training_mode": "production_refit",
             "validation_enabled": False,
             "state_selection": "final_epoch",
@@ -316,11 +339,13 @@ def run_refit(
     device: str,
     num_workers: int,
     preflight_only: bool,
+    negative_output_penalty_weight: float = 0.0,
 ) -> dict[str, Any]:
     preflight, datamodule = _preflight(
         target_source=target_source,
         input_manifest=input_manifest,
         llm_local_path=llm_local_path,
+        negative_output_penalty_weight=negative_output_penalty_weight,
     )
     if preflight_only:
         return preflight
@@ -353,7 +378,12 @@ def run_refit(
                 lookback=LOOKBACK,
                 horizon=HORIZON,
                 models=[MODEL_KEY],
-                architecture=_architecture(llm_local_path),
+                architecture=_architecture(
+                    llm_local_path,
+                    negative_output_penalty_weight=(
+                        negative_output_penalty_weight
+                    ),
+                ),
                 trainer=TrainerConfig(
                     warmup_epochs=EPOCHS,
                     spike_epochs=0,
@@ -389,7 +419,10 @@ def run_refit(
             )
 
         payload = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-        checkpoint_contract = _validate_checkpoint_payload(payload)
+        checkpoint_contract = _validate_checkpoint_payload(
+            payload,
+            negative_output_penalty_weight=negative_output_penalty_weight,
+        )
         del payload, result, train_loader
         gc.collect()
         if torch.cuda.is_available():
@@ -498,6 +531,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--num-workers", type=int, default=8)
     parser.add_argument("--preflight-only", action="store_true")
+    parser.add_argument(
+        "--negative-output-penalty-weight",
+        type=float,
+        default=0.0,
+    )
     return parser
 
 
@@ -511,6 +549,9 @@ def main(argv: list[str] | None = None) -> int:
         device=str(args.device),
         num_workers=int(args.num_workers),
         preflight_only=bool(args.preflight_only),
+        negative_output_penalty_weight=float(
+            args.negative_output_penalty_weight
+        ),
     )
     print(json.dumps(receipt, ensure_ascii=True, sort_keys=True))
     return 0

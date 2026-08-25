@@ -322,6 +322,7 @@ class SELLMArchitectureConfig:
     head_hidden_dim: Optional[int] = None
     use_norm: Optional[bool] = None
     final_nonneg: Optional[bool] = None
+    negative_output_penalty_weight: Optional[float] = None
 
 
 @dataclass
@@ -633,6 +634,7 @@ _ARCHITECTURE_ALLOWED_KEYS: dict[str, set[str]] = {
         "head_hidden_dim",
         "use_norm",
         "final_nonneg",
+        "negative_output_penalty_weight",
     },
 }
 
