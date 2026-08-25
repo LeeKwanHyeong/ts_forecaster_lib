@@ -1154,6 +1154,7 @@ def _run_sellm(
                 "batch_size": getattr(train_loader, "batch_size", None),
                 "token_len": int(sellm_cfg.token_len),
                 "semantic_vocab_size": int(sellm_cfg.semantic_vocab_size),
+                "final_nonneg": bool(sellm_cfg.final_nonneg),
                 "negative_output_penalty_weight": float(
                     sellm_cfg.negative_output_penalty_weight
                 ),

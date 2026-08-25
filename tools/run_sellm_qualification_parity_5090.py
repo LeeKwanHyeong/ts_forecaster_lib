@@ -111,6 +111,7 @@ def _checkpoint_contract(
     payload: dict[str, Any],
     *,
     negative_output_penalty_weight: float = 0.0,
+    final_nonneg: bool = False,
 ) -> dict[str, Any]:
     meta = payload.get("meta") or {}
     expected = {
@@ -122,6 +123,7 @@ def _checkpoint_contract(
         "random_seed": SEED,
         "batch_size": BATCH_SIZE,
         "negative_output_penalty_weight": negative_output_penalty_weight,
+        "final_nonneg": final_nonneg,
         **SELLM_TRAINER_CONTRACT.as_metadata(),
     }
     drift = {
@@ -145,6 +147,7 @@ def run_parity(
     device: str,
     num_workers: int,
     negative_output_penalty_weight: float = 0.0,
+    final_nonneg: bool = False,
 ) -> dict[str, Any]:
     if output_root.exists():
         raise V100H26ContractError(
@@ -198,6 +201,7 @@ def run_parity(
                 negative_output_penalty_weight=(
                     negative_output_penalty_weight
                 ),
+                final_nonneg=final_nonneg,
             ),
             trainer=TrainerConfig(
                 warmup_epochs=EPOCHS,
@@ -237,6 +241,7 @@ def run_parity(
     checkpoint_contract = _checkpoint_contract(
         checkpoint_payload,
         negative_output_penalty_weight=negative_output_penalty_weight,
+        final_nonneg=final_nonneg,
     )
     predictor = load_predictor(str(checkpoint_path), device=device, strict=True)
     metrics, raw, target, inference_seconds = _evaluate(
@@ -250,7 +255,9 @@ def run_parity(
         <= metrics["raw_negative_rate"]
         <= RAW_NEGATIVE_RATE_RANGE[1]
     )
-    baseline_run = negative_output_penalty_weight == 0.0
+    baseline_run = (
+        negative_output_penalty_weight == 0.0 and not final_nonneg
+    )
     parity_pass = (
         metrics["raw_nonfinite_count"] == 0
         and (
@@ -292,6 +299,7 @@ def run_parity(
             "validation_enabled": True,
             "state_selection": "best_validation",
             "negative_output_penalty_weight": negative_output_penalty_weight,
+            "final_nonneg": final_nonneg,
             **SELLM_TRAINER_CONTRACT.as_metadata(),
         },
         "checkpoint": {
@@ -343,6 +351,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.0,
     )
+    parser.add_argument("--final-nonneg", action="store_true")
     return parser
 
 
@@ -358,6 +367,7 @@ def main(argv: list[str] | None = None) -> int:
         negative_output_penalty_weight=float(
             args.negative_output_penalty_weight
         ),
+        final_nonneg=bool(args.final_nonneg),
     )
     print(json.dumps(receipt, ensure_ascii=True, sort_keys=True))
     return 0
