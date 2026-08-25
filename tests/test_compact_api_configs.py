@@ -277,6 +277,8 @@ def test_train_accepts_family_architecture_overrides(monkeypatch, tmp_path):
                 architecture_variant="paper_v1",
                 llm_source="local",
                 llm_local_path="/models/Qwen2-0.5B",
+                output_head_mode="zero_inflated_softplus",
+                output_head_hidden_dim=16,
             ),
             titan=TitanArchitectureConfig(d_model=512),
         ),
@@ -300,6 +302,8 @@ def test_train_accepts_family_architecture_overrides(monkeypatch, tmp_path):
             "architecture_variant": "paper_v1",
             "llm_source": "local",
             "llm_local_path": "/models/Qwen2-0.5B",
+            "output_head_mode": "zero_inflated_softplus",
+            "output_head_hidden_dim": 16,
         },
     }
 

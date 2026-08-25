@@ -215,7 +215,10 @@ def _tiny_timemixer_architecture() -> ArchitectureConfig:
     )
 
 
-def _tiny_sellm_architecture() -> ArchitectureConfig:
+def _tiny_sellm_architecture(
+    *,
+    output_head_mode: str | None = None,
+) -> ArchitectureConfig:
     return ArchitectureConfig(
         sellm=SELLMArchitectureConfig(
             architecture_variant="paper_v1",
@@ -235,6 +238,8 @@ def _tiny_sellm_architecture() -> ArchitectureConfig:
             head_hidden_dim=8,
             use_norm=False,
             final_nonneg=False,
+            output_head_mode=output_head_mode,
+            output_head_hidden_dim=4 if output_head_mode is not None else None,
         )
     )
 
@@ -489,6 +494,57 @@ def test_public_exotst_penalty_train_checkpoint_strict_load(tmp_path: Path):
     assert predictor.model.cfg.negative_output_penalty_weight == 0.1
     prediction = predictor.predict(_prediction_payload("exotst_base"))
     assert np.isfinite(np.asarray(prediction["point"])).all()
+
+
+def test_public_sellm_positive_head_train_checkpoint_strict_load(tmp_path: Path):
+    torch.manual_seed(23)
+    np.random.seed(23)
+    artifact_dir = tmp_path / "sellm-positive"
+
+    result = train(
+        TrainRequest(
+            data=_data_request(None),
+            models=["sellm_base"],
+            trainer=TrainerConfig(
+                epochs=1,
+                lr=1e-3,
+                use_intermittent=False,
+                val_use_weights=False,
+            ),
+            ssl=SSLConfig(mode="sl_only"),
+            runtime=RuntimeConfig(device="cpu"),
+            artifacts=ArtifactConfig(
+                save_dir=str(artifact_dir),
+                auto_save_dir=False,
+            ),
+            architecture=_tiny_sellm_architecture(
+                output_head_mode="zero_inflated_softplus"
+            ),
+        )
+    )
+
+    assert result.primary_ckpt_path is not None
+    checkpoint = torch.load(
+        result.primary_ckpt_path,
+        map_location="cpu",
+        weights_only=False,
+    )
+    assert checkpoint["config"]["output_head_mode"] == "zero_inflated_softplus"
+    assert checkpoint["meta"]["output_head_mode"] == "zero_inflated_softplus"
+    assert checkpoint["meta"]["output_head_hidden_dim"] == 4
+
+    predictor = load_predictor(
+        result.primary_ckpt_path,
+        device="cpu",
+        strict=True,
+    )
+    prediction = np.asarray(
+        predictor.predict(_prediction_payload("sellm_base"))["point"]
+    )
+
+    assert predictor.model.output_head_mode == "zero_inflated_softplus"
+    assert np.isfinite(prediction).all()
+    assert (prediction >= 0.0).all()
 
 
 REMAINING_ARTIFACT_SMOKE_CASES = [

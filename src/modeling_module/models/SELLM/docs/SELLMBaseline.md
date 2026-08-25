@@ -531,3 +531,35 @@ Qwen2-1.5B remains available only for isolated research comparisons.
 
 This selects the LLM backbone contract; it does not change the rejected SELLM
 production-checkpoint decision above.
+
+## Count-aware positive output candidate
+
+The maintained `paper_v1` architecture now exposes an opt-in output contract
+for the next non-negative forecast experiment. `output_head_mode` accepts:
+
+- `identity`: the default and exact historical `paper_v1` behavior.
+- `softplus`: the parameter-free candidate already rejected by the multi-seed
+  bias result above, retained as a reproducible comparison.
+- `zero_inflated_softplus`: a count-aware point-expectation candidate.
+
+The zero-inflated candidate computes a positive magnitude with Softplus and
+multiplies it by a learned nonzero-demand probability. The occurrence gate
+uses four history features per series: log mean demand, log last demand,
+zero-demand ratio, and scale-normalized recent trend. The result is applied
+only after normalization has been reversed, so both the gate and magnitude
+operate in demand coordinates.
+
+This extension does not change the semantic vocabulary, two-stage Time
+Adapter, TSCC, token decoder, or autoregressive rollout equations. A checkpoint
+without the new fields reconstructs `output_head_mode="identity"` and retains
+the original parameter count, state-dict schema, output, and strict-load
+behavior. The count-aware mode alone adds `positive_output_head.*` parameters;
+its config and checkpoint metadata record the selected mode and gate settings.
+
+`final_nonneg=True` and a non-identity output mode cannot be combined.
+Likewise, the negative-output penalty cannot be combined with a positive head,
+because both would constrain the same demand-space boundary.
+
+The implementation is a research candidate, not an approved production
+architecture. It must pass the sealed Qwen2-0.5B H26 seed 11/22/33 gate before
+Production refit, Wheel promotion, Demand Engine registration, or runtime use.
