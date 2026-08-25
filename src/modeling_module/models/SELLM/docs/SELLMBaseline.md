@@ -563,3 +563,34 @@ because both would constrain the same demand-space boundary.
 The implementation is a research candidate, not an approved production
 architecture. It must pass the sealed Qwen2-0.5B H26 seed 11/22/33 gate before
 Production refit, Wheel promotion, Demand Engine registration, or runtime use.
+
+### Seed-42 output-head pilot
+
+Commit `b0e3e15` ran the three output modes on the RTX 5090 with the same
+Qwen2-0.5B backbone, sealed H26 256-series Episode, seed 42, batch 4, five
+epochs, and learning rate `1e-4`. All checkpoints passed strict reload with
+maximum prediction delta `0.0`.
+
+| Output mode | MAE | WAPE | sMAPE | Bias | Raw negative rate | Train seconds | Peak GPU |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `identity` | 3.9768 | 59.09% | 81.57% | +3.59% | 16.77% | 46.87 | 2,844.35 MiB |
+| `softplus` | **3.2089** | **47.68%** | **76.74%** | +12.55% | 0.00% | **45.88** | 2,844.35 MiB |
+| `zero_inflated_softplus` | 3.8939 | 57.86% | 85.58% | +29.78% | 0.00% | 48.24 | 2,844.36 MiB |
+
+Softplus improved MAE and WAPE by 19.31% and sMAPE by 5.92% relative to the
+identity baseline, but exceeded the absolute-bias gate of 10%. The initial
+zero-inflated candidate improved MAE and WAPE by only 2.08%, worsened sMAPE by
+4.92%, and substantially overforecast. Its learned occurrence branch therefore
+does not yet provide the intended zero-demand calibration.
+
+Neither positive mode advances directly to the seed 11/22/33 run. Softplus is
+the better follow-up candidate, but it first needs a bias-calibration boundary
+that is selected inside the training/validation contract. The current
+zero-inflated gate requires redesign or stronger occurrence supervision before
+another full Qualification.
+
+The sealed comparison receipt is
+`SELLMOutputHeadSeed42Qualification.json` with receipt SHA256
+`9a575b3f00713dcf61defb269a7de1d056e7d2dba2213d1d030a09d8fdde2cbd`.
+The RTX 5090 artifact root is
+`/home/leekwanhyeong/artifacts/sellm/output-head-seed42/b0e3e15`.
