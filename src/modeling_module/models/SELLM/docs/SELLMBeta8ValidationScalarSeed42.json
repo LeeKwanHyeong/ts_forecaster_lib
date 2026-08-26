@@ -1,0 +1,76 @@
+{
+  "artifacts": {
+    "checkpoint_sha256": "c0e23ec9526a838eb88080d2e63ccf097ffc14ba3b1a9c5ed9638aac1848113e",
+    "qualification_receipt_sha256": "1c808c7a77bf5a42a3e97b3e4c94da5d998e3b9a11a416842214a3dfa3239cf4",
+    "result_receipt_sha256": "63041ca38e3e776730e0e39ae9fc29ca0cdcbc0e17c81109bbe13af2070e3afa",
+    "root": "/home/leekwanhyeong/artifacts/sellm/softplus-beta8-calibration-seed42/cd5988e"
+  },
+  "baseline": {
+    "bias": 0.10017638179512442,
+    "mae": 3.037184496280107,
+    "raw_negative_rate": 0.0,
+    "smape": 0.6629968406402491,
+    "wape": 0.45131943220308074
+  },
+  "calibration": {
+    "clipped_to_bounds": false,
+    "episode_count": 256,
+    "fitted": true,
+    "max_scale": 1.5,
+    "min_scale": 0.5,
+    "mode": "validation_scalar",
+    "point_count": 6656,
+    "scale": 1.0498315748161575,
+    "source_fingerprint": "0b475c0aa6dd06b7fab7cdd96b5664488c212bfe1c9b40eceec417671df3bece",
+    "source_split": "validation",
+    "validation_bias_after": 0.0,
+    "validation_bias_before": -0.04746625650393858
+  },
+  "conditions": {
+    "batch_size": 4,
+    "epochs": 5,
+    "horizon": 26,
+    "learning_rate": 0.0001,
+    "model_key": "sellm_base",
+    "sample_series": 256,
+    "seed": 42,
+    "softplus_beta": 8.0
+  },
+  "contract": "modeling_module.sellm_beta8_validation_scalar_seed42.v1",
+  "decision": {
+    "advance_to_multiseed": false,
+    "reason": "Validation and test bias have opposite directions; the global scalar worsens both test MAE and positive bias.",
+    "status": "REJECT"
+  },
+  "episode_manifest_hash": "2be49f5c09ebc447e22363d93120f5461ebd0f09687ff80e9f81a1c834ca68bf",
+  "gates": {
+    "absolute_bias_within_10_percent": false,
+    "mae_not_worse_than_beta8": false,
+    "mae_not_worse_than_identity": true,
+    "raw_negative_rate_is_zero": true,
+    "strict_checkpoint_reload": true
+  },
+  "parity": {
+    "added_state_keys": [
+      "output_calibrator.scale"
+    ],
+    "max_shared_state_delta": 0.0,
+    "shared_state_keys": 337
+  },
+  "receipt_sha256": "af861f7dfb6bfcb9af2f7daa082e7f5ada9579cad4bdd345fd9ad4dda5110a12",
+  "result": {
+    "bias": 0.15499996323336443,
+    "delta_vs_uncalibrated": {
+      "bias_percentage_points": 5.482358143824001,
+      "mae_percent": 9.702835001818023
+    },
+    "mae": 3.331877496654964,
+    "peak_reserved_mib": 2872.0,
+    "raw_negative_rate": 0.0,
+    "reload_max_abs_delta": 0.0,
+    "smape": 0.678009110365523,
+    "training_seconds": 48.15423893008847,
+    "wape": 0.4951102120408876
+  },
+  "source_commit": "cd5988e844a84f62f426eaf41ff14d096d27a821"
+}

@@ -625,3 +625,42 @@ SHA256
 `91c5f86852e0739573f73d4e6dfb34312dd3775f9f73deecc90fd81c01cd4d40`.
 The RTX 5090 artifact root is
 `/home/leekwanhyeong/artifacts/sellm/softplus-beta-sweep-seed42/0cbe6f6`.
+
+### Beta-8 validation-scalar seed-42 result
+
+Commit `cd5988e` added an opt-in `validation_scalar` output calibration for
+SELLM ICL. It is fitted only after the best-validation model state is restored.
+Every calibration batch must carry the `validation` split label; a train or
+test episode fails immediately. The fitted scale, bounds, validation source
+fingerprint, and fitted state are sealed in config, checkpoint metadata, and
+the `output_calibrator.scale` state-dict buffer. The default `none` mode keeps
+the preceding output and state-dict contracts unchanged.
+
+The seed-42 pilot reused the exact beta-8 conditions and Episode manifest
+`2be49f5c09ebc447e22363d93120f5461ebd0f09687ff80e9f81a1c834ca68bf`.
+The 256 validation episodes had bias `-4.7466%`, so aggregate level matching
+fitted scale `1.0498315748`. Validation bias became zero, but the separately
+held test episodes already had positive bias. Applying the validation scale
+therefore increased test bias instead of reducing it.
+
+| Candidate | MAE | WAPE | sMAPE | Bias | Raw negative rate |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Beta 8, no calibration | **3.0372** | **45.13%** | **66.30%** | +10.0176% | 0.00% |
+| Beta 8, validation scalar | 3.3319 | 49.51% | 67.80% | +15.5000% | 0.00% |
+
+Calibration worsened MAE by `9.70%` and bias by `5.48` percentage points. It
+still beats the identity MAE, remains non-negative, and reloads with maximum
+prediction delta `0.0`, but it fails both the beta-8 MAE non-regression gate
+and the absolute-bias limit of 10%. It does not advance to seeds 11/22/33.
+
+The shared 337 learned state entries are bit-identical to the uncalibrated
+beta-8 checkpoint; the only added state entry is the calibration buffer. This
+isolates the regression to cohort drift between validation and test, rather
+than retraining or checkpoint restoration. A single global scalar is therefore
+rejected for this candidate. A future correction must condition on observable
+history or horizon and must be selected within rolling validation before
+another sealed test evaluation.
+
+The sealed result is `SELLMBeta8ValidationScalarSeed42.json`. RTX 5090
+artifacts are under
+`/home/leekwanhyeong/artifacts/sellm/softplus-beta8-calibration-seed42/cd5988e`.
