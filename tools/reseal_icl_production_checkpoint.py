@@ -51,9 +51,11 @@ def state_dict_sha256(state_dict: Mapping[str, torch.Tensor]) -> str:
 def synchronize_production_config(
     checkpoint: Mapping[str, Any],
     *,
+    expected_model_key: str,
     learning_rate: float,
     weight_decay: float,
     max_grad_norm: float,
+    backbone_contract: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return a checkpoint copy whose restore config matches sealed refit metadata."""
 
@@ -62,7 +64,7 @@ def synchronize_production_config(
     if not isinstance(meta, Mapping):
         raise ValueError("Checkpoint meta is missing.")
     required = {
-        "model_key": "autotimes_base",
+        "model_key": expected_model_key,
         "training_mode": "production_refit",
         "validation_enabled": False,
         "state_selection": "final_epoch",
@@ -93,9 +95,35 @@ def synchronize_production_config(
             "random_seed": random_seed,
         }
     )
+    if backbone_contract is not None:
+        model_id = str(backbone_contract.get("model_id") or "").strip()
+        revision = str(backbone_contract.get("revision") or "").strip()
+        if not model_id or not revision:
+            raise ValueError("Backbone contract must contain model_id and revision.")
+        corrected_config["llm_model_name"] = model_id
+        corrected_config["llm_revision"] = revision
     payload["config"] = corrected_config
     payload["cfg_state"] = dict(corrected_config)
+    if backbone_contract is not None:
+        corrected_meta = dict(meta)
+        corrected_meta["backbone_contract"] = dict(backbone_contract)
+        payload["meta"] = corrected_meta
     return payload
+
+
+def load_backbone_contract(path: Path) -> dict[str, Any]:
+    """Load and verify a local backbone manifest before sealing it."""
+
+    manifest = json.loads(path.expanduser().resolve().read_text(encoding="utf-8"))
+    claimed_sha = str(manifest.get("manifest_sha256") or "")
+    unsigned = dict(manifest)
+    unsigned.pop("manifest_sha256", None)
+    if not claimed_sha or _payload_sha256(unsigned) != claimed_sha:
+        raise ValueError("Backbone manifest seal is invalid.")
+    for key in ("model_id", "revision"):
+        if not str(manifest.get(key) or "").strip():
+            raise ValueError(f"Backbone manifest {key!r} is missing.")
+    return manifest
 
 
 def reseal_checkpoint(
@@ -104,9 +132,11 @@ def reseal_checkpoint(
     *,
     source_receipt: Path,
     receipt_path: Path,
+    expected_model_key: str,
     learning_rate: float,
     weight_decay: float,
     max_grad_norm: float,
+    backbone_contract: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Write a corrected checkpoint and a sealed correction receipt."""
 
@@ -126,9 +156,11 @@ def reseal_checkpoint(
     original_state_hash = state_dict_sha256(original["state_dict"])
     corrected = synchronize_production_config(
         original,
+        expected_model_key=expected_model_key,
         learning_rate=learning_rate,
         weight_decay=weight_decay,
         max_grad_norm=max_grad_norm,
+        backbone_contract=backbone_contract,
     )
     corrected_meta = dict(corrected["meta"])
     corrected_meta["metadata_correction"] = {
@@ -156,6 +188,7 @@ def reseal_checkpoint(
     result = {
         "contract": CONTRACT,
         "status": "PASS",
+        "model_key": expected_model_key,
         "source_checkpoint": {
             "path": str(source),
             "sha256": actual_source_sha,
@@ -193,6 +226,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--source-receipt", type=Path, required=True)
     parser.add_argument("--destination-checkpoint", type=Path, required=True)
     parser.add_argument("--receipt", type=Path, required=True)
+    parser.add_argument("--model-key", default="autotimes_base")
+    parser.add_argument("--backbone-manifest", type=Path)
     parser.add_argument("--learning-rate", type=float, default=1e-3)
     parser.add_argument("--weight-decay", type=float, default=0.0)
     parser.add_argument("--max-grad-norm", type=float, default=1.0)
@@ -201,14 +236,21 @@ def _parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = _parser().parse_args()
+    backbone_contract = (
+        None
+        if args.backbone_manifest is None
+        else load_backbone_contract(args.backbone_manifest)
+    )
     result = reseal_checkpoint(
         args.source_checkpoint,
         args.destination_checkpoint,
         source_receipt=args.source_receipt,
         receipt_path=args.receipt,
+        expected_model_key=args.model_key,
         learning_rate=args.learning_rate,
         weight_decay=args.weight_decay,
         max_grad_norm=args.max_grad_norm,
+        backbone_contract=backbone_contract,
     )
     print(json.dumps(result, ensure_ascii=True, sort_keys=True))
 
