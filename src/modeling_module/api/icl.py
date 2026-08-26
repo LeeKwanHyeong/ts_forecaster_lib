@@ -26,6 +26,7 @@ class ICLForecastRuntimeConfig:
     num_workers: int = 0
     device: str | None = None
     pin_memory: bool = False
+    llm_local_path: str | Path | None = None
 
     def __post_init__(self) -> None:
         if int(self.batch_size) <= 0:
@@ -96,6 +97,11 @@ def forecast_icl(request: ICLForecastRequest) -> ICLForecastResult:
         str(request.checkpoint_path),
         device=device,
         strict=True,
+        config_overrides=(
+            None
+            if request.runtime.llm_local_path is None
+            else {"llm_local_path": request.runtime.llm_local_path}
+        ),
     )
     if request.expected_model_key is not None:
         expected = str(request.expected_model_key).strip()
@@ -122,6 +128,11 @@ def forecast_icl(request: ICLForecastRequest) -> ICLForecastResult:
         pin_memory=bool(request.runtime.pin_memory),
     )
     loader = module.loader(split, shuffle=False)
+    split_episodes = bundle.for_split(split)
+    if split is ICLSplit.INFERENCE and any(
+        item.query_target_observed for item in split_episodes
+    ):
+        raise ValueError("ICL inference split contains an observed future target.")
     episode_by_id = {episode.episode_id: episode for episode in bundle.for_split(split)}
     rows: list[dict[str, object]] = []
     predictor.model.eval()

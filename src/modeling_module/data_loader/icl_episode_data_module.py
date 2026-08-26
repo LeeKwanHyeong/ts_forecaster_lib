@@ -29,6 +29,7 @@ class ICLBatch:
     demonstration_contexts: torch.Tensor
     demonstration_targets: torch.Tensor
     prompt_mask: torch.Tensor
+    query_target_observed: torch.Tensor
     query_context_exogenous: torch.Tensor | None = None
     query_target_exogenous: torch.Tensor | None = None
     demonstration_context_exogenous: torch.Tensor | None = None
@@ -45,6 +46,7 @@ class ICLBatch:
             demonstration_contexts=self.demonstration_contexts.to(device),
             demonstration_targets=self.demonstration_targets.to(device),
             prompt_mask=self.prompt_mask.to(device),
+            query_target_observed=self.query_target_observed.to(device),
             query_context_exogenous=_move_optional(
                 self.query_context_exogenous,
                 device,
@@ -207,6 +209,10 @@ def collate_icl_episodes(episodes: Sequence[ICLEpisode]) -> ICLBatch:
         demonstration_contexts=prompt_contexts,
         demonstration_targets=prompt_targets,
         prompt_mask=prompt_mask,
+        query_target_observed=torch.tensor(
+            [item.query_target_observed for item in episodes],
+            dtype=torch.bool,
+        ),
         query_context_exogenous=query_context_exogenous,
         query_target_exogenous=query_target_exogenous,
         demonstration_context_exogenous=prompt_context_exogenous,

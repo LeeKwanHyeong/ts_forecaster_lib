@@ -31,6 +31,10 @@ from modeling_module.icl.exogenous_builder import (
     ExogenousICLBuilderConfig,
     ExogenousICLDatasetBuilder,
 )
+from modeling_module.icl.inference_builder import (
+    ExogenousICLInferenceBuilder,
+    ICLInferenceBuilderConfig,
+)
 from modeling_module.icl.model_adapters import (
     AutoTimesICLAdapter,
     AutoTimesICLInput,
@@ -41,6 +45,7 @@ from modeling_module.icl.training import (
     ICLTrainerConfig,
     ICLTrainingResult,
     fit_icl_model,
+    save_icl_production_checkpoint,
 )
 
 __all__ = [
@@ -67,6 +72,8 @@ __all__ = [
     "EndogenousICLDatasetBuilder",
     "ExogenousICLBuilderConfig",
     "ExogenousICLDatasetBuilder",
+    "ExogenousICLInferenceBuilder",
+    "ICLInferenceBuilderConfig",
     "AutoTimesICLAdapter",
     "AutoTimesICLInput",
     "SELLMICLAdapter",
@@ -74,4 +81,5 @@ __all__ = [
     "ICLTrainerConfig",
     "ICLTrainingResult",
     "fit_icl_model",
+    "save_icl_production_checkpoint",
 ]

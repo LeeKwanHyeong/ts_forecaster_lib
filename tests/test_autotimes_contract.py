@@ -153,7 +153,118 @@ def test_autotimes_registry_contract():
     assert spec.family == "autotimes"
     assert spec.exogenous_policy == "none"
     assert spec.fusion_strategy == "frozen_llm_numeric_tokens"
-    assert "autotimes_base" not in PRODUCTION_REFIT_ARTIFACT_KEYS
+    assert spec.operational_admission_status == "approved_by_exception"
+    assert "qualification remains FAIL" in spec.operational_admission_note
+    assert "autotimes_base" in PRODUCTION_REFIT_ARTIFACT_KEYS
+    sellm = get_model_spec("sellm_base")
+    assert sellm.operational_admission_status == "approved_by_exception"
+    assert "qualification remains FAIL" in sellm.operational_admission_note
+
+    approval_path = Path(__file__).parents[1] / (
+        "docs/ICLOperationalExceptionApproval.json"
+    )
+    approval = json.loads(approval_path.read_text(encoding="utf-8"))
+    claimed_sha = approval.pop("contract_sha256")
+    actual_sha = hashlib.sha256(
+        json.dumps(
+            approval,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
+    assert actual_sha == claimed_sha
+    assert {
+        (item["model_key"], item["qualification_status"], item["status"])
+        for item in approval["models"]
+    } == {
+        ("sellm_base", "FAIL", "approved_by_exception"),
+        ("autotimes_base", "FAIL", "approved_by_exception"),
+    }
+
+
+def test_icl_qwen_runtime_path_override_requires_sealed_identity(
+    tmp_path: Path,
+):
+    revision = "91d2aff3f957f99e4c74c962f2f408dcc88a18d8"
+    config = AutoTimesConfig(
+        lookback=52,
+        horizon=26,
+        token_len=13,
+        backbone_type="mock",
+        hidden_size=8,
+        mock_layers=1,
+        mock_heads=2,
+        mlp_hidden_dim=8,
+        llm_model_name="Qwen/Qwen2-0.5B",
+        llm_revision=revision,
+    )
+    model = AutoTimesModel(config)
+    checkpoint_path = tmp_path / "autotimes.pt"
+    qwen_path = tmp_path / "Qwen2-0.5B"
+    qwen_path.mkdir()
+    manifest = {
+        "contract": "qwen-local-backbone.v1",
+        "model_id": "Qwen/Qwen2-0.5B",
+        "revision": revision,
+        "files": {},
+    }
+    encoded = json.dumps(
+        manifest,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    manifest["manifest_sha256"] = hashlib.sha256(encoded).hexdigest()
+    (qwen_path / "backbone-manifest.json").write_text(
+        json.dumps(manifest),
+        encoding="utf-8",
+    )
+    save_model(
+        model,
+        model.cfg,
+        str(checkpoint_path),
+        extra_meta={
+            "model_key": "autotimes_base",
+            "family_key": "autotimes",
+            "backbone_contract": {
+                "model_id": "Qwen/Qwen2-0.5B",
+                "revision": revision,
+                "manifest_sha256": manifest["manifest_sha256"],
+            },
+        },
+    )
+
+    predictor = load_predictor(
+        str(checkpoint_path),
+        device="cpu",
+        strict=True,
+        config_overrides={"llm_local_path": qwen_path},
+    )
+    assert Path(predictor.config["llm_local_path"]) == qwen_path.resolve()
+
+    manifest["revision"] = "different-revision"
+    payload = dict(manifest)
+    payload.pop("manifest_sha256")
+    manifest["manifest_sha256"] = hashlib.sha256(
+        json.dumps(
+            payload,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
+    (qwen_path / "backbone-manifest.json").write_text(
+        json.dumps(manifest),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="runtime Qwen identity differ"):
+        load_predictor(
+            str(checkpoint_path),
+            device="cpu",
+            strict=True,
+            config_overrides={"llm_local_path": qwen_path},
+        )
 
 
 def test_autotimes_icl_exogenous_config_requires_enabled_sha256_contract():

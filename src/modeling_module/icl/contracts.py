@@ -27,6 +27,7 @@ class ICLSplit(str, Enum):
     TRAIN = "train"
     VALIDATION = "validation"
     TEST = "test"
+    INFERENCE = "inference"
 
 
 class ICLPromptKind(str, Enum):
@@ -220,6 +221,7 @@ class ICLEpisode:
     query_context: ICLWindow
     query_target: ICLWindow
     demonstrations: tuple[ICLDemonstration, ...]
+    query_target_observed: bool = True
 
     def __post_init__(self) -> None:
         if not self.episode_id.strip():
@@ -234,6 +236,14 @@ class ICLEpisode:
             raise ICLContractError("Query context and target dimensions must match.")
         if not self.demonstrations:
             raise ICLContractError("An ICL episode requires at least one demonstration.")
+        if self.split is ICLSplit.INFERENCE and self.query_target_observed:
+            raise ICLContractError(
+                "Inference episodes must mark query_target_observed=False."
+            )
+        if self.split is not ICLSplit.INFERENCE and not self.query_target_observed:
+            raise ICLContractError(
+                "Only inference episodes may contain an unobserved query target."
+            )
 
         occupied: list[tuple[int, int, str]] = []
         for demonstration in self.demonstrations:
@@ -273,7 +283,7 @@ class ICLEpisode:
         return sha256_payload(self.to_payload())
 
     def to_payload(self) -> dict[str, Any]:
-        return {
+        payload = {
             "contract_id": ICL_EPISODE_CONTRACT_ID,
             "contract_version": ICL_EPISODE_CONTRACT_VERSION,
             "episode_id": self.episode_id,
@@ -284,6 +294,10 @@ class ICLEpisode:
             "query_target": self.query_target.to_payload(),
             "demonstrations": [item.to_payload() for item in self.demonstrations],
         }
+        # Omit the legacy default so existing qualification episode hashes remain stable.
+        if not self.query_target_observed:
+            payload["query_target_observed"] = False
+        return payload
 
 
 @dataclass(frozen=True)
@@ -331,8 +345,17 @@ class ICLManifest:
         ordered = tuple(episodes)
         split_counts = {
             split.value: sum(item.split is split for item in ordered)
-            for split in ICLSplit
+            for split in (
+                ICLSplit.TRAIN,
+                ICLSplit.VALIDATION,
+                ICLSplit.TEST,
+            )
         }
+        inference_count = sum(
+            item.split is ICLSplit.INFERENCE for item in ordered
+        )
+        if inference_count:
+            split_counts[ICLSplit.INFERENCE.value] = inference_count
         episode_hashes = tuple(item.episode_hash for item in ordered)
         payload = {
             "contract_id": ICL_MANIFEST_CONTRACT_ID,

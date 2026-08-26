@@ -315,3 +315,25 @@ SHA256 seal은
 registry 등록과 5090 Runtime 변경을 수행하지 않습니다. 다음 검증은 AutoTimes의
 seed 민감도·과대예측 완화와 SELLM의 count-aware 또는 양수 출력 head를 별도
 후보로 구현한 뒤 같은 gate를 재사용해야 합니다.
+
+## 2026-08-26 운영 예외 승인
+
+위 Qualification 결과와 FAIL 판정은 변경하지 않습니다. 다만 사용자 명시적
+승인에 따라 AutoTimes와 SELLM을 `approved_by_exception` 상태로 운영 반영할 수
+있도록 별도 계약을 추가했습니다. 이 상태는 정확도 기준을 통과했다는 의미가
+아니며, 기존 편향·seed 안정성·음수 출력 위험을 그대로 유지합니다.
+
+운영 설정은 Qwen2-0.5B revision
+`91d2aff3f957f99e4c74c962f2f408dcc88a18d8`을 공통 backbone으로 사용합니다.
+SELLM은 `paper_v1`, Token13, K256, identity head를 사용하고 AutoTimes는 기존
+Qualification 기준의 Token2, seed 42, 5 epoch를 사용합니다. 상세 설정과 위험,
+승인 근거는 `docs/ICLOperationalExceptionApproval.json`에 봉인했습니다.
+AutoTimes의 production batch는 4, Episode stride는 26, learning rate는
+`1e-3`으로 고정합니다.
+
+AutoTimes production-refit은 Validation 없이 마지막 epoch를 저장합니다. 전체
+적격 series 수와 202509 데이터 상한이 Episode manifest와 맞지 않으면 checkpoint
+저장을 거부합니다. 운영 추론 Episode는 활성 자재만 포함하며, L52 관측값과
+W0-W25의 달력·Lifecycle/Warranty 특성, 정확히 두 개의 과거 demonstration을
+사용합니다. 미래 수요 정답은 입력하지 않으며 Qwen 경로는 Runtime에서 주입하되
+checkpoint에 봉인된 model ID, revision 및 manifest와 일치해야 합니다.

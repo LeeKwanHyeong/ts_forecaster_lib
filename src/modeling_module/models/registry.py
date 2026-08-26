@@ -30,6 +30,27 @@ class ModelSpec:
     exogenous_policy: str = "none"
     exogenous_inputs: tuple[str, ...] = ()
     fusion_strategy: Optional[str] = None
+    operational_admission_status: str = "not_assessed"
+    operational_admission_note: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        supported = {
+            "not_assessed",
+            "qualified",
+            "approved_by_exception",
+        }
+        if self.operational_admission_status not in supported:
+            raise ValueError(
+                "unsupported operational admission status: "
+                f"{self.operational_admission_status!r}"
+            )
+        if (
+            self.operational_admission_status == "approved_by_exception"
+            and not str(self.operational_admission_note or "").strip()
+        ):
+            raise ValueError(
+                "approved_by_exception requires an operational admission note"
+            )
 
     def load_builder(self) -> Callable[..., Any]:
         module = import_module(self.builder_module)
@@ -270,6 +291,11 @@ MODEL_SPECS: dict[str, ModelSpec] = {
         checkpoint_aliases=("AutoTimes", "AutoTimesBase"),
         exogenous_policy="none",
         fusion_strategy="frozen_llm_numeric_tokens",
+        operational_admission_status="approved_by_exception",
+        operational_admission_note=(
+            "User-approved operational admission on 2026-08-26; the sealed "
+            "multi-seed qualification remains FAIL for seed stability and bias."
+        ),
     ),
 }
 
@@ -286,6 +312,11 @@ if SELLM_AVAILABLE:
         exogenous_policy="optional",
         exogenous_inputs=("future_cont",),
         fusion_strategy="semantic_future_conditioning",
+        operational_admission_status="approved_by_exception",
+        operational_admission_note=(
+            "User-approved operational admission on 2026-08-26; the sealed "
+            "qualification remains FAIL for output stability and bias."
+        ),
     )
 
 
@@ -386,6 +417,7 @@ PRODUCTION_REFIT_ARTIFACT_KEYS: tuple[str, ...] = (
     "exotst_base",
     "patchtst_exogenous",
     "timexer_base",
+    "autotimes_base",
 )
 
 if SELLM_AVAILABLE:

@@ -91,6 +91,9 @@ def _episode_from_payload(payload: Mapping[str, Any]) -> ICLEpisode:
         query_context=_window_from_payload(payload["query_context"]),
         query_target=_window_from_payload(payload["query_target"]),
         demonstrations=demonstrations,
+        query_target_observed=bool(
+            payload.get("query_target_observed", True)
+        ),
     )
 
 

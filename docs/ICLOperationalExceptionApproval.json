@@ -1,0 +1,56 @@
+{
+  "approval": {
+    "approved_at": "2026-08-26",
+    "authority": "explicit_user_instruction",
+    "scope": "operational_admission_before_model_improvement",
+    "status": "approved_by_exception"
+  },
+  "contract_id": "dsio.forecaster.icl_operational_exception",
+  "contract_version": "1.0.0",
+  "models": [
+    {
+      "configuration": {
+        "backbone_model_id": "Qwen/Qwen2-0.5B",
+        "backbone_revision": "91d2aff3f957f99e4c74c962f2f408dcc88a18d8",
+        "icl_enabled": true,
+        "output_head_mode": "identity",
+        "semantic_vocab_size": 256,
+        "token_len": 13,
+        "variant": "paper_v1"
+      },
+      "known_risks": [
+        "sealed qualification remains FAIL",
+        "raw negative output requires Demand Engine clip_zero",
+        "accuracy and output stability improvement remains pending"
+      ],
+      "model_key": "sellm_base",
+      "plan_model_name": "SELLM",
+      "qualification_status": "FAIL",
+      "status": "approved_by_exception"
+    },
+    {
+      "configuration": {
+        "backbone_model_id": "Qwen/Qwen2-0.5B",
+        "backbone_revision": "91d2aff3f957f99e4c74c962f2f408dcc88a18d8",
+        "icl_enabled": true,
+        "learning_rate": 0.001,
+        "output_head_mode": "identity",
+        "production_batch_size": 4,
+        "production_epochs": 5,
+        "production_seed": 42,
+        "production_stride": 26,
+        "token_len": 2
+      },
+      "known_risks": [
+        "sealed multi-seed qualification remains FAIL",
+        "seed stability and overforecast bias improvement remains pending",
+        "production artifact must be created from all eligible data through 202509"
+      ],
+      "model_key": "autotimes_base",
+      "plan_model_name": "AutoTimes",
+      "qualification_status": "FAIL",
+      "status": "approved_by_exception"
+    }
+  ],
+  "contract_sha256": "5fec91d43c8d9813bab466f3fd790db3416768e1136282ba1fd03f7279a24287"
+}

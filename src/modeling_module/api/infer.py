@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import copy
+import hashlib
+import json
+from dataclasses import dataclass, is_dataclass, replace
+from pathlib import Path
 from typing import Any, Mapping, Optional
 
 import torch
@@ -12,7 +16,7 @@ from modeling_module._internal.checkpoint_runtime import (
     _extract_state_dict,
     _partial_load_with_shape_filter,
 )
-from modeling_module._internal.device_runtime import default_device, resolve_device
+from modeling_module._internal.device_runtime import resolve_device
 from modeling_module._internal.inference_runtime import DMSForecaster, _unpack_batch_for_export
 from modeling_module._internal.model_registry import (
     family_for_artifact_key,
@@ -42,16 +46,119 @@ def _requires_exact_unversioned_patchmixer_restore(
     return model_class in {"basemodel", "quantilemodel"}
 
 
+def _canonical_sha256(payload: Any) -> str:
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _checkpoint_meta(ckpt: Mapping[str, Any]) -> Mapping[str, Any]:
+    meta = ckpt.get("meta")
+    return meta if isinstance(meta, Mapping) else {}
+
+
+def _validate_llm_local_path_override(
+    ckpt: Mapping[str, Any],
+    cfg_obj: Any,
+    path_value: Any,
+) -> str:
+    path = Path(str(path_value)).expanduser().resolve()
+    manifest_path = path / "backbone-manifest.json"
+    if not path.is_dir() or not manifest_path.is_file():
+        raise ValueError(
+            "ICL Qwen runtime override requires a directory containing "
+            "backbone-manifest.json."
+        )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    claimed_manifest_sha = str(manifest.get("manifest_sha256") or "")
+    manifest_payload = dict(manifest)
+    manifest_payload.pop("manifest_sha256", None)
+    if _canonical_sha256(manifest_payload) != claimed_manifest_sha:
+        raise ValueError("ICL Qwen runtime override manifest seal is invalid.")
+
+    meta_backbone = _checkpoint_meta(ckpt).get("backbone_contract")
+    if not isinstance(meta_backbone, Mapping):
+        meta_backbone = {}
+    expected_model_id = str(
+        _config_get(cfg_obj, "llm_model_name")
+        or meta_backbone.get("model_id")
+        or ""
+    ).strip()
+    expected_revision = str(
+        _config_get(cfg_obj, "llm_revision")
+        or meta_backbone.get("revision")
+        or ""
+    ).strip()
+    actual_model_id = str(manifest.get("model_id") or "").strip()
+    actual_revision = str(manifest.get("revision") or "").strip()
+    if not expected_model_id or not expected_revision:
+        raise ValueError(
+            "ICL checkpoint must seal Qwen model ID and revision before a runtime "
+            "path can be injected."
+        )
+    if (actual_model_id, actual_revision) != (
+        expected_model_id,
+        expected_revision,
+    ):
+        raise ValueError(
+            "ICL checkpoint and runtime Qwen identity differ: "
+            f"expected={expected_model_id}@{expected_revision}, "
+            f"actual={actual_model_id}@{actual_revision}."
+        )
+    expected_manifest_sha = str(
+        meta_backbone.get("manifest_sha256") or ""
+    ).strip()
+    if expected_manifest_sha and expected_manifest_sha != claimed_manifest_sha:
+        raise ValueError("ICL checkpoint and runtime Qwen manifest SHA differ.")
+    return str(path)
+
+
+def _apply_config_overrides(
+    ckpt: Mapping[str, Any],
+    cfg_obj: Any,
+    overrides: Mapping[str, Any] | None,
+) -> Any:
+    if not overrides:
+        return cfg_obj
+    unknown = set(overrides) - {"llm_local_path"}
+    if unknown:
+        raise ValueError(
+            f"Unsupported checkpoint runtime config overrides: {sorted(unknown)}."
+        )
+    values = dict(overrides)
+    values["llm_local_path"] = _validate_llm_local_path_override(
+        ckpt,
+        cfg_obj,
+        values["llm_local_path"],
+    )
+    if isinstance(cfg_obj, Mapping):
+        updated = dict(cfg_obj)
+        updated.update(values)
+        return updated
+    if is_dataclass(cfg_obj):
+        return replace(cfg_obj, **values)
+    updated = copy.copy(cfg_obj)
+    for name, value in values.items():
+        setattr(updated, name, value)
+    return updated
+
+
 def _load_single_model(
     ckpt_path: str,
     *,
     device: Optional[str] = None,
     strict: bool = False,
+    config_overrides: Mapping[str, Any] | None = None,
 ) -> tuple[torch.nn.Module, Any, str]:
     ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     cfg_obj = _extract_cfg_obj(ckpt)
     if cfg_obj is None:
         raise ValueError(f"No config found in checkpoint: {ckpt_path}")
+    cfg_obj = _apply_config_overrides(ckpt, cfg_obj, config_overrides)
 
     model_key = infer_artifact_model_key_from_checkpoint(ckpt, ckpt_path=ckpt_path)
     builder = get_model_builder(model_key)
@@ -274,6 +381,7 @@ def load_predictor(
     device: Optional[str] = None,
     strict: bool = False,
     forecaster_kwargs: Optional[dict[str, Any]] = None,
+    config_overrides: Mapping[str, Any] | None = None,
 ) -> LoadedPredictor:
     """
     Load a single checkpoint and expose it as a callable predictor.
@@ -282,7 +390,12 @@ def load_predictor(
     for multiple prediction calls.
     """
     resolved_device = resolve_device(device)
-    model, cfg, model_key = _load_single_model(ckpt_path, device=resolved_device, strict=strict)
+    model, cfg, model_key = _load_single_model(
+        ckpt_path,
+        device=resolved_device,
+        strict=strict,
+        config_overrides=config_overrides,
+    )
     return LoadedPredictor(
         model=model,
         config=cfg,
