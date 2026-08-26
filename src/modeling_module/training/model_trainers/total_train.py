@@ -1163,6 +1163,18 @@ def _run_sellm(
                 "output_head_initial_nonzero_probability": float(
                     sellm_cfg.output_head_initial_nonzero_probability
                 ),
+                "output_calibration_mode": str(
+                    sellm_cfg.output_calibration_mode
+                ),
+                "output_calibration_scale": float(
+                    sellm_cfg.output_calibration_scale
+                ),
+                "output_calibration_fitted": bool(
+                    sellm_cfg.output_calibration_fitted
+                ),
+                "output_calibration_source_fingerprint": (
+                    sellm_cfg.output_calibration_source_fingerprint
+                ),
                 "negative_output_penalty_weight": float(
                     sellm_cfg.negative_output_penalty_weight
                 ),

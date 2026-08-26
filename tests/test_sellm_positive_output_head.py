@@ -9,7 +9,10 @@ import torch
 from modeling_module.api import load_predictor
 from modeling_module.models.SELLM.SELLM import SELLMModel
 from modeling_module.models.SELLM.configs import SELLMConfig
-from modeling_module.models.SELLM.output_heads import ZeroInflatedSoftplusHead
+from modeling_module.models.SELLM.output_heads import (
+    ValidationScalarCalibration,
+    ZeroInflatedSoftplusHead,
+)
 from modeling_module.utils.checkpoint import save_model
 
 
@@ -100,6 +103,38 @@ def test_positive_output_config_rejects_double_constraints():
             output_head_mode="zero_inflated_softplus",
             negative_output_penalty_weight=0.1,
         )
+
+
+def test_validation_scalar_config_rejects_unsealed_or_non_icl_use():
+    with pytest.raises(ValueError, match="softplus"):
+        _paper_config(
+            icl_enabled=True,
+            output_calibration_mode="validation_scalar",
+        )
+    with pytest.raises(ValueError, match="ICL"):
+        _paper_config(
+            output_head_mode="softplus",
+            output_calibration_mode="validation_scalar",
+        )
+    with pytest.raises(ValueError, match="start with scale=1.0"):
+        _paper_config(
+            icl_enabled=True,
+            output_head_mode="softplus",
+            output_calibration_mode="validation_scalar",
+            output_calibration_scale=0.9,
+        )
+
+
+def test_validation_scalar_is_parameter_free_nonnegative_and_differentiable():
+    calibration = ValidationScalarCalibration(scale=0.8)
+    forecast = torch.tensor([[[-1.0], [0.0], [2.0]]], requires_grad=True)
+
+    output = calibration(forecast)
+    output.sum().backward()
+
+    assert sum(parameter.numel() for parameter in calibration.parameters()) == 0
+    torch.testing.assert_close(output, forecast.detach() * 0.8)
+    torch.testing.assert_close(forecast.grad, torch.full_like(forecast, 0.8))
 
 
 def test_softplus_head_is_parameter_free_nonnegative_and_differentiable():
@@ -222,6 +257,12 @@ def test_checkpoint_without_output_head_fields_restores_identity_strictly(tmp_pa
         "output_head_hidden_dim",
         "output_head_softplus_beta",
         "output_head_initial_nonzero_probability",
+        "output_calibration_mode",
+        "output_calibration_scale",
+        "output_calibration_min_scale",
+        "output_calibration_max_scale",
+        "output_calibration_fitted",
+        "output_calibration_source_fingerprint",
     )
     for field in fields:
         checkpoint["config"].pop(field, None)
@@ -235,6 +276,48 @@ def test_checkpoint_without_output_head_fields_restores_identity_strictly(tmp_pa
 
     assert predictor.model.output_head_mode == "identity"
     assert predictor.model.positive_output_head is None
+    torch.testing.assert_close(restored, expected, rtol=0.0, atol=0.0)
+
+
+def test_validation_scalar_checkpoint_strictly_restores_scale_and_prediction(tmp_path):
+    torch.manual_seed(51)
+    config = _paper_config(
+        icl_enabled=True,
+        output_head_mode="softplus",
+        output_head_softplus_beta=8.0,
+        output_calibration_mode="validation_scalar",
+    )
+    model = SELLMModel(config).eval()
+    model.seal_output_calibration(scale=0.9, source_fingerprint="a" * 64)
+    value = _baseline_input().clamp_min(0.0)
+    with torch.no_grad():
+        expected = model(value)
+    path = tmp_path / "sellm-calibrated.pt"
+
+    save_model(
+        model,
+        model.cfg,
+        str(path),
+        extra_meta={"model_key": "sellm_base", "family": "sellm"},
+    )
+    checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+    predictor = load_predictor(str(path), device="cpu", strict=True)
+    with torch.no_grad():
+        restored = predictor.model(value)
+
+    assert checkpoint["config"]["output_calibration_scale"] == pytest.approx(0.9)
+    assert checkpoint["meta"]["output_calibration_mode"] == "validation_scalar"
+    assert checkpoint["meta"]["output_calibration_scale"] == pytest.approx(0.9)
+    assert "output_calibrator.scale" in checkpoint["state_dict"]
+    assert predictor.model.output_calibration_contract() == {
+        "mode": "validation_scalar",
+        "scale": pytest.approx(0.9),
+        "min_scale": 0.5,
+        "max_scale": 1.5,
+        "fitted": True,
+        "source_split": "validation",
+        "source_fingerprint": "a" * 64,
+    }
     torch.testing.assert_close(restored, expected, rtol=0.0, atol=0.0)
 
 

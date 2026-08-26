@@ -6,7 +6,7 @@ from .configs import (
     SELLMConfig,
 )
 from .SELLM import SELLMModel
-from .output_heads import ZeroInflatedSoftplusHead
+from .output_heads import ValidationScalarCalibration, ZeroInflatedSoftplusHead
 from .training_contract import SELLM_TRAINER_CONTRACT, SELLMTrainerContract
 
 __all__ = [
@@ -14,6 +14,7 @@ __all__ = [
     "DEFAULT_SELLM_LLM_REVISION",
     "SELLMConfig",
     "SELLMModel",
+    "ValidationScalarCalibration",
     "ZeroInflatedSoftplusHead",
     "SELLMTrainerContract",
     "SELLM_TRAINER_CONTRACT",

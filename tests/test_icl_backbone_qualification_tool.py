@@ -106,6 +106,26 @@ def test_qualification_sellm_config_seals_output_head(mode: str, tmp_path: Path)
     assert config.output_head_initial_nonzero_probability == 0.25
 
 
+def test_qualification_sellm_config_enables_validation_scalar_calibration(
+    tmp_path: Path,
+):
+    config = _model_config(
+        "sellm_base",
+        horizon=26,
+        llm_local_path=tmp_path / "Qwen2-0.5B",
+        schema_hash="a" * 64,
+        past_exogenous_dim=23,
+        future_exogenous_dim=23,
+        sellm_output_head_mode="softplus",
+        sellm_output_head_softplus_beta=8.0,
+        sellm_output_calibration_mode="validation_scalar",
+    )
+
+    assert config.output_calibration_mode == "validation_scalar"
+    assert config.output_calibration_scale == 1.0
+    assert config.output_calibration_fitted is False
+
+
 def test_backbone_contract_preserves_unsealed_legacy_directory(tmp_path: Path):
     model_path = tmp_path / "Qwen2-0.5B"
     _local_backbone(model_path)

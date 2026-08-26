@@ -328,6 +328,14 @@ class SELLMArchitectureConfig:
     output_head_hidden_dim: Optional[int] = None
     output_head_softplus_beta: Optional[float] = None
     output_head_initial_nonzero_probability: Optional[float] = None
+    output_calibration_mode: Optional[
+        Literal["none", "validation_scalar"]
+    ] = None
+    output_calibration_scale: Optional[float] = None
+    output_calibration_min_scale: Optional[float] = None
+    output_calibration_max_scale: Optional[float] = None
+    output_calibration_fitted: Optional[bool] = None
+    output_calibration_source_fingerprint: Optional[str] = None
     negative_output_penalty_weight: Optional[float] = None
     icl_enabled: Optional[bool] = None
     icl_past_exogenous_dim: Optional[int] = None
@@ -677,6 +685,12 @@ _ARCHITECTURE_ALLOWED_KEYS: dict[str, set[str]] = {
         "output_head_hidden_dim",
         "output_head_softplus_beta",
         "output_head_initial_nonzero_probability",
+        "output_calibration_mode",
+        "output_calibration_scale",
+        "output_calibration_min_scale",
+        "output_calibration_max_scale",
+        "output_calibration_fitted",
+        "output_calibration_source_fingerprint",
         "negative_output_penalty_weight",
         "icl_enabled",
         "icl_past_exogenous_dim",

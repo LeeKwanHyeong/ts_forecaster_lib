@@ -96,4 +96,26 @@ class ZeroInflatedSoftplusHead(nn.Module):
         return nonzero_probability * positive_magnitude
 
 
-__all__ = ["ZeroInflatedSoftplusHead"]
+class ValidationScalarCalibration(nn.Module):
+    """Apply a sealed scalar fitted from a validation split only."""
+
+    def __init__(self, *, scale: float = 1.0) -> None:
+        super().__init__()
+        value = float(scale)
+        if not math.isfinite(value) or value <= 0.0:
+            raise ValueError("SELLM output calibration scale must be finite and positive.")
+        self.register_buffer("scale", torch.tensor(value, dtype=torch.float64))
+
+    def set_scale(self, scale: float) -> None:
+        value = float(scale)
+        if not math.isfinite(value) or value <= 0.0:
+            raise ValueError("SELLM output calibration scale must be finite and positive.")
+        self.scale.fill_(value)
+
+    def forward(self, forecast: torch.Tensor) -> torch.Tensor:
+        if not torch.is_tensor(forecast) or forecast.ndim not in (2, 3):
+            raise ValueError("SELLM output calibration requires a rank-2 or rank-3 tensor.")
+        return forecast * self.scale.to(device=forecast.device, dtype=forecast.dtype)
+
+
+__all__ = ["ValidationScalarCalibration", "ZeroInflatedSoftplusHead"]
