@@ -76,6 +76,30 @@ def _bundle():
     )
 
 
+def _as_train_only_bundle(source):
+    from modeling_module.icl.contracts import ICLManifest
+
+    episodes = tuple(
+        replace(item, split=ICLSplit.TRAIN)
+        for item in source.episodes
+    )
+    return replace(
+        source,
+        episodes=episodes,
+        manifest=ICLManifest.create(
+            dataset_kind="exogenous",
+            source_revision=source.manifest.source_revision,
+            source_hash=source.manifest.source_hash,
+            config_hash=source.manifest.config_hash,
+            source_min_week=source.manifest.source_min_week,
+            source_max_week=source.manifest.source_max_week,
+            series_count=source.manifest.series_count,
+            episodes=episodes,
+            exogenous_schema=source.manifest.exogenous_schema,
+        ),
+    )
+
+
 def _save(model, path: Path) -> None:
     save_model(
         model,
@@ -272,43 +296,7 @@ def test_exogenous_icl_rejects_checkpoint_schema_mismatch():
 
 
 def test_autotimes_production_refit_saves_final_epoch_contract(tmp_path: Path):
-    source = _bundle()
-    train_only = replace(
-        source,
-        episodes=tuple(
-            replace(item, split=ICLSplit.TRAIN)
-            for item in source.episodes
-        ),
-        manifest=replace(
-            source.manifest,
-            split_counts={
-                "train": len(source.episodes),
-                "validation": 0,
-                "test": 0,
-            },
-            episode_hashes=tuple(
-                replace(item, split=ICLSplit.TRAIN).episode_hash
-                for item in source.episodes
-            ),
-        ),
-    )
-    # Recreate the manifest because split identity is part of its seal.
-    from modeling_module.icl.contracts import ICLManifest
-
-    train_only = replace(
-        train_only,
-        manifest=ICLManifest.create(
-            dataset_kind="exogenous",
-            source_revision=source.manifest.source_revision,
-            source_hash=source.manifest.source_hash,
-            config_hash=source.manifest.config_hash,
-            source_min_week=source.manifest.source_min_week,
-            source_max_week=source.manifest.source_max_week,
-            series_count=source.manifest.series_count,
-            episodes=train_only.episodes,
-            exogenous_schema=source.manifest.exogenous_schema,
-        ),
-    )
+    train_only = _as_train_only_bundle(_bundle())
     schema = train_only.manifest.exogenous_schema
     assert schema is not None
     config = replace(
@@ -432,7 +420,75 @@ def test_autotimes_production_refit_saves_final_epoch_contract(tmp_path: Path):
     torch.testing.assert_close(restored, expected, rtol=0.0, atol=0.0)
 
 
+def test_sellm_production_refit_saves_and_restores_icl_contract(tmp_path: Path):
+    torch.manual_seed(42)
+    train_only = _as_train_only_bundle(_bundle())
+    schema = train_only.manifest.exogenous_schema
+    assert schema is not None
+    config = replace(
+        _sellm_config(schema.fingerprint),
+        llm_revision="qwen-revision-r1",
+    )
+    model = SELLMModel(config)
+    module = ICLEpisodeDataModule(train_only, batch_size=2, seed=42)
+    trainer_config = ICLTrainerConfig(
+        epochs=2,
+        lr=1e-4,
+        device="cpu",
+        training_mode="production_refit",
+    )
+    result = train_sellm_icl(
+        model,
+        module.loader(ICLSplit.TRAIN, shuffle=False),
+        trainer_config=trainer_config,
+    )
+    checkpoint_path = save_icl_production_checkpoint(
+        result,
+        tmp_path / "weekly_SELLMICLBase_L8_H4.pt",
+        model_key="sellm_base",
+        bundle=train_only,
+        trainer_config=trainer_config,
+        random_seed=42,
+        data_cutoff=max(item.query_target.end_week for item in train_only.episodes),
+        eligible_series_count=train_only.manifest.series_count,
+        backbone_contract={
+            "model_id": "Qwen/Qwen2-0.5B",
+            "revision": "qwen-revision-r1",
+            "manifest_sha256": "a" * 64,
+            "contract_sha256": "b" * 64,
+        },
+    )
+    payload = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    assert payload["meta"]["model_key"] == "sellm_base"
+    assert payload["meta"]["training_mode"] == "production_refit"
+    assert payload["meta"]["validation_enabled"] is False
+    assert payload["meta"]["state_selection"] == "final_epoch"
+    assert payload["meta"]["episode_schema_hash"] == schema.fingerprint
+    assert payload["config"]["icl_enabled"] is True
+    assert payload["config"]["training_mode"] == "production_refit"
+
+    predictor = load_predictor(checkpoint_path, device="cpu", strict=True)
+    restored_batch = next(iter(module.loader(ICLSplit.TRAIN, shuffle=False)))
+    inputs = SELLMICLAdapter().adapt(restored_batch)
+    forward_kwargs = {
+        "demonstration_contexts": inputs.demonstration_contexts,
+        "demonstration_targets": inputs.demonstration_targets,
+        "query_context": inputs.query_context,
+        "prompt_mask": inputs.prompt_mask,
+        "demonstration_context_exogenous": inputs.demonstration_context_exogenous,
+        "demonstration_target_exogenous": inputs.demonstration_target_exogenous,
+        "query_context_exogenous": inputs.query_context_exogenous,
+        "query_target_exogenous": inputs.query_target_exogenous,
+    }
+    with torch.inference_mode():
+        expected = result.model.forward_icl(**forward_kwargs)
+        restored = predictor.model.forward_icl(**forward_kwargs)
+    torch.testing.assert_close(restored, expected, rtol=0.0, atol=0.0)
+
+
+@pytest.mark.parametrize("model_key", ["autotimes_base", "sellm_base"])
 def test_inference_episode_has_no_future_label_and_filters_inactive_series(
+    model_key: str,
     tmp_path: Path,
 ):
     start = date.fromisocalendar(2022, 1, 1)
@@ -501,19 +557,24 @@ def test_inference_episode_has_no_future_label_and_filters_inactive_series(
 
     schema = bundle.manifest.exogenous_schema
     assert schema is not None
-    model = AutoTimesModel(_autotimes_config(schema.fingerprint))
-    checkpoint_path = tmp_path / "autotimes-inference.pt"
+    model = (
+        AutoTimesModel(_autotimes_config(schema.fingerprint))
+        if model_key == "autotimes_base"
+        else SELLMModel(_sellm_config(schema.fingerprint))
+    )
+    checkpoint_path = tmp_path / f"{model_key}-inference.pt"
     _save(model, checkpoint_path)
     forecast = forecast_icl(
         ICLForecastRequest(
             checkpoint_path=checkpoint_path,
             episode_artifact_dir=artifact_dir,
-            expected_model_key="autotimes_base",
+            expected_model_key=model_key,
             split=ICLSplit.INFERENCE,
             runtime=ICLForecastRuntimeConfig(batch_size=1, device="cpu"),
         )
     )
     assert forecast.predictions.height == 4
+    assert forecast.model_key == model_key
     assert forecast.predictions["series_id"].unique().to_list() == [
         "active-part"
     ]
