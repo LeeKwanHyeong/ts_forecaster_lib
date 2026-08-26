@@ -7,6 +7,7 @@ import polars as pl
 import pytest
 import torch
 
+from modeling_module.api import load_predictor
 from modeling_module.api.icl import (
     ICLForecastRequest,
     ICLForecastRuntimeConfig,
@@ -24,7 +25,10 @@ from modeling_module.models.AutoTimes import AutoTimesConfig, AutoTimesModel
 from modeling_module.models.SELLM.SELLM import SELLMModel
 from modeling_module.models.SELLM.configs import SELLMConfig
 from modeling_module.training.model_trainers.autotimes_train import train_autotimes_icl
-from modeling_module.training.model_trainers.sellm_train import train_sellm_icl
+from modeling_module.training.model_trainers.sellm_train import (
+    fit_sellm_validation_scalar_calibration,
+    train_sellm_icl,
+)
 from modeling_module.utils.checkpoint import save_model
 
 
@@ -79,8 +83,8 @@ def _autotimes_config(*, icl_enabled: bool = True) -> AutoTimesConfig:
     )
 
 
-def _sellm_config(*, icl_enabled: bool = True) -> SELLMConfig:
-    return SELLMConfig(
+def _sellm_config(*, icl_enabled: bool = True, **overrides) -> SELLMConfig:
+    values = dict(
         lookback=8,
         horizon=4,
         y_dim=1,
@@ -103,6 +107,8 @@ def _sellm_config(*, icl_enabled: bool = True) -> SELLMConfig:
         use_exogenous_mode=False,
         use_intermittent=False,
     )
+    values.update(overrides)
+    return SELLMConfig(**values)
 
 
 def _save_checkpoint(model, path: Path) -> None:
@@ -187,6 +193,65 @@ def test_sellm_icl_trainer_updates_semantic_encoder_and_forecasts(tmp_path: Path
     assert forecast.predictions.height == 4
     assert forecast.predictions["model_key"].unique().to_list() == ["sellm_base"]
     assert forecast.predictions["point"].is_finite().all()
+
+
+def test_sellm_validation_scalar_uses_validation_only_and_restores_strictly(
+    tmp_path: Path,
+):
+    torch.manual_seed(43)
+    module = _module()
+    model = SELLMModel(
+        _sellm_config(
+            output_head_mode="softplus",
+            output_head_softplus_beta=8.0,
+            output_calibration_mode="validation_scalar",
+            output_calibration_min_scale=1e-6,
+            output_calibration_max_scale=100.0,
+        )
+    )
+
+    with pytest.raises(ValueError, match="validation episodes only"):
+        fit_sellm_validation_scalar_calibration(
+            model,
+            module.loader(ICLSplit.TEST, shuffle=False),
+            device="cpu",
+        )
+
+    result = train_sellm_icl(
+        model,
+        module.loader(ICLSplit.TRAIN, shuffle=False),
+        module.loader(ICLSplit.VALIDATION, shuffle=False),
+        trainer_config=ICLTrainerConfig(epochs=1, lr=1e-3, device="cpu"),
+    )
+    contract = result.model.output_calibration_contract()
+    stats = result.model.output_calibration_fit_stats
+    assert contract["mode"] == "validation_scalar"
+    assert contract["fitted"] is True
+    assert contract["source_split"] == "validation"
+    assert len(str(contract["source_fingerprint"])) == 64
+    assert 0.5 <= float(contract["scale"]) <= 1.5
+    assert stats["episode_count"] == 1
+    assert stats["point_count"] == 4
+    assert abs(float(stats["validation_bias_after"])) < 1e-6
+
+    path = tmp_path / "sellm-validation-calibrated.pt"
+    _save_checkpoint(result.model, path)
+    predictor = load_predictor(str(path), device="cpu", strict=True)
+    batch = next(iter(module.loader(ICLSplit.TEST, shuffle=False)))
+    with torch.no_grad():
+        expected = result.model.forward_icl(
+            demonstration_contexts=batch.demonstration_contexts,
+            demonstration_targets=batch.demonstration_targets,
+            query_context=batch.query_context,
+            prompt_mask=batch.prompt_mask,
+        )
+        restored = predictor.model.forward_icl(
+            demonstration_contexts=batch.demonstration_contexts,
+            demonstration_targets=batch.demonstration_targets,
+            query_context=batch.query_context,
+            prompt_mask=batch.prompt_mask,
+        )
+    torch.testing.assert_close(restored, expected, rtol=0.0, atol=0.0)
 
 
 @pytest.mark.parametrize(

@@ -72,6 +72,12 @@ class SELLMConfig(TrainingConfig):
     output_head_hidden_dim: int = 16
     output_head_softplus_beta: float = 1.0
     output_head_initial_nonzero_probability: float = 0.5
+    output_calibration_mode: Literal["none", "validation_scalar"] = "none"
+    output_calibration_scale: float = 1.0
+    output_calibration_min_scale: float = 0.5
+    output_calibration_max_scale: float = 1.5
+    output_calibration_fitted: bool = False
+    output_calibration_source_fingerprint: Optional[str] = None
     negative_output_penalty_weight: float = 0.0
     icl_enabled: bool = False
     icl_past_exogenous_dim: int = 0
@@ -121,6 +127,81 @@ class SELLMConfig(TrainingConfig):
         self.output_head_hidden_dim = hidden_dim
         self.output_head_softplus_beta = softplus_beta
         self.output_head_initial_nonzero_probability = initial_probability
+        calibration_mode = str(self.output_calibration_mode).strip().lower()
+        if calibration_mode not in {"none", "validation_scalar"}:
+            raise ValueError(
+                "output_calibration_mode must be 'none' or 'validation_scalar', "
+                f"got {self.output_calibration_mode!r}."
+            )
+        calibration_scale = float(self.output_calibration_scale)
+        calibration_min_scale = float(self.output_calibration_min_scale)
+        calibration_max_scale = float(self.output_calibration_max_scale)
+        if not all(
+            math.isfinite(value)
+            for value in (
+                calibration_scale,
+                calibration_min_scale,
+                calibration_max_scale,
+            )
+        ):
+            raise ValueError("SELLM output calibration scales must be finite.")
+        if calibration_min_scale <= 0.0 or calibration_max_scale < calibration_min_scale:
+            raise ValueError(
+                "SELLM output calibration bounds must satisfy "
+                "0 < min_scale <= max_scale."
+            )
+        if not calibration_min_scale <= calibration_scale <= calibration_max_scale:
+            raise ValueError(
+                "output_calibration_scale must be within the configured calibration bounds."
+            )
+        calibration_fitted = bool(self.output_calibration_fitted)
+        calibration_fingerprint = str(
+            self.output_calibration_source_fingerprint or ""
+        ).strip()
+        if calibration_mode == "none":
+            if (
+                calibration_scale != 1.0
+                or calibration_fitted
+                or calibration_fingerprint
+            ):
+                raise ValueError(
+                    "output_calibration_mode='none' requires scale=1.0, "
+                    "fitted=False, and no source fingerprint."
+                )
+        elif output_head_mode != "softplus":
+            raise ValueError(
+                "validation_scalar output calibration is supported only with "
+                "output_head_mode='softplus'."
+            )
+        elif not bool(self.icl_enabled):
+            raise ValueError(
+                "validation_scalar output calibration requires SELLM ICL training."
+            )
+        elif not calibration_fitted and calibration_scale != 1.0:
+            raise ValueError(
+                "An unfitted validation_scalar calibration must start with scale=1.0."
+            )
+        if calibration_fitted != bool(calibration_fingerprint):
+            raise ValueError(
+                "A fitted SELLM output calibration requires a source fingerprint, "
+                "and an unfitted calibration must not provide one."
+            )
+        if calibration_fingerprint and (
+            len(calibration_fingerprint) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in calibration_fingerprint
+            )
+        ):
+            raise ValueError(
+                "output_calibration_source_fingerprint must be lowercase SHA256."
+            )
+        self.output_calibration_mode = calibration_mode
+        self.output_calibration_scale = calibration_scale
+        self.output_calibration_min_scale = calibration_min_scale
+        self.output_calibration_max_scale = calibration_max_scale
+        self.output_calibration_fitted = calibration_fitted
+        self.output_calibration_source_fingerprint = calibration_fingerprint or None
         past_dim = int(self.icl_past_exogenous_dim)
         future_dim = int(self.icl_future_exogenous_dim)
         if past_dim < 0 or future_dim < 0:

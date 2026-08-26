@@ -21,7 +21,10 @@ from modeling_module.models.SELLM.provenance import (
     SELLM_UPSTREAM_COMMIT,
     SELLM_UPSTREAM_REPOSITORY,
 )
-from modeling_module.models.SELLM.output_heads import ZeroInflatedSoftplusHead
+from modeling_module.models.SELLM.output_heads import (
+    ValidationScalarCalibration,
+    ZeroInflatedSoftplusHead,
+)
 
 
 def _activation(name: str) -> nn.Module:
@@ -218,6 +221,11 @@ class SELLMModel(nn.Module):
         self.use_norm = bool(cfg.use_norm)
         self.final_nonneg = bool(cfg.final_nonneg)
         self.output_head_mode = str(cfg.output_head_mode)
+        self.output_calibration_mode = str(cfg.output_calibration_mode)
+        self.output_calibration_scale = float(cfg.output_calibration_scale)
+        self.output_calibration_source_fingerprint = (
+            cfg.output_calibration_source_fingerprint
+        )
         self.use_pretrained_llm = bool(cfg.use_pretrained_llm)
         self.icl_enabled = bool(cfg.icl_enabled)
         self.icl_past_exogenous_dim = int(cfg.icl_past_exogenous_dim)
@@ -395,10 +403,51 @@ class SELLMModel(nn.Module):
             if self.output_head_mode == "zero_inflated_softplus"
             else None
         )
+        self.output_calibrator: Optional[ValidationScalarCalibration] = (
+            ValidationScalarCalibration(scale=float(cfg.output_calibration_scale))
+            if self.output_calibration_mode == "validation_scalar"
+            else None
+        )
 
     @classmethod
     def from_config(cls, config: SELLMConfig) -> "SELLMModel":
         return cls(cfg=config)
+
+    def seal_output_calibration(
+        self,
+        *,
+        scale: float,
+        source_fingerprint: str,
+    ) -> None:
+        """Seal a validation-fitted scalar into config and state-dict contracts."""
+
+        if self.output_calibrator is None:
+            raise RuntimeError("SELLM validation-scalar output calibration is not enabled.")
+        updated = replace(
+            self.cfg,
+            output_calibration_scale=float(scale),
+            output_calibration_fitted=True,
+            output_calibration_source_fingerprint=str(source_fingerprint),
+        )
+        self.output_calibrator.set_scale(updated.output_calibration_scale)
+        self.cfg = updated
+        self.output_calibration_scale = updated.output_calibration_scale
+        self.output_calibration_source_fingerprint = (
+            updated.output_calibration_source_fingerprint
+        )
+
+    def output_calibration_contract(self) -> dict[str, object]:
+        return {
+            "mode": self.output_calibration_mode,
+            "scale": float(self.output_calibration_scale),
+            "min_scale": float(self.cfg.output_calibration_min_scale),
+            "max_scale": float(self.cfg.output_calibration_max_scale),
+            "fitted": bool(self.cfg.output_calibration_fitted),
+            "source_split": (
+                "validation" if bool(self.cfg.output_calibration_fitted) else None
+            ),
+            "source_fingerprint": self.output_calibration_source_fingerprint,
+        }
 
     @staticmethod
     def _largest_divisor_at_most(value: int, limit: int) -> int:
@@ -571,19 +620,23 @@ class SELLMModel(nn.Module):
         """Apply the configured output contract in original demand coordinates."""
 
         if self.final_nonneg:
-            return F.softplus(forecast)
-        if self.output_head_mode == "identity":
-            return forecast
-        if self.output_head_mode == "softplus":
-            return F.softplus(
+            output = F.softplus(forecast)
+        elif self.output_head_mode == "identity":
+            output = forecast
+        elif self.output_head_mode == "softplus":
+            output = F.softplus(
                 forecast,
                 beta=float(self.cfg.output_head_softplus_beta),
             )
-        if self.output_head_mode == "zero_inflated_softplus":
+        elif self.output_head_mode == "zero_inflated_softplus":
             if self.positive_output_head is None:
                 raise RuntimeError("SELLM zero-inflated output head is missing.")
-            return self.positive_output_head(forecast, history)
-        raise RuntimeError(f"Unsupported SELLM output head: {self.output_head_mode!r}.")
+            output = self.positive_output_head(forecast, history)
+        else:
+            raise RuntimeError(f"Unsupported SELLM output head: {self.output_head_mode!r}.")
+        if self.output_calibrator is not None:
+            output = self.output_calibrator(output)
+        return output
 
     def _icl_prompt_tokens(
         self,
