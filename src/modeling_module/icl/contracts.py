@@ -35,6 +35,11 @@ class ICLPromptKind(str, Enum):
     SEASONAL = "seasonal"
 
 
+class ICLDemonstrationSeriesMode(str, Enum):
+    SAME_SERIES = "same_series"
+    RETRIEVED_SERIES = "retrieved_series"
+
+
 @dataclass(frozen=True)
 class ICLExogenousSchema:
     """Ordered continuous feature identity for past and known-future windows."""
@@ -212,7 +217,7 @@ class ICLDemonstration:
 
 @dataclass(frozen=True)
 class ICLEpisode:
-    """One query and its leakage-free, same-series prompt demonstrations."""
+    """One query and its leakage-free prompt demonstrations."""
 
     episode_id: str
     series_id: str
@@ -222,6 +227,9 @@ class ICLEpisode:
     query_target: ICLWindow
     demonstrations: tuple[ICLDemonstration, ...]
     query_target_observed: bool = True
+    demonstration_series_mode: ICLDemonstrationSeriesMode = (
+        ICLDemonstrationSeriesMode.SAME_SERIES
+    )
 
     def __post_init__(self) -> None:
         if not self.episode_id.strip():
@@ -244,10 +252,22 @@ class ICLEpisode:
             raise ICLContractError(
                 "Only inference episodes may contain an unobserved query target."
             )
+        series_mode = ICLDemonstrationSeriesMode(self.demonstration_series_mode)
+        object.__setattr__(self, "demonstration_series_mode", series_mode)
+        if (
+            series_mode is ICLDemonstrationSeriesMode.RETRIEVED_SERIES
+            and self.split is not ICLSplit.INFERENCE
+        ):
+            raise ICLContractError(
+                "Retrieved-series demonstrations are allowed for inference only."
+            )
 
-        occupied: list[tuple[int, int, str]] = []
+        occupied: dict[str, list[tuple[int, int, str]]] = {}
         for demonstration in self.demonstrations:
-            if demonstration.series_id != self.series_id:
+            if (
+                series_mode is ICLDemonstrationSeriesMode.SAME_SERIES
+                and demonstration.series_id != self.series_id
+            ):
                 raise ICLContractError("All demonstrations must come from the query series.")
             if demonstration.context.target_dim != self.query_context.target_dim:
                 raise ICLContractError("Prompt and query target dimensions must match.")
@@ -259,20 +279,24 @@ class ICLEpisode:
                 raise ICLContractError(
                     "Prompt demonstrations must end before the query context starts."
                 )
-            occupied.append(
+            occupied.setdefault(demonstration.series_id, []).append(
                 (
                     demonstration.start_week,
                     demonstration.end_week,
                     demonstration.demonstration_id,
                 )
             )
-        occupied.sort()
-        for previous, current in zip(occupied, occupied[1:]):
-            if previous[1] >= current[0]:
-                raise ICLContractError(
-                    "Prompt demonstrations must not overlap: "
-                    f"{previous[2]!r} and {current[2]!r}."
-                )
+        for series_occupied in occupied.values():
+            series_occupied.sort()
+            for previous, current in zip(
+                series_occupied,
+                series_occupied[1:],
+            ):
+                if previous[1] >= current[0]:
+                    raise ICLContractError(
+                        "Prompt demonstrations from one source series must not overlap: "
+                        f"{previous[2]!r} and {current[2]!r}."
+                    )
 
     @property
     def origin_week(self) -> int:
@@ -297,6 +321,13 @@ class ICLEpisode:
         # Omit the legacy default so existing qualification episode hashes remain stable.
         if not self.query_target_observed:
             payload["query_target_observed"] = False
+        if (
+            self.demonstration_series_mode
+            is ICLDemonstrationSeriesMode.RETRIEVED_SERIES
+        ):
+            payload["demonstration_series_mode"] = (
+                ICLDemonstrationSeriesMode.RETRIEVED_SERIES.value
+            )
         return payload
 
 

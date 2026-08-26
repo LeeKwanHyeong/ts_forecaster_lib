@@ -18,6 +18,7 @@ from modeling_module.icl.contracts import (
     ICL_MANIFEST_CONTRACT_VERSION,
     ICLContractError,
     ICLDemonstration,
+    ICLDemonstrationSeriesMode,
     ICLExogenousSchema,
     ICLEpisode,
     ICLEpisodeBundle,
@@ -93,6 +94,9 @@ def _episode_from_payload(payload: Mapping[str, Any]) -> ICLEpisode:
         demonstrations=demonstrations,
         query_target_observed=bool(
             payload.get("query_target_observed", True)
+        ),
+        demonstration_series_mode=ICLDemonstrationSeriesMode(
+            str(payload.get("demonstration_series_mode", "same_series"))
         ),
     )
 

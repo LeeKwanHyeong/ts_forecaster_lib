@@ -15,6 +15,7 @@ from modeling_module.icl import (
     EndogenousICLDatasetBuilder,
     ICLContractError,
     ICLArtifactError,
+    ICLDemonstrationSeriesMode,
     ICLPromptKind,
     ICLSplit,
     SELLMICLAdapter,
@@ -145,6 +146,77 @@ def test_endogenous_icl_prompts_are_same_series_seasonal_and_non_overlapping():
     )
     assert (query - start).days % (52 * 7) == 0
     assert any(week % 100 == 1 for week in episode.query_context.weeks)
+
+
+def test_retrieved_series_prompts_are_inference_only_and_round_trip(
+    tmp_path: Path,
+) -> None:
+    source = _builder().build(
+        _history(series_count=2),
+        source_revision="retrieval-source-r1",
+    )
+    query = next(item for item in source.episodes if item.series_id == "part-1")
+    prompt_source = next(
+        item
+        for item in source.episodes
+        if item.series_id == "part-2"
+        and all(
+            prompt.end_week < query.query_context.start_week
+            for prompt in item.demonstrations
+        )
+    )
+    inference = replace(
+        query,
+        episode_id="part-1:retrieved:inference",
+        split=ICLSplit.INFERENCE,
+        demonstrations=prompt_source.demonstrations,
+        query_target_observed=False,
+        demonstration_series_mode=(
+            ICLDemonstrationSeriesMode.RETRIEVED_SERIES
+        ),
+    )
+    bundle = replace(
+        source,
+        episodes=(inference,),
+        manifest=source.manifest.create(
+            dataset_kind=source.manifest.dataset_kind,
+            source_revision=source.manifest.source_revision,
+            source_hash=source.manifest.source_hash,
+            config_hash=source.manifest.config_hash,
+            source_min_week=source.manifest.source_min_week,
+            source_max_week=source.manifest.source_max_week,
+            series_count=1,
+            episodes=(inference,),
+            exogenous_schema=source.manifest.exogenous_schema,
+        ),
+    )
+
+    artifact_dir = tmp_path / "retrieved-inference"
+    write_icl_episode_artifact(bundle, artifact_dir)
+    restored, _ = read_icl_episode_artifact(artifact_dir)
+
+    assert restored == bundle
+    assert (
+        restored.episodes[0].demonstration_series_mode
+        is ICLDemonstrationSeriesMode.RETRIEVED_SERIES
+    )
+    assert {
+        item.series_id for item in restored.episodes[0].demonstrations
+    } == {"part-2"}
+    batch = next(
+        iter(
+            ICLEpisodeDataModule(
+                restored,
+                batch_size=1,
+                seed=17,
+            ).loader(ICLSplit.INFERENCE, shuffle=False)
+        )
+    )
+    assert batch.demonstration_contexts.shape[:2] == (1, 2)
+    assert batch.query_context.shape[:2] == (1, 52)
+
+    with pytest.raises(ICLContractError, match="inference only"):
+        replace(inference, split=ICLSplit.TRAIN, query_target_observed=True)
 
 
 def test_endogenous_icl_aggregates_duplicate_item_weeks_by_sum():
