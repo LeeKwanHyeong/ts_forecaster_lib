@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, TYPE_CHECKING, Callable, Iterable, Literal, Mapping
 
@@ -329,9 +329,18 @@ def save_icl_production_checkpoint(
 
     output = Path(path).expanduser().resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
+    checkpoint_config = replace(
+        result.model.cfg,
+        epochs=int(trainer_config.epochs),
+        lr=float(trainer_config.lr),
+        weight_decay=float(trainer_config.weight_decay),
+        max_grad_norm=trainer_config.max_grad_norm,
+        training_mode="production_refit",
+        random_seed=int(random_seed),
+    )
     save_model(
         result.model,
-        result.model.cfg,
+        checkpoint_config,
         str(output),
         extra_meta={
             "model_key": str(model_key),

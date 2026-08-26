@@ -8,6 +8,7 @@ import polars as pl
 import pytest
 import torch
 
+from modeling_module.api.infer import load_predictor
 from modeling_module.api.icl import ICLForecastRequest, ICLForecastRuntimeConfig, forecast_icl
 from modeling_module.api.train import (
     ArchitectureConfig,
@@ -336,6 +337,10 @@ def test_autotimes_production_refit_saves_final_epoch_contract(tmp_path: Path):
         module.loader(ICLSplit.TRAIN, shuffle=False),
         trainer_config=trainer_config,
     )
+    final_state = {
+        name: value.detach().clone()
+        for name, value in result.model.state_dict().items()
+    }
     assert result.training_mode == "production_refit"
     assert result.validation_enabled is False
     assert result.state_selection == "final_epoch"
@@ -388,6 +393,43 @@ def test_autotimes_production_refit_saves_final_epoch_contract(tmp_path: Path):
     assert payload["meta"]["backbone_contract"]["revision"] == (
         "qwen-revision-r1"
     )
+    assert payload["config"]["training_mode"] == "production_refit"
+    assert payload["config"]["random_seed"] == 42
+    assert payload["config"]["epochs"] == 2
+    assert payload["config"]["lr"] == pytest.approx(1e-3)
+    assert payload["config"]["weight_decay"] == pytest.approx(0.0)
+    assert payload["cfg_state"] == payload["config"]
+    assert result.model.cfg.training_mode == "qualification"
+    assert result.model.cfg.random_seed is None
+    assert result.model.cfg.epochs == 1
+    assert payload["state_dict"].keys() == final_state.keys()
+    for name, value in final_state.items():
+        torch.testing.assert_close(
+            payload["state_dict"][name],
+            value,
+            rtol=0.0,
+            atol=0.0,
+        )
+
+    predictor = load_predictor(checkpoint_path, device="cpu", strict=True)
+    restored_batch = next(
+        iter(module.loader(ICLSplit.TRAIN, shuffle=False))
+    )
+    inputs = AutoTimesICLAdapter().adapt(restored_batch)
+    with torch.inference_mode():
+        expected = result.model.forward_icl(
+            inputs.packed_context,
+            prompt_mask=inputs.prompt_mask,
+            packed_exogenous=inputs.packed_exogenous,
+            query_target_exogenous=inputs.query_target_exogenous,
+        )
+        restored = predictor.model.forward_icl(
+            inputs.packed_context,
+            prompt_mask=inputs.prompt_mask,
+            packed_exogenous=inputs.packed_exogenous,
+            query_target_exogenous=inputs.query_target_exogenous,
+        )
+    torch.testing.assert_close(restored, expected, rtol=0.0, atol=0.0)
 
 
 def test_inference_episode_has_no_future_label_and_filters_inactive_series(
