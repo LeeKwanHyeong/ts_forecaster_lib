@@ -594,3 +594,34 @@ The sealed comparison receipt is
 `9a575b3f00713dcf61defb269a7de1d056e7d2dba2213d1d030a09d8fdde2cbd`.
 The RTX 5090 artifact root is
 `/home/leekwanhyeong/artifacts/sellm/output-head-seed42/b0e3e15`.
+
+### Softplus beta seed-42 sweep
+
+The Softplus floor was then varied with beta `2`, `4`, and `8`. The sealed
+Episode, Qwen2-0.5B backbone, H26 256-series cohort, seed 42, batch 4, five
+epochs, and learning rate `1e-4` remained unchanged. Beta 1 is the Softplus
+result from the preceding pilot.
+
+| Beta | MAE | WAPE | sMAPE | Bias | Raw negative rate | MAE vs identity |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 3.2089 | 47.68% | 76.74% | +12.55% | 0.00% | -19.31% |
+| 2 | 3.4328 | 51.01% | 77.87% | +17.83% | 0.00% | -13.68% |
+| 4 | 3.2397 | 48.14% | 79.14% | +10.97% | 0.00% | -18.54% |
+| 8 | **3.0372** | **45.13%** | **66.30%** | **+10.0176%** | 0.00% | **-23.63%** |
+
+Beta 8 provides the best accuracy and comes closest to the bias guard, but its
+absolute bias exceeds the fixed 10% limit by 0.0176 percentage points. The
+boundary is not rounded or relaxed after observing the result. Beta 1, 2, and
+4 also fail the same bias guard. All four Softplus checkpoints eliminate raw
+negative output and pass strict reload parity.
+
+No beta advances to seed 11/22/33 under the requested gate. The next candidate
+must reduce the beta-8 bias without selecting calibration parameters from the
+sealed test output. Calibration should be fitted inside the training/validation
+boundary and then evaluated once against the same Qualification contract.
+
+The sealed sweep receipt is `SELLMSoftplusBetaSeed42Sweep.json` with receipt
+SHA256
+`91c5f86852e0739573f73d4e6dfb34312dd3775f9f73deecc90fd81c01cd4d40`.
+The RTX 5090 artifact root is
+`/home/leekwanhyeong/artifacts/sellm/softplus-beta-sweep-seed42/0cbe6f6`.
