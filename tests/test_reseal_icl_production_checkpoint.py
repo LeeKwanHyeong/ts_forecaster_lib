@@ -7,6 +7,7 @@ from pathlib import Path
 import torch
 
 from tools.reseal_icl_production_checkpoint import (
+    load_backbone_contract,
     reseal_checkpoint,
     state_dict_sha256,
     synchronize_production_config,
@@ -52,6 +53,7 @@ def test_synchronize_production_config_does_not_mutate_source() -> None:
 
     corrected = synchronize_production_config(
         source,
+        expected_model_key="autotimes_base",
         learning_rate=1e-3,
         weight_decay=0.0,
         max_grad_norm=1.0,
@@ -88,6 +90,7 @@ def test_reseal_checkpoint_preserves_source_and_state_dict(tmp_path: Path) -> No
         destination,
         source_receipt=source_receipt,
         receipt_path=correction_receipt,
+        expected_model_key="autotimes_base",
         learning_rate=1e-3,
         weight_decay=0.0,
         max_grad_norm=1.0,
@@ -105,3 +108,36 @@ def test_reseal_checkpoint_preserves_source_and_state_dict(tmp_path: Path) -> No
         source_sha
     )
     assert correction_receipt.exists()
+
+
+def test_backbone_manifest_is_verified_and_sealed_into_checkpoint(
+    tmp_path: Path,
+) -> None:
+    manifest = {
+        "model_id": "Qwen/Qwen2-0.5B",
+        "revision": "revision-r1",
+        "files": {},
+    }
+    canonical = json.dumps(
+        manifest,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    manifest["manifest_sha256"] = hashlib.sha256(canonical.encode()).hexdigest()
+    manifest_path = tmp_path / "backbone-manifest.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    contract = load_backbone_contract(manifest_path)
+    corrected = synchronize_production_config(
+        _checkpoint(),
+        expected_model_key="autotimes_base",
+        learning_rate=1e-3,
+        weight_decay=0.0,
+        max_grad_norm=1.0,
+        backbone_contract=contract,
+    )
+
+    assert corrected["config"]["llm_model_name"] == "Qwen/Qwen2-0.5B"
+    assert corrected["config"]["llm_revision"] == "revision-r1"
+    assert corrected["meta"]["backbone_contract"] == manifest
