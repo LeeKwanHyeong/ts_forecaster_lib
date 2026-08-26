@@ -10,7 +10,7 @@ import random
 import subprocess
 import sys
 import time
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Final
@@ -35,11 +35,15 @@ from modeling_module.icl import (  # noqa: E402
     ExogenousICLDatasetBuilder,
     ICLSplit,
     ICLTrainerConfig,
+    SELLMICLAdapter,
     save_icl_production_checkpoint,
     write_icl_episode_artifact,
 )
 from modeling_module.training.model_trainers.autotimes_train import (  # noqa: E402
     train_autotimes_icl,
+)
+from modeling_module.training.model_trainers.sellm_train import (  # noqa: E402
+    train_sellm_icl,
 )
 from tools.qualify_icl_backbones_5090 import (  # noqa: E402
     APPROVED_EXOGENOUS_FEATURES,
@@ -70,6 +74,27 @@ LEARNING_RATE: Final = 1e-3
 MODEL_KEY: Final = "autotimes_base"
 CHECKPOINT_FILENAME: Final = "weekly_AutoTimesBase_L52_H26.pt"
 RECEIPT_CONTRACT: Final = "modeling_module.autotimes_icl_production_refit.v1"
+
+
+@dataclass(frozen=True)
+class ICLProductionRefitPolicy:
+    model_key: str
+    checkpoint_filename: str
+    receipt_contract: str
+    batch_size: int
+    epochs: int
+    learning_rate: float
+    semantic_vocab_size: int | None = None
+
+
+AUTOTIMES_POLICY: Final = ICLProductionRefitPolicy(
+    model_key=MODEL_KEY,
+    checkpoint_filename=CHECKPOINT_FILENAME,
+    receipt_contract=RECEIPT_CONTRACT,
+    batch_size=BATCH_SIZE,
+    epochs=EPOCHS,
+    learning_rate=LEARNING_RATE,
+)
 
 
 def _source_commit() -> str:
@@ -202,12 +227,61 @@ def _finish_cuda_measurement(started: float) -> dict[str, Any]:
     }
 
 
-def run_refit(args: argparse.Namespace) -> dict[str, Any]:
+def _train_model_icl(
+    policy: ICLProductionRefitPolicy,
+    model,
+    module: ICLEpisodeDataModule,
+    trainer_config: ICLTrainerConfig,
+):
+    train_loader = module.loader(ICLSplit.TRAIN, shuffle=False)
+    if policy.model_key == "autotimes_base":
+        return train_autotimes_icl(
+            model,
+            train_loader,
+            trainer_config=trainer_config,
+        )
+    if policy.model_key == "sellm_base":
+        return train_sellm_icl(
+            model,
+            train_loader,
+            trainer_config=trainer_config,
+        )
+    raise QualificationError(f"Unsupported ICL production model: {policy.model_key}.")
+
+
+def _forward_icl_canary(policy: ICLProductionRefitPolicy, model, batch):
+    if policy.model_key == "autotimes_base":
+        inputs = AutoTimesICLAdapter().adapt(batch)
+        return model.forward_icl(
+            inputs.packed_context,
+            prompt_mask=inputs.prompt_mask,
+            packed_exogenous=inputs.packed_exogenous,
+            query_target_exogenous=inputs.query_target_exogenous,
+        )
+    if policy.model_key == "sellm_base":
+        inputs = SELLMICLAdapter().adapt(batch)
+        return model.forward_icl(
+            demonstration_contexts=inputs.demonstration_contexts,
+            demonstration_targets=inputs.demonstration_targets,
+            query_context=inputs.query_context,
+            prompt_mask=inputs.prompt_mask,
+            demonstration_context_exogenous=inputs.demonstration_context_exogenous,
+            demonstration_target_exogenous=inputs.demonstration_target_exogenous,
+            query_context_exogenous=inputs.query_context_exogenous,
+            query_target_exogenous=inputs.query_target_exogenous,
+        )
+    raise QualificationError(f"Unsupported ICL production model: {policy.model_key}.")
+
+
+def _run_refit(
+    args: argparse.Namespace,
+    policy: ICLProductionRefitPolicy,
+) -> dict[str, Any]:
     output_root = args.output_root.expanduser().resolve()
     if output_root.exists():
         raise QualificationError(f"Output root already exists: {output_root}")
     if not torch.cuda.is_available() or not str(args.device).startswith("cuda"):
-        raise QualificationError("AutoTimes production refit requires CUDA.")
+        raise QualificationError("ICL production refit requires CUDA.")
     device_name = torch.cuda.get_device_name(0)
     if args.expected_device and device_name != args.expected_device:
         raise QualificationError(
@@ -220,7 +294,7 @@ def run_refit(args: argparse.Namespace) -> dict[str, Any]:
         target_path,
     )
     if int(source["source_max_week"]) != TRAIN_END_WEEK:
-        raise QualificationError("AutoTimes source maximum week must be 202509.")
+        raise QualificationError("ICL source maximum week must be 202509.")
     operation_parts, exogenous_source = _load_operation_part_source(
         args.operation_part_manifest.expanduser().resolve(),
         args.operation_part_source.expanduser().resolve(),
@@ -232,7 +306,7 @@ def run_refit(args: argparse.Namespace) -> dict[str, Any]:
         or backbone.get("revision")
         != "91d2aff3f957f99e4c74c962f2f408dcc88a18d8"
     ):
-        raise QualificationError("AutoTimes refit requires the sealed Qwen2-0.5B revision.")
+        raise QualificationError("ICL refit requires the sealed Qwen2-0.5B revision.")
 
     frame = pl.read_parquet(
         target_path,
@@ -261,7 +335,7 @@ def run_refit(args: argparse.Namespace) -> dict[str, Any]:
     artifact_dir = output_root / "episodes"
     write_icl_episode_artifact(bundle, artifact_dir)
     preflight = {
-        "contract": RECEIPT_CONTRACT,
+        "contract": policy.receipt_contract,
         "status": "PREFLIGHT_PASS",
         "source_commit": _source_commit(),
         "source": source,
@@ -273,16 +347,17 @@ def run_refit(args: argparse.Namespace) -> dict[str, Any]:
         "exogenous_source_revision": exogenous_source_revision,
         "backbone": backbone,
         "training": {
-            "model_key": MODEL_KEY,
+            "model_key": policy.model_key,
             "lookback": LOOKBACK,
             "horizon": HORIZON,
             "train_end_week": TRAIN_END_WEEK,
             "forecast_origin": FORECAST_ORIGIN,
             "stride": STRIDE,
             "seed": SEED,
-            "batch_size": BATCH_SIZE,
-            "epochs": EPOCHS,
-            "learning_rate": LEARNING_RATE,
+            "batch_size": policy.batch_size,
+            "epochs": policy.epochs,
+            "learning_rate": policy.learning_rate,
+            "semantic_vocab_size": policy.semantic_vocab_size,
             "training_mode": "production_refit",
             "validation_enabled": False,
             "state_selection": "final_epoch",
@@ -301,9 +376,9 @@ def run_refit(args: argparse.Namespace) -> dict[str, Any]:
         _seed_all(SEED)
         schema = bundle.manifest.exogenous_schema
         if schema is None:
-            raise QualificationError("AutoTimes refit requires exogenous Episodes.")
+            raise QualificationError("ICL refit requires exogenous Episodes.")
         model_config = _model_config(
-            MODEL_KEY,
+            policy.model_key,
             horizon=HORIZON,
             llm_local_path=args.llm_local_path.expanduser().resolve(),
             schema_hash=schema.fingerprint,
@@ -314,11 +389,20 @@ def run_refit(args: argparse.Namespace) -> dict[str, Any]:
             model_config,
             llm_revision=str(backbone["revision"]),
         )
-        model = _build_model(MODEL_KEY, model_config)
-        module = ICLEpisodeDataModule(bundle, batch_size=BATCH_SIZE, seed=SEED)
+        if policy.semantic_vocab_size is not None:
+            model_config = replace(
+                model_config,
+                semantic_vocab_size=int(policy.semantic_vocab_size),
+            )
+        model = _build_model(policy.model_key, model_config)
+        module = ICLEpisodeDataModule(
+            bundle,
+            batch_size=policy.batch_size,
+            seed=SEED,
+        )
         trainer_config = ICLTrainerConfig(
-            epochs=EPOCHS,
-            lr=LEARNING_RATE,
+            epochs=policy.epochs,
+            lr=policy.learning_rate,
             weight_decay=0.0,
             device=str(args.device),
             max_grad_norm=1.0,
@@ -326,16 +410,17 @@ def run_refit(args: argparse.Namespace) -> dict[str, Any]:
         )
         status_path.write_text("RUNNING current=training epoch=0\n", encoding="ascii")
         started, _ = _cuda_measurement()
-        result = train_autotimes_icl(
+        result = _train_model_icl(
+            policy,
             model,
-            module.loader(ICLSplit.TRAIN, shuffle=False),
-            trainer_config=trainer_config,
+            module,
+            trainer_config,
         )
         training_runtime = _finish_cuda_measurement(started)
         checkpoint_path = save_icl_production_checkpoint(
             result,
-            output_root / CHECKPOINT_FILENAME,
-            model_key=MODEL_KEY,
+            output_root / policy.checkpoint_filename,
+            model_key=policy.model_key,
             bundle=bundle,
             trainer_config=trainer_config,
             random_seed=SEED,
@@ -360,18 +445,12 @@ def run_refit(args: argparse.Namespace) -> dict[str, Any]:
         batch = next(iter(module.loader(ICLSplit.TRAIN, shuffle=False))).to(
             str(args.device)
         )
-        inputs = AutoTimesICLAdapter().adapt(batch)
         started, _ = _cuda_measurement()
         with torch.inference_mode():
-            output = predictor.model.forward_icl(
-                inputs.packed_context,
-                prompt_mask=inputs.prompt_mask,
-                packed_exogenous=inputs.packed_exogenous,
-                query_target_exogenous=inputs.query_target_exogenous,
-            )
+            output = _forward_icl_canary(policy, predictor.model, batch)
         inference_runtime = _finish_cuda_measurement(started)
         if output.shape != batch.query_target.shape or not torch.isfinite(output).all():
-            raise QualificationError("AutoTimes strict-load canary output is invalid.")
+            raise QualificationError("ICL strict-load canary output is invalid.")
 
         receipt = {
             **preflight,
@@ -412,6 +491,10 @@ def run_refit(args: argparse.Namespace) -> dict[str, Any]:
             encoding="utf-8",
         )
         raise
+
+
+def run_refit(args: argparse.Namespace) -> dict[str, Any]:
+    return _run_refit(args, AUTOTIMES_POLICY)
 
 
 def _parser() -> argparse.ArgumentParser:
