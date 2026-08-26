@@ -337,3 +337,27 @@ AutoTimes production-refit은 Validation 없이 마지막 epoch를 저장합니�
 W0-W25의 달력·Lifecycle/Warranty 특성, 정확히 두 개의 과거 demonstration을
 사용합니다. 미래 수요 정답은 입력하지 않으며 Qwen 경로는 Runtime에서 주입하되
 checkpoint에 봉인된 model ID, revision 및 manifest와 일치해야 합니다.
+
+## SELLM ICL Production refit
+
+사용자 승인에 따라 SELLM 운영 학습과 추론도 AutoTimes와 동일한 봉인 ICL
+Episode 경로로 통일했습니다. `aad91fe` clean checkout과 RTX 5090 `ai_env`에서
+202509까지의 전체 적격 3,320 series, 15,781 Episode를 seed 42, batch 4,
+5 epoch, learning rate `1e-4`로 refit했습니다. 모델 설정은 `paper_v1`,
+Token13, semantic vocabulary 256, identity head와 Qwen2-0.5B revision
+`91d2aff3f957f99e4c74c962f2f408dcc88a18d8`입니다.
+
+새 checkpoint는 기존 target-history-only artifact를 덮어쓰지 않고
+`weekly_SELLMICLBase_L52_H26.pt`로 분리했습니다. SHA256은
+`cb7d6f4d9596c319b095930feb921951c0658862f4738bb0c093dd1324609f6c`이고,
+Production receipt seal은
+`037db7b6be301949855429d34e8616c30087d3ddd4ae168f88f7f1081b7f6522`입니다.
+학습에는 891.41초가 걸렸고 peak allocated GPU memory는 3,301.1 MiB였습니다.
+checkpoint는 `production_refit`, Validation 비활성, final epoch, seed 42,
+5 completed epochs와 Episode/schema hash를 config와 metadata에 동일하게
+기록합니다.
+
+별도 strict-load inference에서는 미래 정답 없이 demonstration 2개와 과거·미래
+23개 외생변수를 전달했습니다. W0-W25 26행이 정확히 생성됐고 non-finite와 raw
+음수는 모두 0이었습니다. 이 결과는 실행 계약 검증이며 기존 Qualification FAIL과
+`approved_by_exception` 판정을 PASS로 변경하지 않습니다.
