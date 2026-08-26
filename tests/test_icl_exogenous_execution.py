@@ -21,11 +21,14 @@ from modeling_module.icl import (
     EndogenousICLBuilderConfig,
     ExogenousICLBuilderConfig,
     ExogenousICLDatasetBuilder,
+    ExogenousICLInferenceBuilder,
+    ICLInferenceBuilderConfig,
     ICLSplit,
     ICLTrainerConfig,
     SELLMICLAdapter,
     read_icl_episode_artifact,
     write_icl_episode_artifact,
+    save_icl_production_checkpoint,
 )
 from modeling_module.models.AutoTimes import AutoTimesConfig, AutoTimesModel
 from modeling_module.models.SELLM.SELLM import SELLMModel
@@ -265,3 +268,210 @@ def test_exogenous_icl_rejects_checkpoint_schema_mismatch():
             module.loader(ICLSplit.TRAIN, shuffle=False),
             trainer_config=ICLTrainerConfig(epochs=1, device="cpu"),
         )
+
+
+def test_autotimes_production_refit_saves_final_epoch_contract(tmp_path: Path):
+    source = _bundle()
+    train_only = replace(
+        source,
+        episodes=tuple(
+            replace(item, split=ICLSplit.TRAIN)
+            for item in source.episodes
+        ),
+        manifest=replace(
+            source.manifest,
+            split_counts={
+                "train": len(source.episodes),
+                "validation": 0,
+                "test": 0,
+            },
+            episode_hashes=tuple(
+                replace(item, split=ICLSplit.TRAIN).episode_hash
+                for item in source.episodes
+            ),
+        ),
+    )
+    # Recreate the manifest because split identity is part of its seal.
+    from modeling_module.icl.contracts import ICLManifest
+
+    train_only = replace(
+        train_only,
+        manifest=ICLManifest.create(
+            dataset_kind="exogenous",
+            source_revision=source.manifest.source_revision,
+            source_hash=source.manifest.source_hash,
+            config_hash=source.manifest.config_hash,
+            source_min_week=source.manifest.source_min_week,
+            source_max_week=source.manifest.source_max_week,
+            series_count=source.manifest.series_count,
+            episodes=train_only.episodes,
+            exogenous_schema=source.manifest.exogenous_schema,
+        ),
+    )
+    schema = train_only.manifest.exogenous_schema
+    assert schema is not None
+    config = replace(
+        _autotimes_config(schema.fingerprint),
+        llm_revision="qwen-revision-r1",
+    )
+    model = AutoTimesModel(config)
+    module = ICLEpisodeDataModule(train_only, batch_size=2, seed=42)
+    trainer_config = ICLTrainerConfig(
+        epochs=2,
+        lr=1e-3,
+        device="cpu",
+        training_mode="production_refit",
+    )
+
+    with pytest.raises(ValueError, match="requires val_loader=None"):
+        train_autotimes_icl(
+            model,
+            module.loader(ICLSplit.TRAIN, shuffle=False),
+            module.loader(ICLSplit.TRAIN, shuffle=False),
+            trainer_config=trainer_config,
+        )
+
+    result = train_autotimes_icl(
+        model,
+        module.loader(ICLSplit.TRAIN, shuffle=False),
+        trainer_config=trainer_config,
+    )
+    assert result.training_mode == "production_refit"
+    assert result.validation_enabled is False
+    assert result.state_selection == "final_epoch"
+    assert result.epochs_completed == 2
+
+    cutoff = max(item.query_target.end_week for item in train_only.episodes)
+    with pytest.raises(ValueError, match="complete eligible series set"):
+        save_icl_production_checkpoint(
+            result,
+            tmp_path / "partial.pt",
+            model_key="autotimes_base",
+            bundle=train_only,
+            trainer_config=trainer_config,
+            random_seed=42,
+            data_cutoff=cutoff,
+            eligible_series_count=train_only.manifest.series_count + 1,
+            backbone_contract={
+                "model_id": "Qwen/Qwen2-0.5B",
+                "revision": "qwen-revision-r1",
+                "manifest_sha256": "a" * 64,
+                "contract_sha256": "b" * 64,
+            },
+        )
+    checkpoint_path = save_icl_production_checkpoint(
+        result,
+        tmp_path / "weekly_AutoTimesBase_L8_H4.pt",
+        model_key="autotimes_base",
+        bundle=train_only,
+        trainer_config=trainer_config,
+        random_seed=42,
+        data_cutoff=cutoff,
+        eligible_series_count=train_only.manifest.series_count,
+        backbone_contract={
+            "model_id": "Qwen/Qwen2-0.5B",
+            "revision": "qwen-revision-r1",
+            "manifest_sha256": "a" * 64,
+            "contract_sha256": "b" * 64,
+        },
+    )
+    payload = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    assert payload["meta"]["training_mode"] == "production_refit"
+    assert payload["meta"]["validation_enabled"] is False
+    assert payload["meta"]["state_selection"] == "final_epoch"
+    assert payload["meta"]["random_seed"] == 42
+    assert payload["meta"]["train_data_cutoff"] == cutoff
+    assert payload["meta"]["eligible_series_count"] == (
+        train_only.manifest.series_count
+    )
+    assert payload["meta"]["episode_schema_hash"] == schema.fingerprint
+    assert payload["meta"]["backbone_contract"]["revision"] == (
+        "qwen-revision-r1"
+    )
+
+
+def test_inference_episode_has_no_future_label_and_filters_inactive_series(
+    tmp_path: Path,
+):
+    start = date.fromisocalendar(2022, 1, 1)
+    offsets = list(range(52))
+    rows = []
+    for series_id in ("active-part", "ended-part"):
+        for offset in offsets:
+            rows.append(
+                {
+                    "oper_part_no": series_id,
+                    "demand_dt": _week(start, offset),
+                    "demand_qty": float(5 + offset % 4),
+                    "promo_observed": float(offset % 3 == 0),
+                    "calendar_cycle": float((offset % 12) / 11),
+                }
+            )
+    history = pl.DataFrame(rows)
+    origin = _week(start, 52)
+    future = pl.DataFrame(
+        [
+            {
+                "oper_part_no": series_id,
+                "demand_dt": _week(start, offset),
+                "calendar_cycle": float((offset % 12) / 11),
+            }
+            for series_id in ("active-part", "ended-part")
+            for offset in range(52, 56)
+        ]
+    )
+    builder = ExogenousICLInferenceBuilder(
+        ICLInferenceBuilderConfig(
+            lookback=8,
+            horizon=4,
+            demonstration_stride=4,
+            seasonal_period=12,
+            past_feature_cols=("promo_observed", "calendar_cycle"),
+            future_feature_cols=("calendar_cycle",),
+        )
+    )
+    bundle = builder.build(
+        history,
+        future,
+        active_series_ids=("active-part",),
+        forecast_origin=origin,
+        source_revision="operational-demand-r1",
+        exogenous_source_revision="operational-exogenous-r1",
+    )
+
+    assert bundle.manifest.series_count == 1
+    assert bundle.manifest.split_counts["inference"] == 1
+    episode = bundle.for_split(ICLSplit.INFERENCE)[0]
+    assert episode.series_id == "active-part"
+    assert episode.query_target_observed is False
+    assert len(episode.demonstrations) == 2
+    assert set(episode.query_target.target) == {(0.0,)}
+    assert episode.query_target.start_week == origin
+    assert all(
+        prompt.end_week < episode.query_context.start_week
+        for prompt in episode.demonstrations
+    )
+
+    artifact_dir = tmp_path / "inference-episodes"
+    write_icl_episode_artifact(bundle, artifact_dir)
+    restored, _ = read_icl_episode_artifact(artifact_dir)
+    assert restored == bundle
+
+    schema = bundle.manifest.exogenous_schema
+    assert schema is not None
+    model = AutoTimesModel(_autotimes_config(schema.fingerprint))
+    checkpoint_path = tmp_path / "autotimes-inference.pt"
+    _save(model, checkpoint_path)
+    forecast = forecast_icl(
+        ICLForecastRequest(
+            checkpoint_path=checkpoint_path,
+            episode_artifact_dir=artifact_dir,
+            expected_model_key="autotimes_base",
+            split=ICLSplit.INFERENCE,
+            runtime=ICLForecastRuntimeConfig(batch_size=1, device="cpu"),
+        )
+    )
+    assert forecast.predictions.height == 4
+    assert forecast.predictions["series_id"].unique().to_list() == [
+        "active-part"
+    ]
