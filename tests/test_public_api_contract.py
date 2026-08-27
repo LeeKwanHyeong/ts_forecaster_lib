@@ -55,6 +55,7 @@ def test_public_api_exports_official_surface():
         "predict",
         "build_dataset",
         "build_dataloader",
+        "forecast",
         "TrainRequest",
         "TrainResult",
         "DataRequest",
@@ -68,11 +69,16 @@ def test_public_api_exports_official_surface():
         "TitanArchitectureConfig",
         "PatchMixerArchitectureConfig",
         "ExoTSTArchitectureConfig",
+        "NHITSArchitectureConfig",
+        "TimeMixerArchitectureConfig",
         "TimexerArchitectureConfig",
         "DataWindowConfig",
         "DataColumnConfig",
         "ExogenousConfig",
         "LoaderConfig",
+        "ForecastRequest",
+        "ForecastResult",
+        "ForecastRuntimeConfig",
     }
 
     for name in expected:
@@ -129,19 +135,19 @@ def test_train_result_leaves_primary_fields_empty_for_multi_model(monkeypatch, t
             },
             "PatchMixer": {
                 "ckpt_path": str(tmp_path / "patchmixer.pt"),
-                "model_key": "patchmixer_base",
+                "model_key": "patchmixer",
                 "family_key": "patchmixer",
             },
         }
 
     monkeypatch.setattr(train_module, "run_total_train", fake_run_total_train)
 
-    result = train(_make_request(models=["patchtst_base", "patchmixer_base"], tmp_path=tmp_path))
+    result = train(_make_request(models=["patchtst_base", "patchmixer"], tmp_path=tmp_path))
 
-    assert result.requested_models == ("patchtst_base", "patchmixer_base")
+    assert result.requested_models == ("patchtst_base", "patchmixer")
     assert result.ckpt_paths == {
         "patchtst_base": str(tmp_path / "patchtst.pt"),
-        "patchmixer_base": str(tmp_path / "patchmixer.pt"),
+        "patchmixer": str(tmp_path / "patchmixer.pt"),
     }
     assert result.primary_result_name is None
     assert result.primary_ckpt_path is None

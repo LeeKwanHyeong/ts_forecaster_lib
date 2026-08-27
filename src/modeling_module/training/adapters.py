@@ -3,6 +3,8 @@ import inspect
 import torch
 import torch.nn as nn
 
+from modeling_module.data_loader.exogenous_contracts import ExogenousBatch
+
 PREFERRED_KEYS = ("pred", "yhat", "output", "logits")
 
 
@@ -21,6 +23,7 @@ class ModelAdapter(Protocol):
             x_batch: Any,
             *,
             future_exo: Optional[torch.Tensor] = None,
+            future_exo_cat: Optional[torch.Tensor] = None,  # [B,H,E_k] long
             past_exo_cont: Optional[torch.Tensor] = None,  # [B,L,E_c] float32
             past_exo_cat: Optional[torch.Tensor] = None,  # [B,L,E_k] long
             part_ids: Optional[List[str]] = None,  # 길이 B
@@ -87,6 +90,7 @@ class DefaultAdapter:
             x: Any,
             *,
             future_exo: Optional[torch.Tensor] = None,
+            future_exo_cat: Optional[torch.Tensor] = None,
             past_exo_cont: Optional[torch.Tensor] = None,
             past_exo_cat: Optional[torch.Tensor] = None,
             part_ids: Optional[List[str]] = None,
@@ -99,18 +103,47 @@ class DefaultAdapter:
         - `inspect` 기반의 `_model_accepts_kw` 함수를 통해 인자 지원 여부 확인.
         - 지원하지 않는 인자는 제외하여 런타임 에러(Unexpected Keyword Argument) 방지.
         """
+        batch_size = int(x.shape[0]) if torch.is_tensor(x) and x.ndim >= 1 else None
+        lookback = int(x.shape[1]) if torch.is_tensor(x) and x.ndim >= 2 else None
+        horizon_value = getattr(model, "horizon", None)
+        horizon = int(horizon_value) if horizon_value is not None else None
+        exogenous = ExogenousBatch.from_legacy(
+            future_exo=future_exo,
+            future_exo_cat=future_exo_cat,
+            past_exo_cont=past_exo_cont,
+            past_exo_cat=past_exo_cat,
+            batch_size=batch_size,
+        ).validate(
+            batch_size=batch_size,
+            lookback=lookback,
+            horizon=horizon,
+        )
+        future_exo = exogenous.future_cont
+        future_exo_cat = exogenous.future_cat
+        past_exo_cont = exogenous.past_cont
+        past_exo_cat = exogenous.past_cat
+
         accepts: Dict[str, bool] = {
             "future_exo": _model_accepts_kw(model, "future_exo"),
+            "future_exo_cat": _model_accepts_kw(model, "future_exo_cat"),
             "past_exo_cont": _model_accepts_kw(model, "past_exo_cont"),
             "past_exo_cat": _model_accepts_kw(model, "past_exo_cat"),
             "part_ids": _model_accepts_kw(model, "part_ids"),
             "mode": _model_accepts_kw(model, "mode"),
         }
 
+        if future_exo_cat is not None and not accepts["future_exo_cat"]:
+            raise NotImplementedError(
+                f"{type(model).__name__}.forward does not declare "
+                "`future_exo_cat`; categorical values cannot be dropped."
+            )
+
         # 수용 가능한 인자만 kwargs에 구성
         kwargs = {}
         if future_exo is not None and accepts["future_exo"]:
             kwargs["future_exo"] = future_exo
+        if future_exo_cat is not None:
+            kwargs["future_exo_cat"] = future_exo_cat
         if past_exo_cont is not None and accepts["past_exo_cont"]:
             kwargs["past_exo_cont"] = past_exo_cont
         if past_exo_cat is not None and accepts["past_exo_cat"]:
@@ -160,6 +193,7 @@ class DefaultAdapter:
             x_batch: Any,
             *,
             future_exo: Optional[torch.Tensor] = None,
+            future_exo_cat: Optional[torch.Tensor] = None,
             past_exo_cont: Optional[torch.Tensor] = None,
             past_exo_cat: Optional[torch.Tensor] = None,
             part_ids: Optional[List[str]] = None,
@@ -175,6 +209,15 @@ class DefaultAdapter:
 
         # 1. Dict 입력 처리: **kwargs 언패킹 시도
         if isinstance(x_batch, dict):
+            if future_exo_cat is not None:
+                if not _model_accepts_kw(model, "future_exo_cat"):
+                    raise NotImplementedError(
+                        f"{type(model).__name__}.forward does not declare "
+                        "`future_exo_cat`; categorical values cannot be dropped."
+                    )
+                model_kwargs = dict(x_batch)
+                model_kwargs["future_exo_cat"] = future_exo_cat
+                return self._as_tensor(model(**model_kwargs))
             try:
                 return self._as_tensor(model(**x_batch))
             except TypeError:
@@ -183,29 +226,48 @@ class DefaultAdapter:
 
         # 2. Tuple/List 입력 처리
         if isinstance(x_batch, (tuple, list)):
-            try:
-                # *args 언패킹 시도
-                return self._as_tensor(model(*x_batch))
-            except TypeError:
-                # 언패킹 실패 시, (Input, Future_Exo) 형태의 튜플로 간주하여 처리
+            if future_exo_cat is not None:
                 if len(x_batch) == 2 and future_exo is None:
                     x_only, exo = x_batch
                     out = self._call_model(
-                        model, x_only,
+                        model,
+                        x_only,
                         future_exo=exo,
+                        future_exo_cat=future_exo_cat,
                         past_exo_cont=past_exo_cont,
                         past_exo_cat=past_exo_cat,
                         part_ids=part_ids,
                         mode=mode,
                     )
                     return self._as_tensor(out)
-                # 그 외의 경우 첫 번째 요소를 메인 입력으로 사용
+                if not x_batch:
+                    raise ValueError("x_batch cannot be empty.")
                 x_batch = x_batch[0]
+            else:
+                try:
+                    # *args 언패킹 시도
+                    return self._as_tensor(model(*x_batch))
+                except TypeError:
+                    # 언패킹 실패 시, (Input, Future_Exo) 형태의 튜플로 간주하여 처리
+                    if len(x_batch) == 2 and future_exo is None:
+                        x_only, exo = x_batch
+                        out = self._call_model(
+                            model, x_only,
+                            future_exo=exo,
+                            past_exo_cont=past_exo_cont,
+                            past_exo_cat=past_exo_cat,
+                            part_ids=part_ids,
+                            mode=mode,
+                        )
+                        return self._as_tensor(out)
+                    # 그 외의 경우 첫 번째 요소를 메인 입력으로 사용
+                    x_batch = x_batch[0]
 
         # 3. 일반적인 호출 (Tensor 입력 등)
         out = self._call_model(
             model, x_batch,
             future_exo=future_exo,
+            future_exo_cat=future_exo_cat,
             past_exo_cont=past_exo_cont,
             past_exo_cat=past_exo_cat,
             part_ids=part_ids,
@@ -238,6 +300,34 @@ class DefaultAdapter:
         """TTA 수행 로직 (기본값: 없음)."""
         return None
 
+
+class PatchTSTAdapter(DefaultAdapter):
+    """PatchTST adapter contract for continuous and categorical exogenous inputs."""
+
+    def forward(
+            self,
+            model: nn.Module,
+            x_batch: Any,
+            *,
+            future_exo: Optional[torch.Tensor] = None,
+            future_exo_cat: Optional[torch.Tensor] = None,
+            past_exo_cont: Optional[torch.Tensor] = None,
+            past_exo_cat: Optional[torch.Tensor] = None,
+            part_ids: Optional[List[str]] = None,
+            mode: Optional[str] = None,
+    ) -> Any:
+        return super().forward(
+            model,
+            x_batch,
+            future_exo=future_exo,
+            future_exo_cat=future_exo_cat,
+            past_exo_cont=past_exo_cont,
+            past_exo_cat=past_exo_cat,
+            part_ids=part_ids,
+            mode=mode,
+        )
+
+
 class PatchMixerAdapter(DefaultAdapter):
     def reg_loss(self, model):
         try:
@@ -247,6 +337,108 @@ class PatchMixerAdapter(DefaultAdapter):
         except Exception:
             pass
         return None
+
+
+def _has_nonempty_features(value: Any) -> bool:
+    if value is None:
+        return False
+    if torch.is_tensor(value):
+        return value.numel() > 0 and (value.ndim == 0 or value.shape[-1] > 0)
+    return True
+
+
+class PatchMixerEndogenousAdapter(DefaultAdapter):
+    """Keep the paper PatchMixer path endogenous-only and shape-strict."""
+
+    def forward(
+            self,
+            model: nn.Module,
+            x_batch: Any,
+            *,
+            future_exo: Optional[torch.Tensor] = None,
+            past_exo_cont: Optional[torch.Tensor] = None,
+            past_exo_cat: Optional[torch.Tensor] = None,
+            part_ids: Optional[List[str]] = None,
+            mode: Optional[str] = None,
+    ) -> torch.Tensor:
+        feature_inputs = {
+            "future_exo": future_exo,
+            "past_exo_cont": past_exo_cont,
+            "past_exo_cat": past_exo_cat,
+        }
+        provided = [
+            name for name, value in feature_inputs.items() if _has_nonempty_features(value)
+        ]
+        if provided:
+            raise RuntimeError(
+                "PatchMixer is endogenous-only; unsupported inputs: "
+                + ", ".join(provided)
+            )
+
+        output = super().forward(
+            model,
+            x_batch,
+            part_ids=part_ids,
+            mode=mode,
+        )
+        if not torch.is_tensor(output) or output.ndim != 3:
+            shape = tuple(output.shape) if torch.is_tensor(output) else type(output)
+            raise RuntimeError(
+                "PatchMixer must return [B,H,N], "
+                f"got {shape}."
+            )
+        return output
+
+
+class TimeMixerAdapter(DefaultAdapter):
+    """Enforce the endogenous single-target TimeMixer training contract."""
+
+    def forward(
+            self,
+            model: nn.Module,
+            x_batch: Any,
+            *,
+            future_exo: Optional[torch.Tensor] = None,
+            past_exo_cont: Optional[torch.Tensor] = None,
+            past_exo_cat: Optional[torch.Tensor] = None,
+            part_ids: Optional[List[str]] = None,
+            mode: Optional[str] = None,
+    ) -> torch.Tensor:
+        feature_inputs = {
+            "future_exo": future_exo,
+            "past_exo_cont": past_exo_cont,
+            "past_exo_cat": past_exo_cat,
+        }
+        provided = [
+            name for name, value in feature_inputs.items() if _has_nonempty_features(value)
+        ]
+        if provided:
+            raise RuntimeError(
+                "TimeMixer is endogenous-only; unsupported inputs: "
+                + ", ".join(provided)
+            )
+
+        output = super().forward(
+            model,
+            x_batch,
+            part_ids=part_ids,
+            mode=mode,
+        )
+        if not torch.is_tensor(output) or output.ndim != 3:
+            shape = tuple(output.shape) if torch.is_tensor(output) else type(output)
+            raise RuntimeError(
+                "TimeMixer must return [B,H,1], "
+                f"got {shape}."
+            )
+
+        expected_horizon = int(getattr(model, "horizon", output.shape[1]))
+        expected_shape = (int(output.shape[0]), expected_horizon, 1)
+        if tuple(output.shape) != expected_shape:
+            raise RuntimeError(
+                "TimeMixer must return [B,H,1], "
+                f"got {tuple(output.shape)}, expected {expected_shape}."
+            )
+        return output
 
 
 class TitanAdapter(DefaultAdapter):

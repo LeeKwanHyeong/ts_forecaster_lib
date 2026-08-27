@@ -18,7 +18,6 @@ import torch as t
 import torch.nn as nn
 from torch import optim
 
-
 # ---------------------------------------------------------------------------
 # Backbone import
 # ---------------------------------------------------------------------------
@@ -26,8 +25,10 @@ from torch import optim
 # and (b) script/local usage: `from backbone import _NHITS`.
 try:
     from .backbone import Backbone  # type: ignore
+    from .configs import NHITSConfig
 except Exception:
     from backbone import Backbone  # type: ignore
+    from configs import NHITSConfig  # type: ignore
 
 
 # ---------------------------------------------------------------------------
@@ -325,4 +326,112 @@ class NHITS(nn.Module):
         return {"optimizer": optimizer, "lr_scheduler": lr_scheduler}
 
 
-__all__ = ["NHITS"]
+def _has_nonempty_features(value) -> bool:
+    if value is None:
+        return False
+    if t.is_tensor(value):
+        return value.numel() > 0 and (value.ndim == 0 or int(value.shape[-1]) > 0)
+    return True
+
+
+class NHITSModel(nn.Module):
+    """Public N-HiTS model with the library's ``[B, L, C]`` tensor contract.
+
+    The legacy :class:`NHITS` wrapper above is retained for compatibility. This
+    class delegates forecasting to the same :class:`Backbone` implementation
+    while exposing an endogenous, single-target point forecast as ``[B, H, 1]``.
+    """
+
+    architecture_variant = "nhits_endogenous_point_v1"
+    exogenous_fusion_strategy = "none"
+
+    def __init__(self, cfg: NHITSConfig):
+        super().__init__()
+        self.cfg = cfg
+        self.config = cfg
+        self.lookback = int(cfg.lookback)
+        self.horizon = int(cfg.horizon)
+        self.y_dim = int(cfg.y_dim)
+        self.loss = cfg.loss
+        self.loss_type = "point"
+        self.out_mult = 1
+        self.param_names = None
+
+        self.backbone = Backbone(
+            n_time_in=self.lookback,
+            n_time_out=self.horizon,
+            n_s=0,
+            n_x=0,
+            n_s_hidden=0,
+            n_x_hidden=0,
+            stack_types=list(cfg.stack_types),
+            n_blocks=list(cfg.n_blocks),
+            n_layers=list(cfg.n_layers),
+            n_theta_hidden=[list(widths) for widths in cfg.n_theta_hidden],
+            n_pool_kernel_size=list(cfg.n_pool_kernel_size),
+            n_freq_downsample=list(cfg.n_freq_downsample),
+            pooling_mode=cfg.pooling_mode,
+            interpolation_mode=cfg.interpolation_mode,
+            dropout_prob_theta=float(cfg.dropout_prob_theta),
+            activation=cfg.activation,
+            initialization=cfg.initialization,
+            batch_normalization=bool(cfg.batch_normalization),
+            shared_weights=bool(cfg.shared_weights),
+        )
+
+    @classmethod
+    def from_config(cls, config: NHITSConfig) -> "NHITSModel":
+        return cls(config)
+
+    def forward(
+        self,
+        x: t.Tensor,
+        *,
+        future_exo=None,
+        past_exo_cont=None,
+        past_exo_cat=None,
+    ) -> t.Tensor:
+        provided = [
+            name
+            for name, value in (
+                ("future_exo", future_exo),
+                ("past_exo_cont", past_exo_cont),
+                ("past_exo_cat", past_exo_cat),
+            )
+            if _has_nonempty_features(value)
+        ]
+        if provided:
+            raise RuntimeError(
+                "nhits_base is endogenous-only; unsupported inputs: "
+                + ", ".join(provided)
+            )
+        if not t.is_tensor(x) or x.ndim != 3:
+            shape = tuple(x.shape) if t.is_tensor(x) else type(x).__name__
+            raise ValueError(f"NHITSModel expects x with shape [B,L,1], got {shape}.")
+
+        batch_size, lookback, channels = (int(value) for value in x.shape)
+        if lookback != self.lookback:
+            raise ValueError(
+                f"NHITSModel lookback mismatch: got {lookback}, expected {self.lookback}."
+            )
+        if channels != self.y_dim:
+            raise ValueError(
+                f"NHITSModel channel mismatch: got {channels}, expected {self.y_dim}."
+            )
+
+        insample_y = x[..., 0]
+        insample_x_t = x.new_empty((batch_size, 0, lookback))
+        outsample_x_t = x.new_empty((batch_size, 0, self.horizon))
+        insample_mask = x.new_ones((batch_size, lookback))
+        static_features = x.new_empty((batch_size, 0))
+        forecast = self.backbone.forecast(
+            insample_y=insample_y,
+            insample_x_t=insample_x_t,
+            insample_mask=insample_mask,
+            outsample_x_t=outsample_x_t,
+            x_s=static_features,
+        )
+        return forecast.unsqueeze(-1)
+
+
+__all__ = ["NHITS", "NHITSModel"]

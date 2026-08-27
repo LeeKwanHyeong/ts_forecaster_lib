@@ -3,8 +3,13 @@ from __future__ import annotations
 import pytest
 import torch
 
+from modeling_module.models.PatchTST.common.configs import (
+    AttentionConfig,
+    PatchTSTConfig,
+)
 from modeling_module.models.TimeXer.TimeXer import TimeXerModel
 from modeling_module.models.TimeXer.configs import TimeXerConfig
+from modeling_module.models.model_builder import build_patchTST_exogenous
 from modeling_module.training.forecater import (
     DMSForecaster,
     _infer_d_future_expected,
@@ -51,6 +56,33 @@ def _tiny_timexer() -> TimeXerModel:
     )
 
 
+def _tiny_categorical_patchtst() -> torch.nn.Module:
+    return build_patchTST_exogenous(
+        PatchTSTConfig(
+            device="cpu",
+            lookback=2,
+            horizon=1,
+            c_in=1,
+            patch_len=1,
+            stride=1,
+            d_model=4,
+            d_ff=8,
+            n_layers=1,
+            dropout=0.0,
+            past_exo_cat_dim=1,
+            cat_cardinalities=[3],
+            d_cat_emb=2,
+            use_revin=False,
+            attn=AttentionConfig(
+                n_heads=1,
+                d_model=4,
+                attn_dropout=0.0,
+                proj_dropout=0.0,
+            ),
+        )
+    )
+
+
 def test_timexer_inherited_training_default_is_not_mistaken_for_future_exogenous_support():
     assert _infer_d_future_expected(_tiny_timexer()) is None
 
@@ -68,15 +100,21 @@ def test_timexer_future_exogenous_rejection_is_preserved_through_forecaster():
         )
 
 
-def test_public_forecaster_rejects_nonempty_categorical_input_before_model_forward():
-    forecaster = DMSForecaster(_tiny_timexer())
+@pytest.mark.parametrize(
+    "model_factory",
+    [_tiny_timexer, _tiny_categorical_patchtst],
+    ids=["timexer", "patchtst-exogenous"],
+)
+def test_public_forecaster_rejects_nonempty_categorical_input_before_model_forward(
+    model_factory,
+):
+    forecaster = DMSForecaster(model_factory())
 
     with pytest.raises(RuntimeError, match="does not accept categorical past exogenous inputs"):
         forecaster.predict(
             torch.zeros(1, 2, 1),
             horizon=1,
             device="cpu",
-            past_exo_cont=torch.zeros(1, 2, 1),
             past_exo_cat=torch.zeros(1, 2, 1, dtype=torch.long),
         )
 

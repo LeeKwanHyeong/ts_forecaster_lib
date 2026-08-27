@@ -77,11 +77,15 @@ class TrainingConfig:
     epochs: int = 1  # 총 학습 에폭 수
     lr: float = 1e-4  # 초기 학습률 (Learning Rate)
     weight_decay: float = 1e-4  # 가중치 감쇠 (L2 Regularization)
+    lr_scheduler: Literal['cosine', 'constant'] = 'cosine'
     t_max: int = 10  # CosineAnnealingLR 스케줄러의 주기
     patience: int = 50  # 조기 종료(Early Stopping) 허용 횟수
     max_grad_norm: float = 30.0  # 그라디언트 클리핑 임계값
     amp_device: str = 'cuda' if torch.cuda.is_available() else 'cpu'  # AMP 수행 장치 유형
     use_amp: bool = torch.cuda.is_available()  # 자동 혼합 정밀도(AMP) 사용 여부
+    amp_dtype: Literal['bf16', 'fp16', 'fp32'] = 'bf16'
+    training_mode: Literal['qualification', 'production_refit'] = 'qualification'
+    random_seed: Optional[int] = None
 
     # --- New unified loss object (preferred) ---
     # Any torch.nn.Module that can be called as loss(y, y_hat, mask=..., y_insample=...)

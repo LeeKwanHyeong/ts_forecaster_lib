@@ -6,7 +6,7 @@ import warnings
 from dataclasses import MISSING, dataclass, field, fields, is_dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Mapping, Optional, Sequence
+from typing import Any, Dict, Literal, Mapping, Optional, Sequence
 
 from modeling_module.api.data import _materialize_payload as _materialize_data_payload
 from modeling_module.api.data import build_datamodule
@@ -17,11 +17,14 @@ from modeling_module._internal.checkpoint_runtime import (
 from modeling_module._internal.device_runtime import default_device, resolve_device
 from modeling_module._internal.loss_runtime import CHECKPOINT_SAFE_DISTRIBUTIONS
 from modeling_module._internal.model_registry import (
+    PRODUCTION_REFIT_ARTIFACT_KEYS,
     expand_training_targets,
     get_training_deprecation_messages,
+    resolve_artifact_model_key,
     resolve_training_request_key,
 )
 from modeling_module._internal.training_runtime import (
+    infer_future_cat_cardinalities_from_loader,
     infer_future_exo_spec_from_loader,
     infer_past_exo_dim_from_loader_for_exotst,
     get_freq_spec,
@@ -62,6 +65,14 @@ class TrainerConfig:
     - `loss_quantile`: Loss for quantile models.
     - `use_intermittent`: Enable intermittent-demand weighting logic.
     - `val_use_weights`: Apply intermittent weights during validation as well.
+    - `training_mode`: `qualification` selects/restores the best validation state.
+      `production_refit` requires a train-only loader and saves the final epoch state.
+    - `random_seed`: Reproducibility seed recorded in checkpoint metadata. The
+      caller remains responsible for seeding its data loader and runtime.
+    - `weight_decay`, `lr_scheduler`, `t_max`: AdamW regularization and learning
+      rate scheduling policy.
+    - `use_amp`, `amp_dtype`: Mixed-precision policy.
+    - `max_grad_norm`: Gradient clipping threshold.
     """
     epochs: Optional[int] = None
     lr: Optional[float] = None
@@ -73,6 +84,14 @@ class TrainerConfig:
     loss_quantile: Any = None
     use_intermittent: Optional[bool] = None
     val_use_weights: Optional[bool] = None
+    training_mode: Literal["qualification", "production_refit"] = "qualification"
+    random_seed: Optional[int] = None
+    weight_decay: Optional[float] = None
+    lr_scheduler: Optional[Literal["cosine", "constant"]] = None
+    t_max: Optional[int] = None
+    use_amp: Optional[bool] = None
+    amp_dtype: Optional[Literal["bf16", "fp16", "fp32"]] = None
+    max_grad_norm: Optional[float] = None
 
 
 @dataclass
@@ -86,6 +105,9 @@ class SSLConfig:
       `ssl_only` runs only SSL pretraining.
       `full` runs SSL pretraining and then supervised finetuning.
     - `pretrain_epochs`: Number of SSL pretraining epochs.
+    - `pretrain_stride`: Optional PatchTST patch stride used only during SSL
+      pretraining. If omitted, the supervised model stride is reused for
+      backward compatibility.
     - `mask_ratio`: Masking ratio used by PatchTST pretraining.
     - `loss_type`: Reconstruction loss type for SSL pretraining.
     - `freeze_encoder_before_ft`: Optionally freeze encoder blocks at the beginning of finetuning.
@@ -96,6 +118,7 @@ class SSLConfig:
     """
     mode: Optional[str] = None
     pretrain_epochs: Optional[int] = None
+    pretrain_stride: Optional[int] = None
     mask_ratio: Optional[float] = None
     loss_type: Optional[str] = None
     freeze_encoder_before_ft: Optional[bool] = None
@@ -147,6 +170,7 @@ class PatchTSTArchitectureConfig:
     pe: Optional[str] = None
     learn_pe: Optional[bool] = None
     padding_patch: Optional[str] = None
+    future_exo_cat_embedding_dim: Optional[int] = None
     future_exo_fusion_dropout: Optional[float] = None
 
 
@@ -175,6 +199,7 @@ class PatchMixerArchitectureConfig:
     stride: Optional[int] = None
     d_model: Optional[int] = None
     e_layers: Optional[int] = None
+    mixer_kernel_size: Optional[int] = None
     f_out: Optional[int] = None
     head_hidden: Optional[int] = None
     dropout: Optional[float] = None
@@ -203,6 +228,26 @@ class ExoTSTArchitectureConfig:
     exo_nan_policy: Optional[str] = None
     use_revin: Optional[bool] = None
     subtract_last: Optional[bool] = None
+    negative_output_penalty_weight: Optional[float] = None
+
+
+@dataclass
+class NHITSArchitectureConfig:
+    """N-HiTS endogenous point-model architecture overrides."""
+
+    stack_types: Optional[Sequence[str]] = None
+    n_blocks: Optional[Sequence[int]] = None
+    n_layers: Optional[Sequence[int]] = None
+    n_theta_hidden: Optional[Sequence[Sequence[int]]] = None
+    n_pool_kernel_size: Optional[Sequence[int]] = None
+    n_freq_downsample: Optional[Sequence[int]] = None
+    pooling_mode: Optional[str] = None
+    interpolation_mode: Optional[str] = None
+    activation: Optional[str] = None
+    initialization: Optional[str] = None
+    batch_normalization: Optional[bool] = None
+    dropout_prob_theta: Optional[float] = None
+    shared_weights: Optional[bool] = None
 
 
 @dataclass
@@ -227,6 +272,106 @@ class TimexerArchitectureConfig:
 
 
 @dataclass
+class TimeMixerArchitectureConfig:
+    """TimeMixer endogenous point-model architecture overrides."""
+
+    d_model: Optional[int] = None
+    d_ff: Optional[int] = None
+    e_layers: Optional[int] = None
+    moving_avg: Optional[int] = None
+    down_sampling_layers: Optional[int] = None
+    down_sampling_window: Optional[int] = None
+    dropout: Optional[float] = None
+    use_norm: Optional[bool] = None
+    embed: Optional[Literal["timeF", "fixed", "learned"]] = None
+    freq: Optional[str] = None
+
+
+@dataclass
+class SELLMArchitectureConfig:
+    """
+    SELLM family architecture overrides.
+
+    Use `use_pretrained_llm=False` for lightweight CPU tests. When it is True,
+    choose a Hub model ID or an on-premise model directory with `llm_source`.
+    """
+
+    architecture_variant: Optional[Literal["legacy_v1", "paper_v1"]] = None
+    token_len: Optional[int] = None
+    d_model: Optional[int] = None
+    n_heads: Optional[int] = None
+    dropout: Optional[float] = None
+    mlp_hidden_dim: Optional[int] = None
+    mlp_activation: Optional[str] = None
+    semantic_vocab_size: Optional[int] = None
+    semantic_top_k: Optional[int] = None
+    tscc_latent_dim: Optional[int] = None
+    tscc_hidden_dim: Optional[int] = None
+    tscc_kl_weight: Optional[float] = None
+    use_pretrained_llm: Optional[bool] = None
+    llm_source: Optional[Literal["huggingface", "local"]] = None
+    llm_model_name: Optional[str] = None
+    llm_local_path: Optional[str] = None
+    llm_revision: Optional[str] = None
+    freeze_llm: Optional[bool] = None
+    use_time_adapter: Optional[bool] = None
+    time_adapter_rank: Optional[int] = None
+    time_adapter_layers: Optional[int] = None
+    fallback_layers: Optional[int] = None
+    d_ff: Optional[int] = None
+    head_hidden_dim: Optional[int] = None
+    use_norm: Optional[bool] = None
+    final_nonneg: Optional[bool] = None
+    output_head_mode: Optional[
+        Literal["identity", "softplus", "zero_inflated_softplus"]
+    ] = None
+    output_head_hidden_dim: Optional[int] = None
+    output_head_softplus_beta: Optional[float] = None
+    output_head_initial_nonzero_probability: Optional[float] = None
+    output_calibration_mode: Optional[
+        Literal["none", "validation_scalar"]
+    ] = None
+    output_calibration_scale: Optional[float] = None
+    output_calibration_min_scale: Optional[float] = None
+    output_calibration_max_scale: Optional[float] = None
+    output_calibration_fitted: Optional[bool] = None
+    output_calibration_source_fingerprint: Optional[str] = None
+    negative_output_penalty_weight: Optional[float] = None
+    icl_enabled: Optional[bool] = None
+    icl_past_exogenous_dim: Optional[int] = None
+    icl_future_exogenous_dim: Optional[int] = None
+    icl_exogenous_schema_hash: Optional[str] = None
+
+
+@dataclass
+class AutoTimesArchitectureConfig:
+    """AutoTimes frozen-backbone architecture and timestamp artifact overrides."""
+
+    token_len: Optional[int] = None
+    backbone_type: Optional[Literal["mock", "llama", "gpt2", "opt"]] = None
+    llm_source: Optional[Literal["huggingface", "local"]] = None
+    llm_model_name: Optional[str] = None
+    llm_local_path: Optional[str] = None
+    llm_revision: Optional[str] = None
+    local_files_only: Optional[bool] = None
+    freeze_llm: Optional[bool] = None
+    hidden_size: Optional[int] = None
+    mock_layers: Optional[int] = None
+    mock_heads: Optional[int] = None
+    mlp_hidden_dim: Optional[int] = None
+    mlp_hidden_layers: Optional[int] = None
+    mlp_activation: Optional[Literal["relu", "gelu", "tanh"]] = None
+    dropout: Optional[float] = None
+    mix_timestamp_embeddings: Optional[bool] = None
+    timestamp_artifact_path: Optional[str] = None
+    timestamp_artifact_sha256: Optional[str] = None
+    icl_enabled: Optional[bool] = None
+    icl_past_exogenous_dim: Optional[int] = None
+    icl_future_exogenous_dim: Optional[int] = None
+    icl_exogenous_schema_hash: Optional[str] = None
+
+
+@dataclass
 class ArchitectureConfig:
     """
     Family-level model architecture overrides.
@@ -235,14 +380,18 @@ class ArchitectureConfig:
     - Overrides are applied per family. For example, `patchtst` settings affect
       both `patchtst_base` and `patchtst_quantile`.
     - Mapping-style input is also supported. Keys may be family names such as
-      `patchtst`, `patchmixer`, `titan`, `exotst`, or canonical artifact keys
-      such as `titan_base`.
+      `patchtst`, `patchmixer`, `titan`, `exotst`, `nhits`, `timemixer`, or
+      canonical artifact keys such as `titan_base`.
     """
     patchtst: Optional[PatchTSTArchitectureConfig | Mapping[str, Any]] = None
     titan: Optional[TitanArchitectureConfig | Mapping[str, Any]] = None
     patchmixer: Optional[PatchMixerArchitectureConfig | Mapping[str, Any]] = None
     exotst: Optional[ExoTSTArchitectureConfig | Mapping[str, Any]] = None
+    nhits: Optional[NHITSArchitectureConfig | Mapping[str, Any]] = None
+    timemixer: Optional[TimeMixerArchitectureConfig | Mapping[str, Any]] = None
     timexer: Optional[TimexerArchitectureConfig | Mapping[str, Any]] = None
+    sellm: Optional[SELLMArchitectureConfig | Mapping[str, Any]] = None
+    autotimes: Optional[AutoTimesArchitectureConfig | Mapping[str, Any]] = None
 
 
 @dataclass
@@ -265,7 +414,8 @@ class TrainRequest:
     Parameters
     - `config_path`: Optional JSON/YAML config file to load first.
     - `config`: Optional in-memory mapping merged before explicit request fields.
-    - `train_loader`, `val_loader`: Prebuilt loaders. Must be provided together.
+    - `train_loader`, `val_loader`: Prebuilt loaders. Qualification requires both;
+      production refit requires only `train_loader`.
     - `data`: `DataRequest` or mapping used to build a datamodule when loaders are not supplied.
     - `trainer`, `ssl`, `runtime`, `artifacts`: Nested config groups for public API usage.
     - `models` / `model` / `models_to_run`: Requested training targets. Families such as
@@ -277,8 +427,9 @@ class TrainRequest:
     - `save_dir`, `auto_save_dir`
     - `use_exogenous_mode`, `use_past_exogenous`, `use_future_exogenous`
     - `loss`, `loss_point`, `loss_quantile`
-    - `use_ssl_mode`, `ssl_pretrain_epochs`, `ssl_mask_ratio`, `ssl_loss_type`,
-      `ssl_freeze_encoder_before_ft`, `ssl_pretrained_ckpt_path`
+    - `use_ssl_mode`, `ssl_pretrain_epochs`, `ssl_pretrain_stride`,
+      `ssl_mask_ratio`, `ssl_loss_type`, `ssl_freeze_encoder_before_ft`,
+      `ssl_pretrained_ckpt_path`
     - `use_intermittent`, `val_use_weights`
     """
     config_path: Optional[str] = None
@@ -320,6 +471,7 @@ class TrainRequest:
 
     use_ssl_mode: Optional[str] = None
     ssl_pretrain_epochs: Optional[int] = None
+    ssl_pretrain_stride: Optional[int] = None
     ssl_mask_ratio: Optional[float] = None
     ssl_loss_type: Optional[str] = None
     ssl_freeze_encoder_before_ft: Optional[bool] = None
@@ -419,6 +571,7 @@ _ARCHITECTURE_ALLOWED_KEYS: dict[str, set[str]] = {
         "pe",
         "learn_pe",
         "padding_patch",
+        "future_exo_cat_embedding_dim",
         "future_exo_fusion_dropout",
     },
     "titan": {
@@ -437,6 +590,7 @@ _ARCHITECTURE_ALLOWED_KEYS: dict[str, set[str]] = {
         "stride",
         "d_model",
         "e_layers",
+        "mixer_kernel_size",
         "f_out",
         "head_hidden",
         "dropout",
@@ -460,6 +614,34 @@ _ARCHITECTURE_ALLOWED_KEYS: dict[str, set[str]] = {
         "exo_nan_policy",
         "use_revin",
         "subtract_last",
+        "negative_output_penalty_weight",
+    },
+    "nhits": {
+        "stack_types",
+        "n_blocks",
+        "n_layers",
+        "n_theta_hidden",
+        "n_pool_kernel_size",
+        "n_freq_downsample",
+        "pooling_mode",
+        "interpolation_mode",
+        "activation",
+        "initialization",
+        "batch_normalization",
+        "dropout_prob_theta",
+        "shared_weights",
+    },
+    "timemixer": {
+        "d_model",
+        "d_ff",
+        "e_layers",
+        "moving_avg",
+        "down_sampling_layers",
+        "down_sampling_window",
+        "dropout",
+        "use_norm",
+        "embed",
+        "freq",
     },
     "timexer": {
         "patch_len",
@@ -472,11 +654,81 @@ _ARCHITECTURE_ALLOWED_KEYS: dict[str, set[str]] = {
         "activation",
         "use_norm",
     },
+    "sellm": {
+        "architecture_variant",
+        "token_len",
+        "d_model",
+        "n_heads",
+        "dropout",
+        "mlp_hidden_dim",
+        "mlp_activation",
+        "semantic_vocab_size",
+        "semantic_top_k",
+        "tscc_latent_dim",
+        "tscc_hidden_dim",
+        "tscc_kl_weight",
+        "use_pretrained_llm",
+        "llm_source",
+        "llm_model_name",
+        "llm_local_path",
+        "llm_revision",
+        "freeze_llm",
+        "use_time_adapter",
+        "time_adapter_rank",
+        "time_adapter_layers",
+        "fallback_layers",
+        "d_ff",
+        "head_hidden_dim",
+        "use_norm",
+        "final_nonneg",
+        "output_head_mode",
+        "output_head_hidden_dim",
+        "output_head_softplus_beta",
+        "output_head_initial_nonzero_probability",
+        "output_calibration_mode",
+        "output_calibration_scale",
+        "output_calibration_min_scale",
+        "output_calibration_max_scale",
+        "output_calibration_fitted",
+        "output_calibration_source_fingerprint",
+        "negative_output_penalty_weight",
+        "icl_enabled",
+        "icl_past_exogenous_dim",
+        "icl_future_exogenous_dim",
+        "icl_exogenous_schema_hash",
+    },
+    "autotimes": {
+        "token_len",
+        "backbone_type",
+        "llm_source",
+        "llm_model_name",
+        "llm_local_path",
+        "llm_revision",
+        "local_files_only",
+        "freeze_llm",
+        "hidden_size",
+        "mock_layers",
+        "mock_heads",
+        "mlp_hidden_dim",
+        "mlp_hidden_layers",
+        "mlp_activation",
+        "dropout",
+        "mix_timestamp_embeddings",
+        "timestamp_artifact_path",
+        "timestamp_artifact_sha256",
+        "icl_enabled",
+        "icl_past_exogenous_dim",
+        "icl_future_exogenous_dim",
+        "icl_exogenous_schema_hash",
+    },
 }
 
 
 def _family_from_training_target(name: str) -> str:
-    canonical = resolve_training_request_key(name)
+    try:
+        canonical = resolve_training_request_key(name)
+    except ValueError:
+        canonical = resolve_artifact_model_key(name)
     if canonical == "patchtst" or canonical.startswith("patchtst_"):
         return "patchtst"
     if canonical == "patchmixer" or canonical.startswith("patchmixer_"):
@@ -485,8 +737,16 @@ def _family_from_training_target(name: str) -> str:
         return "titan"
     if canonical == "exotst" or canonical.startswith("exotst_"):
         return "exotst"
+    if canonical == "nhits" or canonical.startswith("nhits_"):
+        return "nhits"
+    if canonical == "timemixer" or canonical.startswith("timemixer_"):
+        return "timemixer"
     if canonical == "timexer" or canonical.startswith("timexer_"):
         return "timexer"
+    if canonical == "sellm" or canonical.startswith("sellm_"):
+        return "sellm"
+    if canonical == "autotimes" or canonical.startswith("autotimes_"):
+        return "autotimes"
     raise ValueError(f"Unsupported architecture override target: {name!r}")
 
 
@@ -591,12 +851,22 @@ def _normalize_payload(raw: Mapping[str, Any]) -> dict[str, Any]:
             "loss_quantile": "loss_quantile",
             "use_intermittent": "use_intermittent",
             "val_use_weights": "val_use_weights",
+            "training_mode": "training_mode",
+            "random_seed": "random_seed",
+            "weight_decay": "weight_decay",
+            "lr_scheduler": "lr_scheduler",
+            "t_max": "t_max",
+            "use_amp": "use_amp",
+            "amp_dtype": "amp_dtype",
+            "max_grad_norm": "max_grad_norm",
         },
         "ssl": {
             "mode": "use_ssl_mode",
             "use_ssl_mode": "use_ssl_mode",
             "pretrain_epochs": "ssl_pretrain_epochs",
             "ssl_pretrain_epochs": "ssl_pretrain_epochs",
+            "pretrain_stride": "ssl_pretrain_stride",
+            "ssl_pretrain_stride": "ssl_pretrain_stride",
             "mask_ratio": "ssl_mask_ratio",
             "ssl_mask_ratio": "ssl_mask_ratio",
             "loss_type": "ssl_loss_type",
@@ -700,6 +970,7 @@ def _merged_data_config(payload: Mapping[str, Any]) -> dict[str, Any]:
         "past_exo_cont_cols",
         "past_exo_cat_cols",
         "future_exo_cont_cols",
+        "future_exo_cat_cols",
         "fill_missing",
         "target_back_steps",
         "future_exo_cb",
@@ -707,6 +978,7 @@ def _merged_data_config(payload: Mapping[str, Any]) -> dict[str, Any]:
         "date_indexer",
         "build_cat_indexer_from",
         "cat_indexer_target_col",
+        "categorical_vocabulary_artifact",
         "split_mode",
         "path",
         "df",
@@ -758,7 +1030,21 @@ def _resolve_loaders(payload: dict[str, Any]) -> tuple[Any, Any, Any]:
     train_loader = payload.get("train_loader")
     val_loader = payload.get("val_loader")
     datamodule = None
+    training_mode = payload.get("training_mode", "qualification")
 
+    if training_mode == "production_refit":
+        if train_loader is None:
+            raise ValueError(
+                "production_refit requires a prebuilt `train_loader`."
+            )
+        if val_loader is not None:
+            raise ValueError(
+                "production_refit requires `val_loader=None`."
+            )
+        return train_loader, None, datamodule
+
+    if training_mode != "qualification":
+        raise ValueError(f"Unsupported training_mode: {training_mode!r}.")
     if (train_loader is None) != (val_loader is None):
         raise ValueError("`train_loader` and `val_loader` must be provided together.")
 
@@ -922,6 +1208,16 @@ def _validate_checkpoint_safe_distribution_loss(payload: Mapping[str, Any]) -> N
     if not is_distribution_loss:
         return
 
+    requested_models = payload.get("models_to_run") or expand_training_targets(None)
+    if any(model in requested_models for model in ("patchmixer", "patchmixer_exo")):
+        raise ValueError(
+            "PatchMixer public training supports point loss only; distribution "
+            "checkpoints are retained through the legacy load-only contract."
+        )
+    if "nhits_base" in requested_models:
+        raise ValueError(
+            "nhits_base supports point loss only; distribution checkpoints are not supported."
+        )
     distribution = getattr(loss_obj, "distribution", None)
     if distribution is None or str(distribution) in _CHECKPOINT_SAFE_DISTRIBUTIONS:
         return
@@ -934,6 +1230,37 @@ def _validate_checkpoint_safe_distribution_loss(payload: Mapping[str, Any]) -> N
     )
 
 
+def _validate_timemixer_point_loss(payload: Mapping[str, Any]) -> None:
+    """Reject non-point loss objects before constructing a TimeMixer model."""
+
+    requested_models = payload.get("models_to_run") or expand_training_targets(None)
+    if "timemixer" not in requested_models:
+        return
+
+    loss_obj = payload.get("loss_point")
+    if loss_obj is None:
+        loss_obj = payload.get("loss")
+    if loss_obj is None:
+        return
+
+    loss_name = loss_obj.__class__.__name__
+    is_distribution = bool(
+        getattr(loss_obj, "is_distribution_output", False)
+    ) or loss_name == "DistributionLoss"
+    is_quantile = loss_name in {
+        "MQLoss",
+        "QuantileLoss",
+        "QuantileAsPointLoss",
+        "MultiQuantilePinball",
+    }
+    if is_distribution or is_quantile:
+        mode = "distribution" if is_distribution else "quantile"
+        raise ValueError(
+            "timemixer supports point loss only; "
+            f"got {mode} loss {loss_name!r}."
+        )
+
+
 def _validate_ssl_artifact_precondition(payload: Mapping[str, Any]) -> None:
     ssl_mode = str(payload.get("use_ssl_mode") or "sl_only").strip().lower()
     if ssl_mode == "off":
@@ -943,8 +1270,21 @@ def _validate_ssl_artifact_precondition(payload: Mapping[str, Any]) -> None:
             "`ssl.mode` must be one of: 'sl_only', 'ssl_only', 'full', or 'off'. "
             f"Got {payload.get('use_ssl_mode')!r}."
         )
+
     if ssl_mode not in _SSL_ARTIFACT_MODES:
         return
+
+    pretrain_epochs = payload.get("ssl_pretrain_epochs")
+    if pretrain_epochs is not None and int(pretrain_epochs) <= 0:
+        raise ValueError("`ssl.pretrain_epochs` must be a positive integer.")
+
+    pretrain_stride = payload.get("ssl_pretrain_stride")
+    if pretrain_stride is not None and int(pretrain_stride) <= 0:
+        raise ValueError("`ssl.pretrain_stride` must be a positive integer.")
+
+    mask_ratio = payload.get("ssl_mask_ratio")
+    if mask_ratio is not None and not 0.0 < float(mask_ratio) <= 1.0:
+        raise ValueError("`ssl.mask_ratio` must be in the interval (0, 1].")
 
     requested_models = payload.get("models_to_run") or expand_training_targets(None)
     if not any(_family_from_training_target(model) == "patchtst" for model in requested_models):
@@ -984,6 +1324,33 @@ def _validate_training_request(
     horizon_i = int(horizon)
     if lookback_i <= 0 or horizon_i <= 0:
         raise ValueError("`lookback` and `horizon` must be positive integers.")
+
+    training_mode = payload.get("training_mode", "qualification")
+    if training_mode not in {"qualification", "production_refit"}:
+        raise ValueError(f"Unsupported training_mode: {training_mode!r}.")
+    if training_mode == "production_refit":
+        if (
+            len(requested_models) != 1
+            or requested_models[0] not in PRODUCTION_REFIT_ARTIFACT_KEYS
+        ):
+            supported = ", ".join(PRODUCTION_REFIT_ARTIFACT_KEYS)
+            raise ValueError(
+                "production_refit supports exactly one approved artifact: "
+                f"{supported}."
+            )
+        if int(payload.get("spike_epochs") or 0) > 0:
+            raise ValueError(
+                "production_refit requires spike_epochs=0 so the configured "
+                "epoch count maps to one fixed supervised stage."
+            )
+        if str(payload.get("use_ssl_mode") or "sl_only").lower() in {
+            "ssl_only",
+            "full",
+        }:
+            raise ValueError(
+                "production_refit supports supervised-only training; "
+                "use ssl.mode='sl_only' or 'off'."
+            )
 
     freq_spec = get_freq_spec(freq_value)
     architecture = payload.get("model_architecture") or {}
@@ -1026,6 +1393,54 @@ def _validate_training_request(
         lookback=lookback_i,
         horizon=horizon_i,
     )
+    explicit_exogenous_models = {
+        "patchtst_exogenous",
+        "patchtst_quantile_exogenous",
+        "patchmixer_exo",
+    }
+    requested_explicit_exogenous = sorted(
+        explicit_exogenous_models.intersection(requested_models)
+    )
+    if requested_explicit_exogenous:
+        future_cat_cardinalities = infer_future_cat_cardinalities_from_loader(
+            train_loader
+        )
+        requested = ", ".join(requested_explicit_exogenous)
+        if not bool(payload.get("use_exogenous_mode", False)):
+            raise ValueError(
+                f"Invalid training request for {requested}: explicit exogenous models require "
+                "use_exogenous_mode=True."
+            )
+        if not any(
+            (
+                int(past_cont_dim),
+                int(past_cat_dim),
+                int(future_exo_dim),
+                len(future_cat_cardinalities),
+            )
+        ):
+            raise ValueError(
+                f"Invalid training request for {requested}: at least one past or future "
+                "exogenous feature is required."
+            )
+
+    if (
+        "patchmixer" in requested_models
+        and bool(payload.get("use_exogenous_mode", False))
+    ):
+        raise ValueError(
+            "Invalid training request for patchmixer: the paper model supports "
+            "endogenous inputs only."
+        )
+
+    if (
+        "timemixer" in requested_models
+        and bool(payload.get("use_exogenous_mode", False))
+    ):
+        raise ValueError(
+            "Invalid training request for timemixer: TimeMixer supports "
+            "endogenous inputs only."
+        )
 
     categorical_models = [
         model for model in requested_models if _family_from_training_target(model) != "timexer"
@@ -1067,6 +1482,12 @@ def _validate_training_request(
                 "exogenous inputs. Encode them into continuous channels first."
             )
 
+    if "nhits_base" in requested_models and bool(payload.get("use_exogenous_mode", False)):
+        raise ValueError(
+            "Invalid training request for nhits_base: the public N-HiTS artifact "
+            "supports endogenous inputs only."
+        )
+
     if "exotst_base" not in requested_models:
         return
 
@@ -1086,7 +1507,6 @@ def _validate_training_request(
             "Invalid training request for exotst_base: ExoTST requires past continuous exogenous inputs. "
             "Provide `past_exo_cont_cols` (or a loader that emits `pe_cont`)."
         )
-
 
 def train(req: TrainRequest | Mapping[str, Any]) -> TrainResult:
     """
@@ -1126,6 +1546,7 @@ def train(req: TrainRequest | Mapping[str, Any]) -> TrainResult:
     """
     payload = _normalize_payload(_request_to_dict(req))
     _warn_deprecated_training_targets(payload)
+    _validate_timemixer_point_loss(payload)
     _validate_checkpoint_safe_distribution_loss(payload)
     _validate_ssl_artifact_precondition(payload)
     train_loader, val_loader, datamodule = _resolve_loaders(payload)
@@ -1144,6 +1565,7 @@ def train(req: TrainRequest | Mapping[str, Any]) -> TrainResult:
     )
     use_ssl_mode = payload.get("use_ssl_mode") or "sl_only"
     ssl_pretrain_epochs = payload.get("ssl_pretrain_epochs")
+    ssl_pretrain_stride = payload.get("ssl_pretrain_stride")
     ssl_mask_ratio = payload.get("ssl_mask_ratio")
     ssl_loss_type = payload.get("ssl_loss_type")
     ssl_freeze_encoder_before_ft = payload.get("ssl_freeze_encoder_before_ft")
@@ -1171,6 +1593,11 @@ def train(req: TrainRequest | Mapping[str, Any]) -> TrainResult:
         loss=payload.get("loss"),
         use_ssl_mode=str(use_ssl_mode),
         ssl_pretrain_epochs=int(ssl_pretrain_epochs if ssl_pretrain_epochs is not None else 10),
+        ssl_pretrain_stride=(
+            None
+            if ssl_pretrain_stride is None
+            else int(ssl_pretrain_stride)
+        ),
         ssl_mask_ratio=float(ssl_mask_ratio if ssl_mask_ratio is not None else 0.3),
         ssl_loss_type=str(ssl_loss_type or "mse"),
         ssl_freeze_encoder_before_ft=bool(
@@ -1179,6 +1606,14 @@ def train(req: TrainRequest | Mapping[str, Any]) -> TrainResult:
         ssl_pretrained_ckpt_path=payload.get("ssl_pretrained_ckpt_path"),
         use_intermittent=bool(use_intermittent if use_intermittent is not None else True),
         val_use_weights=bool(val_use_weights if val_use_weights is not None else True),
+        training_mode=str(payload.get("training_mode", "qualification")),
+        random_seed=payload.get("random_seed"),
+        weight_decay=payload.get("weight_decay"),
+        lr_scheduler=payload.get("lr_scheduler"),
+        t_max=payload.get("t_max"),
+        use_amp=payload.get("use_amp"),
+        amp_dtype=payload.get("amp_dtype"),
+        max_grad_norm=payload.get("max_grad_norm"),
     )
 
     return _make_result(
@@ -1193,11 +1628,14 @@ def train(req: TrainRequest | Mapping[str, Any]) -> TrainResult:
 __all__ = [
     "ArtifactConfig",
     "ArchitectureConfig",
+    "AutoTimesArchitectureConfig",
     "ExoTSTArchitectureConfig",
+    "NHITSArchitectureConfig",
     "PatchMixerArchitectureConfig",
     "PatchTSTArchitectureConfig",
     "RuntimeConfig",
     "SSLConfig",
+    "TimeMixerArchitectureConfig",
     "TimexerArchitectureConfig",
     "TitanArchitectureConfig",
     "TrainRequest",

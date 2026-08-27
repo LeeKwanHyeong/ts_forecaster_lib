@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "captured_on": "2026-07-23",
+  "paper": {
+    "title": "TimeMixer: Decomposable Multiscale Mixing for Time Series Forecasting",
+    "url": "https://arxiv.org/abs/2405.14616",
+    "arxiv_version": "2405.14616v1"
+  },
+  "upstream": {
+    "repository": "https://github.com/kwuking/TimeMixer",
+    "commit": "e24610583b36fdd8c76cc17a8df4e65759a5f460",
+    "tree": "f4e2c914a34e966684d034e3732ef869c18cbc50",
+    "model_last_commit": "38a3507595048d998d12f00d37b66987d03295fc"
+  },
+  "license": {
+    "spdx": "Apache-2.0",
+    "upstream_path": "LICENSE",
+    "vendored_path": "LICENSE.upstream",
+    "notice_present": false
+  },
+  "files": {
+    "models/TimeMixer.py": {
+      "sha256": "817d62f4aac54c8566e560f6d3785856e31c8ee51460279ee3d0a4823f11d4be",
+      "git_blob": "ad1847df86646848cdfecab568eb49f7099ef1ce",
+      "bytes": 20663,
+      "lines": 527
+    },
+    "layers/Embed.py": {
+      "sha256": "ab492ea2f68459bbcf3cbffdd1beb75b24d0d70248d017a313a3b470316aaa2b",
+      "git_blob": "f558c590b26c7df31942ac12adeae63211df46ca",
+      "bytes": 9579,
+      "lines": 250
+    },
+    "layers/Autoformer_EncDec.py": {
+      "sha256": "48745b4bb647355e9845792a855df9c59fd7df7fcc664c765351fec390c4073e",
+      "git_blob": "6fce4bcd6b3d3eb00e9bcf5931ed2ee301554f4a",
+      "bytes": 6831,
+      "lines": 203
+    },
+    "layers/StandardNorm.py": {
+      "sha256": "cc1c0bc65b7b094bbe83f988fb05b86272a59638c030c3781aa52ce8880379df",
+      "git_blob": "c1c9269c0139eaa6cd08de4f55b47c82f64a6f9f",
+      "bytes": 2183,
+      "lines": 67
+    },
+    "LICENSE": {
+      "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+      "git_blob": "261eeb9e9f8b2b4b0d119366dda99c6fd7d35c64",
+      "bytes": 11357,
+      "lines": 201
+    }
+  }
+}

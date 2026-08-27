@@ -1,0 +1,108 @@
+{
+  "contract_id": "dsio-v100-h26-nonnegative-output-experiment-decision-v1",
+  "status": "APPROVED_FOR_RESEARCH_EXPERIMENT",
+  "decision_date": "2026-08-24",
+  "runtime_policy": {
+    "current": "clip_zero",
+    "decision": "KEEP_UNCHANGED",
+    "reason": "The current projection improves MAE for every model and seed, and remains the final demand-domain safety boundary."
+  },
+  "experiment_decision": {
+    "run_training_experiment": true,
+    "run_additional_posthoc_policy_sweep": false,
+    "production_change_approved": false,
+    "question": "Can output-space negative regularization improve accuracy beyond the existing linear-head plus clip_zero baseline?"
+  },
+  "qualification_contract": {
+    "lookback": 52,
+    "horizon": 26,
+    "train_end_week": 202435,
+    "validation_start_week": 202436,
+    "validation_end_week": 202509,
+    "eligible_series": 6952,
+    "forecast_points_per_model_seed": 180752,
+    "seeds": [11, 22, 33, 42]
+  },
+  "model_summary": {
+    "exotst_base": {
+      "priority": 1,
+      "mean_raw_negative_rate": 0.24126289059042222,
+      "raw_negative_rate_range": [0.22092148357971142, 0.25417146144994246],
+      "mean_clip_mae_improvement_percent": 11.38612903659531,
+      "clip_mae_improvement_range_percent": [9.494800732505368, 13.376770945147983],
+      "mean_clip_smape_improvement_percent": 41.62512989775324,
+      "production_canary_raw_negative_rate": 0.3807032967032967
+    },
+    "patchtst_exogenous": {
+      "priority": 2,
+      "mean_raw_negative_rate": 0.18029537709126317,
+      "raw_negative_rate_range": [0.1386595998937771, 0.22005289014782686],
+      "mean_clip_mae_improvement_percent": 5.666552106869405,
+      "clip_mae_improvement_range_percent": [2.8525660968961923, 8.606161650752142],
+      "mean_clip_smape_improvement_percent": 36.687176913565175,
+      "production_canary_raw_negative_rate": 0.30563186813186816
+    },
+    "timexer_base": {
+      "priority": 3,
+      "mean_raw_negative_rate": 0.09009858812074002,
+      "raw_negative_rate_range": [0.08136009560060194, 0.1076668584579977],
+      "mean_clip_mae_improvement_percent": 3.6744357564876657,
+      "clip_mae_improvement_range_percent": [2.6640954664437957, 5.180741442472406],
+      "mean_clip_smape_improvement_percent": 18.15138092726293,
+      "production_canary_raw_negative_rate": 0.2255879120879121
+    }
+  },
+  "per_seed_evidence": [
+    {"model_key": "exotst_base", "seed": 11, "raw_negative_rate": 0.22092148357971142, "raw_mae": 1.4077206992470788, "clip_mae": 1.2629948814736258},
+    {"model_key": "exotst_base", "seed": 22, "raw_negative_rate": 0.25417146144994246, "raw_mae": 1.4909803137276079, "clip_mae": 1.3062167987207018},
+    {"model_key": "exotst_base", "seed": 33, "raw_negative_rate": 0.25043153049482164, "raw_mae": 1.3914232489992686, "clip_mae": 1.2052957481031004},
+    {"model_key": "exotst_base", "seed": 42, "raw_negative_rate": 0.2395270868372134, "raw_mae": 1.3864353295236624, "clip_mae": 1.2547960577003365},
+    {"model_key": "patchtst_exogenous", "seed": 11, "raw_negative_rate": 0.1386595998937771, "raw_mae": 1.4512877735895005, "clip_mae": 1.4098888305916868},
+    {"model_key": "patchtst_exogenous", "seed": 22, "raw_negative_rate": 0.156551518102151, "raw_mae": 1.280719405948348, "clip_mae": 1.2175301742271083},
+    {"model_key": "patchtst_exogenous", "seed": 33, "raw_negative_rate": 0.22005289014782686, "raw_mae": 1.3387193694772614, "clip_mae": 1.2235070164901185},
+    {"model_key": "patchtst_exogenous", "seed": 42, "raw_negative_rate": 0.20591750022129768, "raw_mae": 1.2672675851701622, "clip_mae": 1.1877643496589647},
+    {"model_key": "timexer_base", "seed": 11, "raw_negative_rate": 0.08282066035230592, "raw_mae": 1.3806315610967455, "clip_mae": 1.339047337929706},
+    {"model_key": "timexer_base", "seed": 22, "raw_negative_rate": 0.08136009560060194, "raw_mae": 1.3939433410198863, "clip_mae": 1.3568073596669803},
+    {"model_key": "timexer_base", "seed": 33, "raw_negative_rate": 0.1076668584579977, "raw_mae": 1.4044238962817153, "clip_mae": 1.3316643254590628},
+    {"model_key": "timexer_base", "seed": 42, "raw_negative_rate": 0.08854673807205453, "raw_mae": 1.396676580189847, "clip_mae": 1.3430311398907049}
+  ],
+  "pilot_contract": {
+    "control": "Current linear point head, current point loss, and clip_zero evaluation",
+    "candidate": "Current linear point head plus output-space squared negative penalty; clip_zero remains enabled for evaluation",
+    "penalty": "lambda * mean(relu(-raw_output_space_point)^2)",
+    "lambda_candidates": [0.01, 0.1, 1.0],
+    "pilot_model": "exotst_base",
+    "pilot_seed": 42,
+    "maximum_epochs": 40,
+    "selection_boundary": "Select lambda only inside the existing training/validation contract; do not use production Canary outputs as labels."
+  },
+  "promotion_gates": {
+    "pilot_to_multiseed": {
+      "minimum_clip_mae_improvement_percent": 1.0,
+      "minimum_raw_negative_rate_reduction_percent": 50.0,
+      "maximum_absolute_normalized_bias_degradation_percentage_points": 1.0
+    },
+    "multiseed_acceptance": {
+      "seeds": [11, 22, 33],
+      "minimum_mean_clip_mae_improvement_percent": 1.0,
+      "maximum_worst_seed_clip_mae_degradation_percent": 1.0,
+      "minimum_mean_raw_negative_rate_reduction_percent": 50.0,
+      "maximum_horizon_segment_mae_degradation_percent": 2.0
+    }
+  },
+  "excluded_candidates": {
+    "relu_output_head": "Excluded because hard zero creates dead gradients for negative pre-activations.",
+    "posthoc_absolute_value": "Excluded because it converts invalid negative demand into unsupported positive volume.",
+    "posthoc_softplus_without_retraining": "Excluded because it changes every positive prediction and is not the trained model contract.",
+    "normalized_space_constraint": "Excluded because positivity in RevIN-normalized coordinates is not the business output-space constraint."
+  },
+  "source_csv_sha256": {
+    "seed42_all_models": "79f6d70391b697c402cf60ec615339b4f048928a47df35c49ad100c883966c43",
+    "seed11_exotst_patchtst": "52dcf3bc947815f0313462f1b41ba40fd382c493ed7a46d0963adae9e2c74d3a",
+    "seed22_exotst_patchtst": "307a469420f3cbf892f4985715a683a28ff434a5ce8a7b132bd60c1350f8ffb2",
+    "seed33_exotst_patchtst": "404b8f17988b3a081ef283b0b053338d6d11bc782bddf2246c0d5409417ac99c",
+    "seed11_timexer": "ce7f883839bd66333b58279e6af7f363e3ffe939d65fc574b06d50f04d32d4cd",
+    "seed22_timexer": "e445f363a643379f705da6f7089037d6fc44c238eb513b8ea8ac576b567a46f6",
+    "seed33_timexer": "0805332fc4c5801744f4d34cc20478d8d15f91fe505e376d886dd0e2c9bbdebf"
+  }
+}

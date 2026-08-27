@@ -9,51 +9,119 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Callable, Dict
 
-from .registry import build_model, get_model_builders, list_available_model_keys
+from modeling_module._internal.optional_features import SELLM_AVAILABLE
+
+from .registry import (
+    build_model,
+    get_model_builders,
+    get_patchmixer_default_model_key,
+    get_patchtst_default_model_key,
+    list_available_model_keys,
+)
 
 __all__ = [
     # unified entrypoint
     "build_model",
     "MODEL_BUILDERS",
     "list_available_models",
+    "get_patchmixer_default_model_key",
+    "get_patchtst_default_model_key",
 
     # explicit builders (stable public surface)
     "build_patch_mixer",
-    "build_patch_mixer_quantile",
+    "build_patch_mixer_exogenous",
     "build_titan_base",
     "build_titan_lmm",
     "build_titan_seq2seq",
     "build_patchTST",
+    "build_patchTST_exogenous",
     "build_patchTST_quantile",
+    "build_patchTST_quantile_exogenous",
     "build_exotst",
+    "build_nhits",
+    "build_timemixer",
     "build_timexer",
+    "build_autotimes",
+    "build_cgmm",
+    "build_similar_lifecycle",
+    "CGMMConfig",
+    "SimilarLifecycleConfig",
+    "PatchMixerConfig",
+    "PatchMixerExogenousConfig",
+    "TimeMixerConfig",
 ]
 
 if TYPE_CHECKING:
     from .model_builder import (
         build_exotst,
+        build_cgmm,
+        build_similar_lifecycle,
+        build_nhits,
+        build_timemixer,
+        build_sellm as build_sellm,
         build_patch_mixer,
-        build_patch_mixer_quantile,
+        build_patch_mixer_exogenous,
         build_titan_base,
         build_titan_lmm,
         build_titan_seq2seq,
         build_patchTST,
+        build_patchTST_exogenous,
         build_patchTST_quantile,
+        build_patchTST_quantile_exogenous,
         build_timexer,
+        build_autotimes,
     )
+    from .PatchMixer.common.configs import PatchMixerConfig, PatchMixerExogenousConfig
+    from .CGMM.configs import CGMMConfig
+    from .SimilarLifecycle.configs import SimilarLifecycleConfig
+    from .TimeMixer.configs import TimeMixerConfig
 
 # Lazy import map: import modeling_module.models 시점에 heavy import 방지
 _LAZY = {
+    "build_cgmm": (".model_builder", "build_cgmm"),
+    "build_similar_lifecycle": (
+        ".model_builder",
+        "build_similar_lifecycle",
+    ),
     "build_patch_mixer": (".model_builder", "build_patch_mixer"),
-    "build_patch_mixer_quantile": (".model_builder", "build_patch_mixer_quantile"),
+    "build_patch_mixer_exogenous": (".model_builder", "build_patch_mixer_exogenous"),
     "build_titan_base": (".model_builder", "build_titan_base"),
     "build_titan_lmm": (".model_builder", "build_titan_lmm"),
     "build_titan_seq2seq": (".model_builder", "build_titan_seq2seq"),
     "build_patchTST": (".model_builder", "build_patchTST"),
+    "build_patchTST_exogenous": (".model_builder", "build_patchTST_exogenous"),
     "build_patchTST_quantile": (".model_builder", "build_patchTST_quantile"),
+    "build_patchTST_quantile_exogenous": (".model_builder", "build_patchTST_quantile_exogenous"),
     "build_exotst": (".model_builder", "build_exotst"),
+    "build_nhits": (".model_builder", "build_nhits"),
+    "build_timemixer": (".model_builder", "build_timemixer"),
     "build_timexer": (".model_builder", "build_timexer"),
+    "build_autotimes": (".model_builder", "build_autotimes"),
+    "PatchMixerConfig": (
+        ".PatchMixer.common.configs",
+        "PatchMixerConfig",
+    ),
+    "PatchMixerExogenousConfig": (
+        ".PatchMixer.common.configs",
+        "PatchMixerExogenousConfig",
+    ),
+    "TimeMixerConfig": (
+        ".TimeMixer.configs",
+        "TimeMixerConfig",
+    ),
+    "CGMMConfig": (
+        ".CGMM.configs",
+        "CGMMConfig",
+    ),
+    "SimilarLifecycleConfig": (
+        ".SimilarLifecycle.configs",
+        "SimilarLifecycleConfig",
+    ),
 }
+
+if SELLM_AVAILABLE:
+    __all__.append("build_sellm")
+    _LAZY["build_sellm"] = (".model_builder", "build_sellm")
 
 
 def __getattr__(name: str):

@@ -1,0 +1,229 @@
+{
+  "backbone": {
+    "model_id": "Qwen/Qwen2-0.5B",
+    "revision": "91d2aff3f957f99e4c74c962f2f408dcc88a18d8"
+  },
+  "contract": "modeling_module.icl_backbone_multiseed.v1",
+  "expected_seeds": [
+    11,
+    22,
+    33
+  ],
+  "gates": {
+    "max_abs_bias": 0.1,
+    "max_mae_cv": 0.1,
+    "max_mean_raw_negative_rate": 0.1
+  },
+  "models": {
+    "autotimes_base": {
+      "gates": {
+        "bias_within_limit": false,
+        "checkpoint_reload_parity": true,
+        "mae_cv_within_limit": false,
+        "raw_negative_rate_within_limit": true
+      },
+      "mae_cv": 0.23678613784711913,
+      "metrics": {
+        "bias": {
+          "max": 0.5502421237976769,
+          "mean": 0.37609391837545664,
+          "min": 0.23327658194892215,
+          "population_std": 0.13128342417301403
+        },
+        "mae": {
+          "max": 6.052668509951148,
+          "mean": 4.655909186942527,
+          "min": 3.357606802153616,
+          "population_std": 1.1024547545430414
+        },
+        "raw_negative_rate": {
+          "max": 0.0655048076923077,
+          "mean": 0.03926282051282051,
+          "min": 0.006610576923076923,
+          "population_std": 0.024467000155430813
+        },
+        "smape": {
+          "max": 0.9700720876948979,
+          "mean": 0.8753250200740511,
+          "min": 0.7788811800605995,
+          "population_std": 0.07806258202203725
+        },
+        "wape": {
+          "max": 0.8994142168743267,
+          "mean": 0.6918586253859943,
+          "min": 0.49893353445111777,
+          "population_std": 0.16382253184136644
+        }
+      },
+      "peak_allocated_mib": {
+        "max": 6128.9375,
+        "mean": 6128.9375,
+        "min": 6128.9375,
+        "population_std": 0.0
+      },
+      "receipts": [
+        {
+          "checkpoint_sha256": "2d5c55ef29f49616b51d8dbac0a1c937a08949073cfba316e47c8b9318c3beb0",
+          "path": "/home/leekwanhyeong/artifacts/icl-backbone-multiseed/0c2607a/autotimes-seed11/qualification-receipt.json",
+          "receipt_sha256": "675f92036f0fd59299c43f79dd09623783eb412ed31f9a30313a73abf72d008b"
+        },
+        {
+          "checkpoint_sha256": "22510e2bcd183352797a864ce2312150a3ffbe05616fd025c83ac471539856ed",
+          "path": "/home/leekwanhyeong/artifacts/icl-backbone-multiseed/0c2607a/autotimes-seed22/qualification-receipt.json",
+          "receipt_sha256": "c6503d21d2c9a4f26f8215a81926e900693976dd4b76c3ed8cb7f452dd6e923c"
+        },
+        {
+          "checkpoint_sha256": "0673b9a3cdc6709f5a23e1bc46c2ee4c3a0254d700022fc6792215ec109a96b5",
+          "path": "/home/leekwanhyeong/artifacts/icl-backbone-multiseed/0c2607a/autotimes-seed33/qualification-receipt.json",
+          "receipt_sha256": "5a81af3d33790d7be41a452a116248dd03e52c829fc6ee358688909a68faf09f"
+        }
+      ],
+      "seed_values": {
+        "bias": {
+          "11": 0.3447630493797709,
+          "22": 0.5502421237976769,
+          "33": 0.23327658194892215
+        },
+        "mae": {
+          "11": 4.557452248722816,
+          "22": 6.052668509951148,
+          "33": 3.357606802153616
+        },
+        "raw_negative_rate": {
+          "11": 0.04567307692307692,
+          "22": 0.006610576923076923,
+          "33": 0.0655048076923077
+        },
+        "smape": {
+          "11": 0.8770217924666561,
+          "22": 0.9700720876948979,
+          "33": 0.7788811800605995
+        },
+        "wape": {
+          "11": 0.6772281248325385,
+          "22": 0.8994142168743267,
+          "33": 0.49893353445111777
+        }
+      },
+      "seeds": [
+        11,
+        22,
+        33
+      ],
+      "status": "FAIL",
+      "training_seconds": {
+        "max": 280.2634593839757,
+        "mean": 276.6698262926657,
+        "min": 270.29206084494945,
+        "population_std": 4.5218537452033765
+      }
+    },
+    "sellm_base": {
+      "gates": {
+        "bias_within_limit": false,
+        "checkpoint_reload_parity": true,
+        "mae_cv_within_limit": true,
+        "raw_negative_rate_within_limit": false
+      },
+      "mae_cv": 0.041736664686272795,
+      "metrics": {
+        "bias": {
+          "max": 0.16005547875500212,
+          "mean": 0.11745900781536313,
+          "min": 0.04285847495860086,
+          "population_std": 0.05292749385785374
+        },
+        "mae": {
+          "max": 4.086836394388229,
+          "mean": 3.9047918506205463,
+          "min": 3.69135581170961,
+          "population_std": 0.16297298813904035
+        },
+        "raw_negative_rate": {
+          "max": 0.169921875,
+          "mean": 0.15489783653846154,
+          "min": 0.1365685096153846,
+          "population_std": 0.013815581649726745
+        },
+        "smape": {
+          "max": 0.8376211002551911,
+          "mean": 0.816695928761734,
+          "min": 0.7917994871727265,
+          "population_std": 0.01891618876339582
+        },
+        "wape": {
+          "max": 0.6072955670889456,
+          "mean": 0.5802441185419351,
+          "min": 0.5485279577321657,
+          "population_std": 0.02421745421176667
+        }
+      },
+      "peak_allocated_mib": {
+        "max": 2844.34765625,
+        "mean": 2844.34765625,
+        "min": 2844.34765625,
+        "population_std": 0.0
+      },
+      "receipts": [
+        {
+          "checkpoint_sha256": "3d7c300d604fdd4489c6b2c23478e324cdb5f4daf211271d5c11744b2d8d871f",
+          "path": "/home/leekwanhyeong/artifacts/icl-backbone-multiseed/0c2607a/sellm-seed11/qualification-receipt.json",
+          "receipt_sha256": "b69926b101e24e9c48b1db76ed5ba1ad0d88c0f03478b0d33d7c29b454510454"
+        },
+        {
+          "checkpoint_sha256": "8ac45caf34911cc230d7d4fd2b903b1a63fb440ce19d33594e8a297f3ac3c824",
+          "path": "/home/leekwanhyeong/artifacts/icl-backbone-multiseed/0c2607a/sellm-seed22/qualification-receipt.json",
+          "receipt_sha256": "16d40fc2c826216fd333a61224784456ac9200d8bbbedb488f5da0fbab1052bd"
+        },
+        {
+          "checkpoint_sha256": "cd3b23543ef0bb3b161d769392f359c0bcd10bb7fad52413a00c1047ebed1bef",
+          "path": "/home/leekwanhyeong/artifacts/icl-backbone-multiseed/0c2607a/sellm-seed33/qualification-receipt.json",
+          "receipt_sha256": "a7da335295d5de1bbb8cb798222961720bc89a569f33b53e7bdc4a57536a6d87"
+        }
+      ],
+      "seed_values": {
+        "bias": {
+          "11": 0.1494630697324864,
+          "22": 0.04285847495860086,
+          "33": 0.16005547875500212
+        },
+        "mae": {
+          "11": 3.936183345763801,
+          "22": 4.086836394388229,
+          "33": 3.69135581170961
+        },
+        "raw_negative_rate": {
+          "11": 0.1365685096153846,
+          "22": 0.169921875,
+          "33": 0.158203125
+        },
+        "smape": {
+          "11": 0.7917994871727265,
+          "22": 0.8376211002551911,
+          "33": 0.8206671988572848
+        },
+        "wape": {
+          "11": 0.5849088308046941,
+          "22": 0.6072955670889456,
+          "33": 0.5485279577321657
+        }
+      },
+      "seeds": [
+        11,
+        22,
+        33
+      ],
+      "status": "FAIL",
+      "training_seconds": {
+        "max": 46.93875355902128,
+        "mean": 46.22703614035466,
+        "min": 45.098923610989004,
+        "population_std": 0.8067557356803271
+      }
+    }
+  },
+  "operational_candidates": [],
+  "receipt_sha256": "26b7ebec1cc6c3457f834a353abc95c5bcf11c4ee3751b91419154e0e8160c14",
+  "recommended_default": null,
+  "status": "FAIL"
+}

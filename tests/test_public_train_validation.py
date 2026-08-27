@@ -3,7 +3,13 @@ import importlib
 import polars as pl
 import pytest
 
-from modeling_module import ArtifactConfig, SSLConfig, TrainRequest, train
+from modeling_module import (
+    ArtifactConfig,
+    DistributionLoss,
+    SSLConfig,
+    TrainRequest,
+    train,
+)
 
 
 def _make_daily_df(n_rows: int = 10) -> pl.DataFrame:
@@ -109,6 +115,75 @@ def test_train_allows_sl_only_without_artifact_directory(monkeypatch):
     assert exc_info.value is marker
 
 
+@pytest.mark.parametrize(
+    ("ssl_kwargs", "message"),
+    [
+        ({"pretrain_epochs": 0}, "ssl.pretrain_epochs"),
+        ({"pretrain_stride": 0}, "ssl.pretrain_stride"),
+        ({"mask_ratio": 0.0}, "ssl.mask_ratio"),
+        ({"mask_ratio": 1.1}, "ssl.mask_ratio"),
+    ],
+)
+def test_train_rejects_invalid_active_ssl_options_before_data_resolution(
+    monkeypatch,
+    tmp_path,
+    ssl_kwargs,
+    message,
+):
+    train_module = importlib.import_module("modeling_module.api.train")
+    reached_data_resolution = False
+
+    def unexpected_resolve_loaders(payload):
+        nonlocal reached_data_resolution
+        reached_data_resolution = True
+        raise AssertionError("data resolution must not run")
+
+    monkeypatch.setattr(
+        train_module,
+        "_resolve_loaders",
+        unexpected_resolve_loaders,
+    )
+
+    request = TrainRequest(
+        models=["patchtst_base"],
+        ssl=SSLConfig(mode="full", **ssl_kwargs),
+        artifacts=ArtifactConfig(
+            save_dir=str(tmp_path),
+            auto_save_dir=False,
+        ),
+    )
+
+    with pytest.raises(ValueError, match=message):
+        train(request)
+
+    assert reached_data_resolution is False
+
+
+def test_train_ignores_legacy_zero_pretrain_epochs_when_ssl_is_off(
+    monkeypatch,
+):
+    train_module = importlib.import_module("modeling_module.api.train")
+    marker = RuntimeError("data-resolution-reached")
+
+    def stop_at_data_resolution(payload):
+        raise marker
+
+    monkeypatch.setattr(
+        train_module,
+        "_resolve_loaders",
+        stop_at_data_resolution,
+    )
+
+    request = TrainRequest(
+        models=["patchtst_base"],
+        ssl=SSLConfig(mode="off", pretrain_epochs=0),
+        artifacts=ArtifactConfig(save_dir=None, auto_save_dir=False),
+    )
+
+    with pytest.raises(RuntimeError, match="data-resolution-reached"):
+        train(request)
+
+
 @pytest.mark.parametrize("ssl_mode", ["full", "ssl_only"])
 def test_train_rejects_patchtst_ssl_mode_for_non_patchtst_request_before_data_resolution(
     monkeypatch,
@@ -200,6 +275,108 @@ def test_train_rejects_exotst_without_exogenous_mode(tmp_path):
                 "auto_save_dir": False,
             }
         )
+
+
+def test_train_rejects_nhits_exogenous_mode_before_model_construction(
+    monkeypatch,
+    tmp_path,
+):
+    train_module = importlib.import_module("modeling_module.api.train")
+    reached_training = False
+
+    def unexpected_training(*args, **kwargs):
+        nonlocal reached_training
+        reached_training = True
+        raise AssertionError("model construction and training must not run")
+
+    monkeypatch.setattr(train_module, "run_total_train", unexpected_training)
+
+    with pytest.raises(ValueError, match="nhits_base.*supports endogenous inputs only"):
+        train(
+            {
+                "data": {
+                    "df": _make_daily_df_with_future_exo(),
+                    "lookback": 14,
+                    "horizon": 2,
+                    "freq": "daily",
+                    "batch_size": 2,
+                    "past_exo_cont_cols": ["exo_hist"],
+                    "future_exo_cont_cols": ["promo_flag"],
+                },
+                "models": ["nhits_base"],
+                "use_exogenous_mode": True,
+                "trainer": {"epochs": 1, "lr": 1e-3},
+                "device": "cpu",
+                "save_dir": str(tmp_path),
+                "auto_save_dir": False,
+            }
+        )
+
+    assert reached_training is False
+
+
+def test_train_rejects_timemixer_exogenous_mode_before_model_construction(
+    monkeypatch,
+    tmp_path,
+):
+    train_module = importlib.import_module("modeling_module.api.train")
+    reached_training = False
+
+    def unexpected_training(*args, **kwargs):
+        nonlocal reached_training
+        reached_training = True
+        raise AssertionError("model construction and training must not run")
+
+    monkeypatch.setattr(train_module, "run_total_train", unexpected_training)
+
+    with pytest.raises(ValueError, match="timemixer.*endogenous inputs only"):
+        train(
+            {
+                "data": {
+                    "df": _make_daily_df_with_future_exo(),
+                    "lookback": 14,
+                    "horizon": 2,
+                    "freq": "daily",
+                    "batch_size": 2,
+                    "past_exo_cont_cols": ["exo_hist"],
+                    "future_exo_cont_cols": ["promo_flag"],
+                },
+                "models": ["timemixer"],
+                "use_exogenous_mode": True,
+                "trainer": {"epochs": 1, "lr": 1e-3},
+                "device": "cpu",
+                "save_dir": str(tmp_path),
+                "auto_save_dir": False,
+            }
+        )
+
+    assert reached_training is False
+
+
+def test_train_rejects_nhits_distribution_before_data_resolution(monkeypatch, tmp_path):
+    train_module = importlib.import_module("modeling_module.api.train")
+    reached_data_resolution = False
+
+    def unexpected_resolve_loaders(payload):
+        nonlocal reached_data_resolution
+        reached_data_resolution = True
+        raise AssertionError("data resolution must not run")
+
+    monkeypatch.setattr(train_module, "_resolve_loaders", unexpected_resolve_loaders)
+
+    with pytest.raises(ValueError, match="nhits_base supports point loss only"):
+        train(
+            TrainRequest(
+                models=["nhits_base"],
+                trainer={"loss": DistributionLoss(distribution="Normal")},
+                artifacts=ArtifactConfig(
+                    save_dir=str(tmp_path),
+                    auto_save_dir=False,
+                ),
+            )
+        )
+
+    assert reached_data_resolution is False
 
 
 def test_train_rejects_timexer_without_exogenous_mode(tmp_path):
@@ -294,9 +471,171 @@ def test_train_rejects_timexer_with_categorical_exogenous_input(tmp_path):
         )
 
 
+def test_train_rejects_patchmixer_distribution_before_data_resolution(
+    monkeypatch,
+):
+    train_module = importlib.import_module("modeling_module.api.train")
+    reached_data_resolution = False
+
+    def unexpected_resolve_loaders(payload):
+        nonlocal reached_data_resolution
+        reached_data_resolution = True
+        raise AssertionError("data resolution must not run")
+
+    monkeypatch.setattr(train_module, "_resolve_loaders", unexpected_resolve_loaders)
+
+    with pytest.raises(ValueError, match="PatchMixer public training supports point loss only"):
+        train(
+            TrainRequest(
+                models=["patchmixer"],
+                trainer={"loss": DistributionLoss("Normal")},
+                artifacts=ArtifactConfig(save_dir=None, auto_save_dir=False),
+            )
+        )
+
+    assert reached_data_resolution is False
+
+
+def test_train_rejects_patchmixer_exogenous_inputs_before_training(
+    monkeypatch,
+    tmp_path,
+):
+    train_module = importlib.import_module("modeling_module.api.train")
+    reached_training = False
+
+    def unexpected_training(*args, **kwargs):
+        nonlocal reached_training
+        reached_training = True
+        raise AssertionError("model construction and training must not run")
+
+    monkeypatch.setattr(train_module, "run_total_train", unexpected_training)
+
+    with pytest.raises(ValueError, match="paper model supports endogenous"):
+        train(
+            {
+                "data": {
+                    "df": _make_daily_df_with_future_exo(),
+                    "lookback": 14,
+                    "horizon": 2,
+                    "freq": "daily",
+                    "batch_size": 2,
+                    "past_exo_cont_cols": ["exo_hist"],
+                    "future_exo_cont_cols": ["promo_flag"],
+                },
+                "models": ["patchmixer"],
+                "use_exogenous_mode": True,
+                "trainer": {"epochs": 1, "lr": 1e-3},
+                "device": "cpu",
+                "save_dir": str(tmp_path / "patchmixer-original-exogenous"),
+                "auto_save_dir": False,
+            }
+        )
+
+    assert reached_training is False
+
+
 @pytest.mark.parametrize(
     "model_key",
-    ["patchtst_base", "patchmixer_base", "titan_base", "exotst_base"],
+    [
+        "patchtst_exogenous",
+        "patchtst_quantile_exogenous",
+        "patchmixer_exo",
+    ],
+)
+def test_train_rejects_explicit_exogenous_models_without_exogenous_mode(
+    monkeypatch,
+    tmp_path,
+    model_key,
+):
+    train_module = importlib.import_module("modeling_module.api.train")
+    reached_training = False
+
+    def unexpected_training(*args, **kwargs):
+        nonlocal reached_training
+        reached_training = True
+        raise AssertionError("model construction and training must not run")
+
+    monkeypatch.setattr(train_module, "run_total_train", unexpected_training)
+
+    with pytest.raises(ValueError, match="explicit exogenous models require use_exogenous_mode=True"):
+        train(
+            {
+                "data": {
+                    "df": _make_daily_df_with_future_exo(),
+                    "lookback": 14,
+                    "horizon": 2,
+                    "freq": "daily",
+                    "batch_size": 2,
+                    "past_exo_cont_cols": ["exo_hist"],
+                    "future_exo_cont_cols": ["promo_flag"],
+                },
+                "models": [model_key],
+                "use_exogenous_mode": False,
+                "trainer": {"epochs": 1, "lr": 1e-3},
+                "device": "cpu",
+                "save_dir": str(tmp_path / model_key),
+                "auto_save_dir": False,
+            }
+        )
+
+    assert reached_training is False
+
+
+@pytest.mark.parametrize(
+    "model_key",
+    [
+        "patchtst_exogenous",
+        "patchtst_quantile_exogenous",
+        "patchmixer_exo",
+    ],
+)
+def test_train_rejects_explicit_exogenous_models_without_features(
+    monkeypatch,
+    tmp_path,
+    model_key,
+):
+    train_module = importlib.import_module("modeling_module.api.train")
+    reached_training = False
+
+    def unexpected_training(*args, **kwargs):
+        nonlocal reached_training
+        reached_training = True
+        raise AssertionError("model construction and training must not run")
+
+    monkeypatch.setattr(train_module, "run_total_train", unexpected_training)
+
+    with pytest.raises(ValueError, match="at least one past or future exogenous feature is required"):
+        train(
+            {
+                "data": {
+                    "df": _make_daily_df(n_rows=30),
+                    "lookback": 14,
+                    "horizon": 2,
+                    "freq": "daily",
+                    "batch_size": 2,
+                },
+                "models": [model_key],
+                "use_exogenous_mode": True,
+                "trainer": {"epochs": 1, "lr": 1e-3},
+                "device": "cpu",
+                "save_dir": str(tmp_path / model_key),
+                "auto_save_dir": False,
+            }
+        )
+
+    assert reached_training is False
+
+
+@pytest.mark.parametrize(
+    "model_key",
+    [
+        "patchtst_base",
+        "patchtst_exogenous",
+        "patchtst_quantile_exogenous",
+        "patchmixer_exo",
+        "titan_base",
+        "exotst_base",
+    ],
 )
 def test_train_rejects_categorical_exogenous_inputs_before_model_construction(
     monkeypatch,
@@ -342,3 +681,50 @@ def test_train_rejects_categorical_exogenous_inputs_before_model_construction(
         )
 
     assert reached_training is False
+
+
+def test_train_allows_future_categorical_columns_to_reach_training_runtime(
+    monkeypatch,
+    tmp_path,
+):
+    train_module = importlib.import_module("modeling_module.api.train")
+    reached_training = False
+
+    class TrainingRuntimeReached(RuntimeError):
+        pass
+
+    def expected_training(*args, **kwargs):
+        nonlocal reached_training
+        reached_training = True
+        raise TrainingRuntimeReached
+
+    monkeypatch.setattr(train_module, "run_total_train", expected_training)
+
+    with pytest.raises(
+        TrainingRuntimeReached,
+    ):
+        train(
+            {
+                "data": {
+                    "df": _make_daily_df_with_categorical_exo(),
+                    "lookback": 14,
+                    "horizon": 2,
+                    "freq": "daily",
+                    "batch_size": 2,
+                    "pin_memory": False,
+                    "past_exo_cont_cols": ["exo_hist"],
+                    "future_exo_cont_cols": ["promo_flag"],
+                    "future_exo_cat_cols": ["segment_id"],
+                },
+                "models": ["patchtst_exogenous"],
+                "use_exogenous_mode": True,
+                "use_past_exogenous": True,
+                "use_future_exogenous": True,
+                "trainer": {"epochs": 1, "lr": 1e-3},
+                "device": "cpu",
+                "save_dir": str(tmp_path / "patchtst-future-cat"),
+                "auto_save_dir": False,
+            }
+        )
+
+    assert reached_training is True

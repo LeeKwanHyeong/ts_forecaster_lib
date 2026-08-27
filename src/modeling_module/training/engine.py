@@ -1,7 +1,8 @@
 import copy
+import inspect
 import json
 from dataclasses import asdict, is_dataclass
-from typing import Optional, Tuple
+from typing import Optional
 
 import torch
 from torch.amp import autocast, GradScaler
@@ -62,6 +63,10 @@ def _resolve_autocast_dtype(dtype_like, device_type: str) -> torch.dtype:
 
 from modeling_module.training.adapters import DefaultAdapter
 from modeling_module.training.model_losses.losses import LossComputer
+from modeling_module.data_loader.exogenous_contracts import (
+    ExogenousBatch,
+    ExogenousFeatureSchema,
+)
 
 
 
@@ -203,6 +208,7 @@ class CommonTrainer:
             future_exo_cb=None,
             autocast_input=None,
             extra_loss_fn=None,
+            training_only_extra_loss_fn=None,
             use_exogenous_mode=False,
             device
     ):
@@ -230,6 +236,7 @@ class CommonTrainer:
         # Extra hooks / flags
         self.autocast_input = autocast_input or {}
         self.extra_loss_fn = extra_loss_fn
+        self.training_only_extra_loss_fn = training_only_extra_loss_fn
 
         # Exogenous mode: keep backward-compat (explicit arg overrides cfg)
         cfg_exo = bool(getattr(self.cfg, "use_exogenous_mode", False))
@@ -478,20 +485,38 @@ class CommonTrainer:
         if has_nan or has_inf:
             self.logger(f"[NaN-{name}] has_nan={has_nan} has_inf={has_inf} max|x|={mx}")
 
-    def _unpack_batch(self, batch) -> Tuple[
-        torch.Tensor, torch.Tensor, Optional[list], Optional[torch.Tensor], Optional[torch.Tensor], Optional[
-            torch.Tensor]]:
+    def _unpack_batch(self, batch) -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        Optional[list],
+        Optional[torch.Tensor],
+        Optional[torch.Tensor],
+        Optional[torch.Tensor],
+        Optional[torch.Tensor],
+    ]:
         """
-        가변 길이의 배치 튜플을 표준화된 6개 변수로 언패킹.
+        가변 길이의 배치 튜플을 표준화된 7개 변수로 언패킹.
         Returns:
-            x, y, part_ids, future_exo_cont, past_exo_cont, past_exo_cat
+            x, y, part_ids, future_exo_cont, past_exo_cont, past_exo_cat,
+            future_exo_cat
         """
         part_ids = None
         future_exo_cont = None
         past_exo_cont = None
         past_exo_cat = None
+        future_exo_cat = None
 
-        if len(batch) == 6:
+        if len(batch) == 7:
+            (
+                x,
+                y,
+                part_ids,
+                future_exo_cont,
+                past_exo_cont,
+                past_exo_cat,
+                future_exo_cat,
+            ) = batch
+        elif len(batch) == 6:
             x, y, part_ids, future_exo_cont, past_exo_cont, past_exo_cat = batch
         elif len(batch) == 5:
             x, y, part_ids, future_exo_cont, past_exo_cont = batch
@@ -501,7 +526,83 @@ class CommonTrainer:
             x, y = batch
         else:
             raise RuntimeError(f"Unsupported batch tuple length: {len(batch)}")
-        return x, y, part_ids, future_exo_cont, past_exo_cont, past_exo_cat
+        return (
+            x,
+            y,
+            part_ids,
+            future_exo_cont,
+            past_exo_cont,
+            past_exo_cat,
+            future_exo_cat,
+        )
+
+    @staticmethod
+    def _exogenous_schema_from_loader(
+        loader,
+    ) -> Optional[ExogenousFeatureSchema]:
+        schema = getattr(loader, "exogenous_schema", None)
+        if schema is None:
+            schema = getattr(getattr(loader, "dataset", None), "exogenous_schema", None)
+        if schema is not None and not isinstance(schema, ExogenousFeatureSchema):
+            raise TypeError(
+                "loader.exogenous_schema must be an ExogenousFeatureSchema."
+            )
+        return schema
+
+    def _prepare_exogenous_batch(
+        self,
+        *,
+        x: torch.Tensor,
+        y: torch.Tensor,
+        future_exo_cont: Optional[torch.Tensor],
+        past_exo_cont: Optional[torch.Tensor],
+        past_exo_cat: Optional[torch.Tensor],
+        future_exo_cat: Optional[torch.Tensor],
+        device: torch.device,
+        schema: Optional[ExogenousFeatureSchema] = None,
+    ) -> ExogenousBatch:
+        batch_size = int(x.shape[0])
+        lookback = int(x.shape[1])
+        horizon = int(y.shape[1])
+        resolved_future_cont = (
+            self._resolve_future_exo(
+                future_exo_cont,
+                x,
+                y,
+                device=device,
+            )
+            if self.use_exogenous_mode
+            else None
+        )
+        exogenous = ExogenousBatch.from_legacy(
+            future_exo=resolved_future_cont,
+            future_exo_cat=future_exo_cat,
+            past_exo_cont=past_exo_cont,
+            past_exo_cat=past_exo_cat,
+            batch_size=batch_size,
+        ).to(
+            device,
+            non_blocking=True,
+        )
+        if exogenous.future_cat is not None:
+            if schema is None:
+                raise ValueError(
+                    "future_cat requires an ExogenousFeatureSchema with resolved "
+                    "future_cat_cardinalities."
+                )
+            if len(schema.future_cat_cardinalities) != len(
+                schema.future_cat_names
+            ):
+                raise ValueError(
+                    "future_cat requires one resolved cardinality for every "
+                    "future categorical feature."
+                )
+        return exogenous.validate(
+            batch_size=batch_size,
+            lookback=lookback,
+            horizon=horizon,
+            schema=schema,
+        )
 
     def _forward_with_adapter(
             self,
@@ -509,6 +610,7 @@ class CommonTrainer:
             x,
             *,
             future_exo,
+            future_exo_cat,
             past_exo_cont,
             past_exo_cat,
             part_ids,
@@ -517,23 +619,52 @@ class CommonTrainer:
         """
         Adapter의 forward 메서드 호환성 처리 (레거시 vs 확장).
         """
+        kwargs = {
+            "future_exo": future_exo,
+            "past_exo_cont": past_exo_cont,
+            "past_exo_cat": past_exo_cat,
+            "part_ids": part_ids,
+            "mode": mode,
+        }
+
         try:
-            return self.adapter.forward(
-                model,
-                x,
-                future_exo=future_exo,
-                past_exo_cont=past_exo_cont,
-                past_exo_cat=past_exo_cat,
-                part_ids=part_ids,
-                mode=mode,
+            parameters = inspect.signature(self.adapter.forward).parameters
+        except (TypeError, ValueError):
+            if future_exo_cat is not None:
+                raise NotImplementedError(
+                    f"{type(self.adapter).__name__}.forward cannot be inspected "
+                    "for `future_exo_cat` support."
+                )
+            try:
+                return self.adapter.forward(model, x, **kwargs)
+            except TypeError:
+                return self.adapter.forward(
+                    model,
+                    x,
+                    future_exo=future_exo,
+                    mode=mode,
+                )
+
+        if future_exo_cat is not None and "future_exo_cat" not in parameters:
+            raise NotImplementedError(
+                f"{type(self.adapter).__name__}.forward does not declare "
+                "`future_exo_cat`; use a compatible adapter."
             )
-        except TypeError:
-            return self.adapter.forward(
-                model,
-                x,
-                future_exo=future_exo,
-                mode=mode,
-            )
+
+        if "future_exo_cat" in parameters:
+            kwargs["future_exo_cat"] = future_exo_cat
+
+        accepts_extra_kwargs = any(
+            parameter.kind is inspect.Parameter.VAR_KEYWORD
+            for parameter in parameters.values()
+        )
+        if not accepts_extra_kwargs:
+            kwargs = {
+                name: value
+                for name, value in kwargs.items()
+                if name in parameters
+            }
+        return self.adapter.forward(model, x, **kwargs)
 
 
 
@@ -656,13 +787,23 @@ class CommonTrainer:
         # - for batch in loader 구조에서는 next(it) 시간 자체를 분리하기 어려움.
         # - 여기서는 "unpack + H2D(to(device))"를 load로 근사하고,
         #   "forward~(backward/step)"을 compute로 근사합니다.
+        exogenous_schema = self._exogenous_schema_from_loader(loader)
+
         def _run_one_step(batch):
             nonlocal total_scalar, total_tensor
 
             t0 = time.perf_counter()
 
             # 1) 배치 데이터 구조 분해
-            x, y, part_ids, fe_cont, pe_cont, pe_cat = self._unpack_batch(batch)
+            (
+                x,
+                y,
+                part_ids,
+                fe_cont,
+                pe_cont,
+                pe_cat,
+                fe_cat,
+            ) = self._unpack_batch(batch)
             t1 = time.perf_counter()
 
             # 2) H2D (가능하면 non_blocking 사용; pin_memory=True일 때 효과)
@@ -683,11 +824,17 @@ class CommonTrainer:
             if train:
                 self.opt.zero_grad(set_to_none=True)
 
-            # 3) 미래 외생 변수
-            if self.use_exogenous_mode:
-                future_exo = self._resolve_future_exo(fe_cont, x, y, device=device)
-            else:
-                future_exo = None
+            # 3) 외생 변수 정규화, device 이동, schema 검증
+            exogenous = self._prepare_exogenous_batch(
+                x=x,
+                y=y,
+                future_exo_cont=fe_cont,
+                past_exo_cont=pe_cont,
+                past_exo_cat=pe_cat,
+                future_exo_cat=fe_cat,
+                device=device,
+                schema=exogenous_schema,
+            )
 
             # 4) AMP 컨텍스트 내 순전파 및 손실 계산
             _ac_kwargs = {"device_type": self.amp_device, "enabled": self.enabled}
@@ -698,9 +845,10 @@ class CommonTrainer:
                 pred = self._forward_with_adapter(
                     model,
                     x,
-                    future_exo=future_exo,
-                    past_exo_cont=(pe_cont.to(device, non_blocking=True) if torch.is_tensor(pe_cont) else None),
-                    past_exo_cat=(pe_cat.to(device, non_blocking=True) if torch.is_tensor(pe_cat) else None),
+                    future_exo=exogenous.future_cont,
+                    future_exo_cat=exogenous.future_cat,
+                    past_exo_cont=exogenous.past_cont,
+                    past_exo_cat=exogenous.past_cat,
                     part_ids=part_ids,
                     mode=("train" if train else "eval"),
                 )
@@ -720,6 +868,15 @@ class CommonTrainer:
                 # 추가 손실 함수(Extra Loss) 합산
                 if self.extra_loss_fn is not None:
                     loss = loss + self.extra_loss_fn(x, pred, self.cfg)
+
+                # Training regularizers must not affect validation-based epoch
+                # selection. This hook is intentionally absent from val loops.
+                if train and self.training_only_extra_loss_fn is not None:
+                    loss = loss + self.training_only_extra_loss_fn(
+                        x,
+                        pred,
+                        self.cfg,
+                    )
 
                 # self._nan_stat("loss_raw", loss)
 
@@ -844,6 +1001,18 @@ class CommonTrainer:
         - 검증 루프 및 TTA(Test-Time Adaptation) 수행.
         """
         device = self.device
+        training_mode = getattr(self.cfg, "training_mode", "qualification")
+        if training_mode not in {"qualification", "production_refit"}:
+            raise ValueError(f"Unsupported training_mode: {training_mode!r}.")
+        is_production_refit = training_mode == "production_refit"
+        if is_production_refit and val_loader is not None:
+            raise ValueError(
+                "production_refit requires val_loader=None so validation and "
+                "best-state restoration cannot run."
+            )
+        if not is_production_refit and val_loader is None:
+            raise ValueError("qualification training requires a validation loader.")
+
         model.to(device)
         from modeling_module.training.optim import build_optimizer_and_scheduler
 
@@ -852,8 +1021,12 @@ class CommonTrainer:
         self.scaler = GradScaler(device="cuda", enabled=(self.enabled and self.amp_device == "cuda"))
         # 조기 종료(Early Stopping) 추적 변수 초기화
         best_loss = float("inf")
-        best_state = copy.deepcopy(model.state_dict())
+        best_state = (
+            None if is_production_refit else copy.deepcopy(model.state_dict())
+        )
         counter = 0
+        final_train_loss = float("nan")
+        epochs_completed = 0
 
         # TTA(Test-Time Adaptation) 상태 초기화
         if self.adapter.uses_tta():
@@ -862,6 +1035,18 @@ class CommonTrainer:
         for epoch in range(self.cfg.epochs):
             # 1. 학습 루프 실행
             train_loss = self._run_epoch(model, train_loader, train=True)
+            final_train_loss = float(train_loss)
+            epochs_completed = epoch + 1
+
+            if is_production_refit:
+                self.sched.step()
+                cur_lr = self.sched.get_last_lr()[0]
+                self.logger(
+                    f"Epoch {epoch + 1}/{self.cfg.epochs} | LR {cur_lr:.6f} | "
+                    f"Train {train_loss:.6f} | Validation disabled "
+                    "(production_refit)"
+                )
+                continue
 
             # 2. 검증 루프 진입
             model.eval()
@@ -869,15 +1054,28 @@ class CommonTrainer:
             val_total_tensor = None
             with torch.no_grad():
                 for batch in val_loader:
-                    x, y, part_ids, fe_cont, pe_cont, pe_cat = self._unpack_batch(batch)
+                    (
+                        x,
+                        y,
+                        part_ids,
+                        fe_cont,
+                        pe_cont,
+                        pe_cat,
+                        fe_cat,
+                    ) = self._unpack_batch(batch)
 
                     x_val, y_val = x.to(device), y.to(device)
 
-                    # 외생 변수 처리
-                    if self.use_exogenous_mode:
-                        future_exo = self._resolve_future_exo(fe_cont, x_val, y_val, device=device)
-                    else:
-                        future_exo = None
+                    exogenous = self._prepare_exogenous_batch(
+                        x=x_val,
+                        y=y_val,
+                        future_exo_cont=fe_cont,
+                        past_exo_cont=pe_cont,
+                        past_exo_cat=pe_cat,
+                        future_exo_cat=fe_cat,
+                        device=device,
+                        schema=self._exogenous_schema_from_loader(val_loader),
+                    )
 
                     # TTA 적용 여부에 따른 분기 처리
                     if tta_steps > 0 and self.adapter.uses_tta():
@@ -894,9 +1092,10 @@ class CommonTrainer:
                                 pred = self._forward_with_adapter(
                                     model,
                                     x_val,
-                                    future_exo=future_exo,
-                                    past_exo_cont=(pe_cont.to(device) if torch.is_tensor(pe_cont) else None),
-                                    past_exo_cat=(pe_cat.to(device) if torch.is_tensor(pe_cat) else None),
+                                    future_exo=exogenous.future_cont,
+                                    future_exo_cat=exogenous.future_cat,
+                                    past_exo_cont=exogenous.past_cont,
+                                    past_exo_cat=exogenous.past_cat,
                                     part_ids=part_ids,
                                     mode="eval",
                                 )
@@ -922,9 +1121,10 @@ class CommonTrainer:
                             pred = self._forward_with_adapter(
                                 model,
                                 x_val,
-                                future_exo=future_exo,
-                                past_exo_cont=(pe_cont.to(device) if torch.is_tensor(pe_cont) else None),
-                                past_exo_cat=(pe_cat.to(device) if torch.is_tensor(pe_cat) else None),
+                                future_exo=exogenous.future_cont,
+                                future_exo_cat=exogenous.future_cat,
+                                past_exo_cont=exogenous.past_cont,
+                                past_exo_cat=exogenous.past_cat,
                                 part_ids=part_ids,
                                 mode="eval",
                             )
@@ -963,7 +1163,15 @@ class CommonTrainer:
             self.logger(
                 f"Epoch {epoch + 1}/{self.cfg.epochs} | LR {cur_lr:.6f} | Train {train_loss:.6f} | Val {val_loss:.6f}")
 
+        self.final_train_loss_ = final_train_loss
+        self.epochs_completed_ = epochs_completed
+        self.validation_enabled_ = not is_production_refit
+        if is_production_refit:
+            self.best_loss_ = None
+            return model
+
         # 학습 종료 후 최적 가중치 복원
+        assert best_state is not None
         model.load_state_dict(best_state)
         # 상위 stage runner가 stage 간 global-best를 비교할 수 있도록 노출한다.
         self.best_loss_ = float(best_loss)

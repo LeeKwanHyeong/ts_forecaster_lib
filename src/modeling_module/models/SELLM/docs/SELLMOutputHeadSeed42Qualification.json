@@ -1,0 +1,130 @@
+{
+  "candidate_gates": {
+    "softplus": {
+      "gates": {
+        "absolute_bias_within_10_percent": false,
+        "checkpoint_reload_parity": true,
+        "mae_not_worse_than_identity": true,
+        "raw_negative_rate_is_zero": true
+      },
+      "status": "FAIL"
+    },
+    "zero_inflated_softplus": {
+      "gates": {
+        "absolute_bias_within_10_percent": false,
+        "checkpoint_reload_parity": true,
+        "mae_not_worse_than_identity": true,
+        "raw_negative_rate_is_zero": true
+      },
+      "status": "FAIL"
+    }
+  },
+  "comparison_contract_sha256": "e99a2fa29e5ef5b8ae37b919bded2405a9da3907c24918109a929b332e76b99e",
+  "conditions": {
+    "batch_size": 4,
+    "epochs": 5,
+    "horizon": 26,
+    "learning_rate": 0.0001,
+    "model_key": "sellm_base",
+    "sample_series": 256,
+    "seed": 42
+  },
+  "contract": "modeling_module.sellm_output_head_seed42_comparison.v1",
+  "modes": {
+    "identity": {
+      "all_negative_series": 0,
+      "bias": 0.03586094327714107,
+      "checkpoint_sha256": "b6fb5d13a0bd36dcba80d99e25380f1bda84c1d88c655854dbc81386a229e534",
+      "delta_vs_identity": {
+        "bias_percentage_points": 0.0,
+        "mae_percent": 0.0,
+        "raw_negative_rate_percentage_points": 0.0,
+        "smape_percent": 0.0,
+        "wape_percent": 0.0
+      },
+      "mae": 3.9767827053393168,
+      "output_head": {
+        "hidden_dim": 16,
+        "initial_nonzero_probability": 0.5,
+        "mode": "identity",
+        "softplus_beta": 1.0
+      },
+      "parameters": {
+        "total": 505522589,
+        "trainable": 11489821
+      },
+      "peak_allocated_mib": 2844.34765625,
+      "peak_reserved_mib": 2872.0,
+      "qualification_receipt_sha256": "416138c9693b7cc375ff3e3d6392be25523e2ced11f785432d35622744ff42f2",
+      "raw_negative_rate": 0.16766826923076922,
+      "smape": 0.8156518413998773,
+      "training_seconds": 46.872927967924625,
+      "wape": 0.5909418129741582
+    },
+    "softplus": {
+      "all_negative_series": 0,
+      "bias": 0.12552924899214388,
+      "checkpoint_sha256": "d7dcec21814832980db3c71fac3cdcde756aed90962527bc3cb28d768a39a97f",
+      "delta_vs_identity": {
+        "bias_percentage_points": 8.966830571500282,
+        "mae_percent": -19.308357539018562,
+        "raw_negative_rate_percentage_points": -16.766826923076923,
+        "smape_percent": -5.916765836345206,
+        "wape_percent": -19.308357539018573
+      },
+      "mae": 3.2089312820425464,
+      "output_head": {
+        "hidden_dim": 16,
+        "initial_nonzero_probability": 0.5,
+        "mode": "softplus",
+        "softplus_beta": 1.0
+      },
+      "parameters": {
+        "total": 505522589,
+        "trainable": 11489821
+      },
+      "peak_allocated_mib": 2844.34765625,
+      "peak_reserved_mib": 2872.0,
+      "qualification_receipt_sha256": "3af551fcaefad9118c32527e653b2b1cf9767e8c5ef53a89847a5c0fefa9be6e",
+      "raw_negative_rate": 0.0,
+      "smape": 0.7673916319044088,
+      "training_seconds": 45.875545158050954,
+      "wape": 0.4768406548775493
+    },
+    "zero_inflated_softplus": {
+      "all_negative_series": 0,
+      "bias": 0.29778671288819886,
+      "checkpoint_sha256": "f2038fe3948e19950fb389d3099759ac66a62be01b01215d7e8a7bc70d9739e8",
+      "delta_vs_identity": {
+        "bias_percentage_points": 26.19257696110578,
+        "mae_percent": -2.0835127543352927,
+        "raw_negative_rate_percentage_points": -16.766826923076923,
+        "smape_percent": 4.920489420631213,
+        "wape_percent": -2.0835127543352927
+      },
+      "mae": 3.893925930461372,
+      "output_head": {
+        "hidden_dim": 16,
+        "initial_nonzero_probability": 0.5,
+        "mode": "zero_inflated_softplus",
+        "softplus_beta": 1.0
+      },
+      "parameters": {
+        "total": 505523111,
+        "trainable": 11490343
+      },
+      "peak_allocated_mib": 2844.361328125,
+      "peak_reserved_mib": 2872.0,
+      "qualification_receipt_sha256": "04ba2fa0a4e7dd8b1c366cb2cae74b34f057eb69d18c6864f941a5bccb3924f9",
+      "raw_negative_rate": 0.0,
+      "smape": 0.855785903965142,
+      "training_seconds": 48.24344933591783,
+      "wape": 0.5786294649301413
+    }
+  },
+  "pilot_candidates": [],
+  "receipt_sha256": "9a575b3f00713dcf61defb269a7de1d056e7d2dba2213d1d030a09d8fdde2cbd",
+  "recommended_mode": null,
+  "source_commit": "b0e3e1588aafd163dc8d1a0b1cc0608239d8ca0a",
+  "status": "PASS"
+}

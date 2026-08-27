@@ -1,51 +1,109 @@
 from dataclasses import fields, is_dataclass, asdict
 from typing import Union, Any, Optional, Mapping
 
+from modeling_module.models.CGMM.configs import CGMMConfig
 from modeling_module.models.ExoTST.configs import ExoTSTConfig
-from modeling_module.models.PatchMixer.PatchMixer import PatchMixerModel, PatchMixerQuantileModel
-from modeling_module.models.PatchMixer.common.configs import PatchMixerConfig
+from modeling_module.models.NHITS.configs import NHITSConfig
+from modeling_module.models.PatchMixer.PatchMixer import PatchMixerModel
+from modeling_module.models.PatchMixer.common.configs import (
+    PatchMixerConfig,
+    PatchMixerExogenousConfig,
+)
 from modeling_module.models.PatchTST.common.configs import PatchTSTConfig
+from modeling_module.models.SimilarLifecycle.configs import (
+    SimilarLifecycleConfig,
+)
+from modeling_module.models.TimeMixer.configs import TimeMixerConfig
 from modeling_module.models.TimeXer.configs import TimeXerConfig
 from modeling_module.models.Titan import TitanBaseModel, TitanLMMModel, TitanSeq2SeqModel
 from modeling_module.models.Titan.common.configs import TitanConfig
 
 
+def build_cgmm(cfg: Any):
+    """Build the lifecycle-specific conditional Gaussian mixture model."""
+
+    from modeling_module.models.CGMM.model import (
+        ConditionalGaussianMixtureForecaster,
+    )
+
+    return ConditionalGaussianMixtureForecaster(CGMMConfig.from_config(cfg))
+
+
+def build_similar_lifecycle(cfg: Any):
+    """Build the lifecycle nearest-neighbor retrieval model."""
+
+    from modeling_module.models.SimilarLifecycle.model import (
+        SimilarLifecycleForecaster,
+    )
+
+    return SimilarLifecycleForecaster(
+        SimilarLifecycleConfig.from_config(cfg)
+    )
+
+
 # -----------------------------
-# PatchMixer: dict → PatchMixerConfig
+# PatchMixer
 # -----------------------------
-def _ensure_patchmixer_config(cfg: Any):
-    """
-    load_model_dict에서 cfg가 dict로 들어오는 케이스를 흡수.
-    - dict -> PatchMixerConfig(**dict)
-    - dataclass -> 그대로
-    """
-    # 프로젝트 경로에 맞춰 import 경로만 유지해 주세요.
-    from modeling_module.models.PatchMixer.common.configs import PatchMixerConfig
+def _ensure_patchmixer_config(cfg: Any) -> PatchMixerConfig:
+    exogenous_widths = (
+        int(getattr(cfg, "past_exo_cont_dim", 0) or 0),
+        int(getattr(cfg, "past_exo_cat_dim", 0) or 0),
+        int(getattr(cfg, "future_exo_dim", 0) or 0),
+    )
+    if isinstance(cfg, Mapping):
+        exogenous_widths = tuple(
+            int(cfg.get(name, 0) or 0)
+            for name in ("past_exo_cont_dim", "past_exo_cat_dim", "future_exo_dim")
+        )
+    if any(exogenous_widths):
+        raise ValueError(
+            "PatchMixerModel is endogenous-only; use build_patch_mixer_exogenous "
+            "for configured exogenous inputs."
+        )
+    return PatchMixerConfig.from_config(cfg)
 
-    if isinstance(cfg, PatchMixerConfig):
+
+def _ensure_patchmixer_exogenous_config(cfg: Any) -> PatchMixerExogenousConfig:
+    if isinstance(cfg, PatchMixerExogenousConfig):
         return cfg
-    if is_dataclass(cfg):
-        # PatchMixerConfig가 dataclass라면 여기로 들어올 수 있음
-        return cfg
-    if isinstance(cfg, dict):
-        return PatchMixerConfig(**cfg)
+    if isinstance(cfg, Mapping):
+        values = dict(cfg)
+    elif hasattr(cfg, "__dict__"):
+        values = dict(vars(cfg))
+    elif is_dataclass(cfg):
+        values = asdict(cfg)
+    else:
+        raise TypeError(f"Unsupported PatchMixer exogenous config type: {type(cfg)}")
+    allowed = {field.name for field in fields(PatchMixerExogenousConfig)}
+    return PatchMixerExogenousConfig(
+        **{key: value for key, value in values.items() if key in allowed}
+    )
 
-    raise TypeError(f"[build_patch_mixer] unsupported cfg type: {type(cfg)}")
 
-# def build_patch_mixer(cfg: PatchMixerConfig, *, out_mult: int = 1, param_names = None):
-#     cfg = _ensure_patchmixer_config(cfg)
-#     return PatchMixerModel(cfg, out_mult=out_mult, param_names=param_names)
-def build_patch_mixer(cfg: PatchMixerConfig):
-    cfg = _ensure_patchmixer_config(cfg)
-    return PatchMixerModel(cfg)
+def build_patch_mixer(cfg: Any) -> PatchMixerModel:
+    """Build the paper-faithful endogenous point model."""
+    return PatchMixerModel(_ensure_patchmixer_config(cfg))
 
-def build_patch_mixer_quantile(cfg):
-    """
-    기존 quantile builder는 그대로 유지 (QuantileModel이 별도 class인 구조)
-    """
+
+def build_patch_mixer_exogenous(cfg: Any):
+    """Build the gated-fusion exogenous point model."""
+    from modeling_module.models.PatchMixer.variants import PatchMixerExogenousModel
+
+    return PatchMixerExogenousModel(_ensure_patchmixer_exogenous_config(cfg))
+
+
+def build_patch_mixer_legacy(cfg: Any):
+    """Load-only builder for retired Enhanced point/distribution checkpoints."""
+    from modeling_module.models.PatchMixer.PatchMixer import _PatchMixerLegacyModel
+
+    return _PatchMixerLegacyModel(_ensure_patchmixer_exogenous_config(cfg))
+
+
+def build_patch_mixer_quantile_legacy(cfg: Any):
+    """Load-only builder for retired endogenous/exogenous quantile checkpoints."""
     from modeling_module.models.PatchMixer.PatchMixer import PatchMixerQuantileModel
-    cfg = _ensure_patchmixer_config(cfg)
-    return PatchMixerQuantileModel(cfg)
+
+    return PatchMixerQuantileModel(_ensure_patchmixer_exogenous_config(cfg))
 
 
 # -----------------------------
@@ -133,17 +191,95 @@ def _ensure_patchtst_config(cfg: Union[PatchTSTConfig, dict, Any]) -> PatchTSTCo
 
 
 def build_patchTST(cfg):
-    """PatchTST 점 예측(Point) 모델 인스턴스 생성."""
+    """Compatibility builder selecting the strict PatchTST input variant."""
     cfg = _ensure_patchtst_config(cfg)
-    from modeling_module.models.PatchTST.supervised.PatchTST import PatchTSTModel
-    return PatchTSTModel.from_config(cfg)
+    from modeling_module.models.PatchTST.supervised.variants import (
+        PatchTSTEndogenousModel,
+        PatchTSTExogenousModel,
+        patchtst_uses_exogenous_inputs,
+    )
+
+    model_cls = (
+        PatchTSTExogenousModel
+        if patchtst_uses_exogenous_inputs(cfg)
+        else PatchTSTEndogenousModel
+    )
+    return model_cls.from_config(cfg)
+
+
+def build_patchTST_exogenous(cfg):
+    """Build the explicit PatchTST exogenous variant."""
+    from modeling_module.models.PatchTST.supervised.variants import PatchTSTExogenousModel
+
+    cfg = _ensure_patchtst_config(cfg)
+    return PatchTSTExogenousModel.from_config(cfg)
 
 
 def build_patchTST_quantile(cfg):
-    """PatchTST 분위수 예측(Quantile) 모델 인스턴스 생성."""
-    from modeling_module.models.PatchTST.supervised.PatchTST import PatchTSTQuantileModel
+    """Compatibility builder selecting the strict quantile input variant."""
+    from modeling_module.models.PatchTST.supervised.variants import (
+        PatchTSTQuantileEndogenousModel,
+        PatchTSTQuantileExogenousModel,
+        patchtst_uses_exogenous_inputs,
+    )
     cfg = _ensure_patchtst_config(cfg)
-    return PatchTSTQuantileModel.from_config(cfg)
+    model_cls = (
+        PatchTSTQuantileExogenousModel
+        if patchtst_uses_exogenous_inputs(cfg)
+        else PatchTSTQuantileEndogenousModel
+    )
+    return model_cls.from_config(cfg)
+
+
+def build_patchTST_quantile_exogenous(cfg):
+    """Build the explicit quantile PatchTST exogenous variant."""
+    from modeling_module.models.PatchTST.supervised.variants import PatchTSTQuantileExogenousModel
+
+    cfg = _ensure_patchtst_config(cfg)
+    return PatchTSTQuantileExogenousModel.from_config(cfg)
+
+
+def _ensure_sellm_config(cfg: Any):
+    from modeling_module.models.SELLM.configs import SELLMConfig
+
+    if isinstance(cfg, SELLMConfig):
+        return cfg
+    if isinstance(cfg, Mapping):
+        return SELLMConfig(**dict(cfg))
+    if is_dataclass(cfg):
+        return SELLMConfig(**asdict(cfg))
+    if hasattr(cfg, "__dict__"):
+        return SELLMConfig(**dict(vars(cfg)))
+    raise TypeError(f"Unsupported config type for SELLM: {type(cfg)}")
+
+
+def build_sellm(cfg):
+    """Build a Semantic-Enhanced LLM forecaster."""
+    from modeling_module.models.SELLM.SELLM import SELLMModel
+
+    cfg = _ensure_sellm_config(cfg)
+    return SELLMModel.from_config(cfg)
+
+
+def _ensure_autotimes_config(cfg: Any):
+    from modeling_module.models.AutoTimes.configs import AutoTimesConfig
+
+    if isinstance(cfg, AutoTimesConfig):
+        return cfg
+    if isinstance(cfg, Mapping):
+        return AutoTimesConfig(**dict(cfg))
+    if is_dataclass(cfg):
+        return AutoTimesConfig(**asdict(cfg))
+    if hasattr(cfg, "__dict__"):
+        return AutoTimesConfig(**dict(vars(cfg)))
+    raise TypeError(f"Unsupported config type for AutoTimes: {type(cfg)}")
+
+
+def build_autotimes(cfg):
+    """Build the frozen-backbone AutoTimes point forecaster."""
+    from modeling_module.models.AutoTimes.autotimes import AutoTimesModel
+
+    return AutoTimesModel.from_config(_ensure_autotimes_config(cfg))
 
 def _ensure_exotst_config(cfg: Union[ExoTSTConfig, dict, Any]) -> ExoTSTConfig:
     """
@@ -263,6 +399,46 @@ def build_exotst(cfg):
     cfg = _ensure_exotst_config(cfg)
     from modeling_module.models.ExoTST.ExoTST import ExoTST
     return ExoTST.from_config(cfg)
+
+
+def _ensure_nhits_config(cfg: Union[NHITSConfig, dict, Any]) -> NHITSConfig:
+    if isinstance(cfg, NHITSConfig):
+        return cfg
+    if isinstance(cfg, Mapping):
+        return NHITSConfig(**dict(cfg))
+    if is_dataclass(cfg):
+        return NHITSConfig(**asdict(cfg))
+    if hasattr(cfg, "__dict__"):
+        return NHITSConfig(**dict(vars(cfg)))
+    raise TypeError(f"Unsupported config type for NHITS: {type(cfg)}")
+
+
+def build_nhits(cfg):
+    """Build the public endogenous N-HiTS point model."""
+    from modeling_module.models.NHITS.NHITS import NHITSModel
+
+    return NHITSModel.from_config(_ensure_nhits_config(cfg))
+
+
+def _ensure_timemixer_config(
+    cfg: Union[TimeMixerConfig, dict, Any],
+) -> TimeMixerConfig:
+    if isinstance(cfg, TimeMixerConfig):
+        return cfg
+    if isinstance(cfg, Mapping):
+        return TimeMixerConfig(**dict(cfg))
+    if is_dataclass(cfg):
+        return TimeMixerConfig(**asdict(cfg))
+    if hasattr(cfg, "__dict__"):
+        return TimeMixerConfig(**dict(vars(cfg)))
+    raise TypeError(f"Unsupported config type for TimeMixer: {type(cfg)}")
+
+
+def build_timemixer(cfg):
+    """Build the public endogenous TimeMixer point model."""
+    from modeling_module.models.TimeMixer.TimeMixer import TimeMixerModel
+
+    return TimeMixerModel.from_config(_ensure_timemixer_config(cfg))
 
 
 def _ensure_timexer_config(cfg: Union[TimeXerConfig, dict, Any]) -> TimeXerConfig:

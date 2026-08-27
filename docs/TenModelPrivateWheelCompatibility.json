@@ -1,0 +1,69 @@
+{
+  "contract": "modeling_module.ten_model_wheel_compatibility.v1",
+  "model_inventory": {
+    "count": 10,
+    "model_keys": [
+      "patchtst_base",
+      "patchtst_quantile",
+      "patchmixer",
+      "nhits_base",
+      "timemixer",
+      "exotst_base",
+      "patchtst_exogenous",
+      "timexer_base",
+      "sellm_base",
+      "autotimes_base"
+    ]
+  },
+  "receipt_sha256": "bf40d2a005e5d33507c2061f9f9651e9b7449b0a54e1f7f842dc7e1f584d1173",
+  "runtime": {
+    "cuda": "13.0",
+    "device": "cuda",
+    "device_name": "NVIDIA GeForce RTX 5090",
+    "python": "3.12.13",
+    "torch": "2.11.0+cu130"
+  },
+  "safety": {
+    "active_port_8011_modified": false,
+    "db_write_enabled": false,
+    "runtime_activation_changed": false
+  },
+  "source_receipts": {
+    "icl_two": {
+      "file_sha256": "5d2b94a1222fd619db902d456ddf7367dfad93940ae9581066387d135b88e0ec",
+      "filename": "wheel-provenance.json",
+      "receipt_sha256": "2280ead86421d9a5d68e49865a74a27d974a1235406f53bad9c007599ad72839"
+    },
+    "legacy_eight": {
+      "file_sha256": "eb1634933c1e15a547f88333e74e20ed79b35e9d226f40ab1efb1d3273678ead",
+      "filename": "legacy-eight-model-compatibility-receipt.json",
+      "receipt_sha256": "f29b705eb9eae83b0e2d56a455fd6e18849e80c1a3905d9225167fc05c07abfc"
+    }
+  },
+  "status": "PASS",
+  "verification": {
+    "icl_two": {
+      "corrected_checkpoint_parity_passed": 2,
+      "finite_h26_output_passed": 2,
+      "maximum_absolute_difference": 0.0,
+      "strict_load_passed": 2
+    },
+    "legacy_eight": {
+      "exact_output_parity_passed": 8,
+      "finite_h26_output_passed": 8,
+      "maximum_absolute_difference": 0.0,
+      "state_dict_schema_passed": 8,
+      "strict_load_passed": 8
+    },
+    "registry_metadata_warnings": [
+      "patchmixer",
+      "timemixer"
+    ]
+  },
+  "wheel": {
+    "distribution_profile": "sellm",
+    "filename": "modeling_module-0.2.0-1private-cp312-none-any.whl",
+    "sha256": "20803a0498e0a4cd37f4848eaf0910d6d38796ce7840eb49dad8cc62bfa5e78a",
+    "source_commit": "ef59fd068d5254d7d4cc56a3c23a24d3193fafaf"
+  }
+}

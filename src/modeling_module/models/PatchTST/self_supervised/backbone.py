@@ -110,7 +110,13 @@ class PatchTSTSelfSupBackbone(nn.Module):
         self.activation = str(_cfg_get(cfg, "activation", "gelu"))
 
         # 변수/채널 수 설정
-        self.n_vars = int(_cfg_get(cfg, "n_vars", _cfg_get(cfg, "enc_in", 1)))
+        self.n_vars = int(
+            _cfg_get(
+                cfg,
+                "n_vars",
+                _cfg_get(cfg, "enc_in", _cfg_get(cfg, "c_in", 1)),
+            )
+        )
 
         # 패치화 모듈 초기화
         self.patchify = Patchify(patch_len=self.patch_len, stride=self.stride)

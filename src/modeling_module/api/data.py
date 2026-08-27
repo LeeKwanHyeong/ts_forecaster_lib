@@ -1,12 +1,21 @@
 from __future__ import annotations
 
 from dataclasses import MISSING, dataclass, fields, is_dataclass
+from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Mapping, Optional
+from typing import Any, Literal, Mapping, Optional, Sequence
 
 import polars as pl
 
-from modeling_module._internal.data_runtime import MultiPartDataModule, MultiPartExoDataModule
+from modeling_module._internal.data_runtime import (
+    CATEGORICAL_UNK_ID,
+    CategoricalVocabulary,
+    CategoricalVocabularyArtifact,
+    ExogenousBatch,
+    ExogenousFeatureSchema,
+    MultiPartDataModule,
+    MultiPartExoDataModule,
+)
 
 
 def _is_default_value(value: Any, default_value: Any) -> bool:
@@ -62,14 +71,20 @@ class ExogenousConfig:
     - `past_exo_cont_cols`: Continuous covariates sliced from the lookback window.
     - `past_exo_cat_cols`: Categorical covariates sliced from the lookback window.
     - `future_exo_cont_cols`: Known future covariates sliced from the horizon window.
+    - `future_exo_cat_cols`: Known categorical covariates sliced from the horizon window.
     - `fill_missing`: Missing-value policy forwarded to the exogenous datamodule.
     - `target_back_steps`: Backward steps used by categorical indexer helpers.
     - `future_exo_cb`: Optional callback that generates future exogenous tensors.
     - `part_future_exo_fn`: Optional batch callback that builds part-specific future exogenous tensors
       from `(uid_list, start_idxs, horizon)`.
     - `date_indexer`: Optional external date indexer used by callback-based workflows.
-    - `build_cat_indexer_from`: Source columns for categorical index construction.
-    - `cat_indexer_target_col`: Target column for categorical index construction.
+    - `build_cat_indexer_from`: Legacy source-column names. The data module
+      fits vocabularies from the resolved training split and creates
+      `<source>_id` feature names.
+    - `cat_indexer_target_col`: Optional legacy feature name for one source
+      column. It does not change the training-only vocabulary scope.
+    - `categorical_vocabulary_artifact`: Optional fitted vocabulary restored
+      from a checkpoint. Inference uses it without fitting on request data.
     """
     use_exogenous_mode: Optional[bool] = None
     use_past_exogenous: Optional[bool] = None
@@ -77,6 +92,7 @@ class ExogenousConfig:
     past_exo_cont_cols: Optional[list[str]] = None
     past_exo_cat_cols: Optional[list[str]] = None
     future_exo_cont_cols: Optional[list[str]] = None
+    future_exo_cat_cols: Optional[list[str]] = None
     fill_missing: str = "ffill"
     target_back_steps: int = 100
     future_exo_cb: Any = None
@@ -84,6 +100,7 @@ class ExogenousConfig:
     date_indexer: Any = None
     build_cat_indexer_from: Optional[list[str]] = None
     cat_indexer_target_col: Optional[str] = None
+    categorical_vocabulary_artifact: Any = None
 
 
 @dataclass
@@ -108,7 +125,7 @@ class LoaderConfig:
     shuffle: bool = True
     seed: int = 42
     stage: str = "train"
-    plan_dt: Optional[int] = None
+    plan_dt: Optional[date | datetime | int] = None
     split_mode: str = "window"
     is_running: Optional[bool] = None
     num_workers: int = 0
@@ -154,7 +171,9 @@ class DataRequest:
     use_future_exogenous: Optional[bool] = None
     backend: Optional[str] = None
     stage: str = "train"
-    plan_dt: Optional[int] = None
+    plan_dt: Optional[date | datetime | int] = None
+    series_ids: Optional[Sequence[str]] = None
+    unknown_series_policy: Literal["error", "ignore"] = "error"
 
     id_col: str = "unique_id"
     date_col: str = "date"
@@ -162,6 +181,7 @@ class DataRequest:
     past_exo_cont_cols: Optional[list[str]] = None
     past_exo_cat_cols: Optional[list[str]] = None
     future_exo_cont_cols: Optional[list[str]] = None
+    future_exo_cat_cols: Optional[list[str]] = None
     fill_missing: str = "ffill"
     target_back_steps: int = 100
     future_exo_cb: Any = None
@@ -169,6 +189,7 @@ class DataRequest:
     date_indexer: Any = None
     build_cat_indexer_from: Optional[list[str]] = None
     cat_indexer_target_col: Optional[str] = None
+    categorical_vocabulary_artifact: Any = None
     split_mode: str = "window"
 
     is_running: Optional[bool] = None
@@ -272,9 +293,11 @@ def _materialize_payload(cfg: DataRequest | Mapping[str, Any]) -> dict[str, Any]
             "past_cont": "past_exo_cont_cols",
             "past_cat": "past_exo_cat_cols",
             "future_cont": "future_exo_cont_cols",
+            "future_cat": "future_exo_cat_cols",
             "past_exo_cont_cols": "past_exo_cont_cols",
             "past_exo_cat_cols": "past_exo_cat_cols",
             "future_exo_cont_cols": "future_exo_cont_cols",
+            "future_exo_cat_cols": "future_exo_cat_cols",
             "fill_missing": "fill_missing",
             "target_back_steps": "target_back_steps",
             "future_exo_cb": "future_exo_cb",
@@ -349,6 +372,40 @@ def _normalize_backend(payload: Mapping[str, Any]) -> str:
     return "exo"
 
 
+def _build_exogenous_schema_from_payload(
+    payload: Mapping[str, Any],
+    *,
+    df: Optional[pl.DataFrame] = None,
+) -> ExogenousFeatureSchema:
+    schema = ExogenousFeatureSchema.from_columns(
+        past_cont=payload.get("past_exo_cont_cols"),
+        past_cat=payload.get("past_exo_cat_cols"),
+        future_cont=payload.get("future_exo_cont_cols"),
+        future_cat=payload.get("future_exo_cat_cols"),
+    )
+    if df is not None:
+        requested = set(schema.past_cont_names)
+        requested.update(schema.past_cat_names)
+        requested.update(schema.future_cont_names)
+        requested.update(schema.future_cat_names)
+        missing = sorted(requested.difference(df.columns))
+        if missing:
+            raise ValueError(
+                "Exogenous schema references missing dataframe columns: "
+                + ", ".join(missing)
+            )
+    return schema
+
+
+def build_exogenous_schema(
+    cfg: DataRequest | Mapping[str, Any],
+) -> ExogenousFeatureSchema:
+    """Resolve and validate the ordered exogenous feature schema for a data request."""
+    payload = _materialize_payload(cfg)
+    df = _load_dataframe(payload)
+    return _build_exogenous_schema_from_payload(payload, df=df)
+
+
 def build_datamodule(cfg: DataRequest | Mapping[str, Any]) -> Any:
     """
     Build the internal datamodule used by the library data API.
@@ -358,6 +415,7 @@ def build_datamodule(cfg: DataRequest | Mapping[str, Any]) -> Any:
     """
     payload = _materialize_payload(cfg)
     df = _load_dataframe(payload)
+    exogenous_schema = _build_exogenous_schema_from_payload(payload, df=df)
 
     lookback = payload.get("lookback")
     horizon = payload.get("horizon")
@@ -377,7 +435,7 @@ def build_datamodule(cfg: DataRequest | Mapping[str, Any]) -> Any:
             else:
                 raise ValueError("simple backend supports only weekly/monthly. Use backend='exo' for daily/hourly.")
 
-        return MultiPartDataModule(
+        datamodule = MultiPartDataModule(
             df=df,
             lookback=int(lookback),
             horizon=int(horizon),
@@ -387,8 +445,10 @@ def build_datamodule(cfg: DataRequest | Mapping[str, Any]) -> Any:
             shuffle=bool(payload.get("shuffle", True)),
             seed=int(payload.get("seed", 42)),
         )
+        datamodule.exogenous_schema = exogenous_schema
+        return datamodule
 
-    return MultiPartExoDataModule(
+    datamodule = MultiPartExoDataModule(
         df=df,
         lookback=int(lookback),
         horizon=int(horizon),
@@ -403,6 +463,7 @@ def build_datamodule(cfg: DataRequest | Mapping[str, Any]) -> Any:
         past_exo_cont_cols=payload.get("past_exo_cont_cols"),
         past_exo_cat_cols=payload.get("past_exo_cat_cols"),
         future_exo_cont_cols=payload.get("future_exo_cont_cols"),
+        future_exo_cat_cols=payload.get("future_exo_cat_cols"),
         fill_missing=str(payload.get("fill_missing", "ffill")),
         target_back_steps=int(payload.get("target_back_steps", 100)),
         future_exo_cb=payload.get("future_exo_cb"),
@@ -410,8 +471,18 @@ def build_datamodule(cfg: DataRequest | Mapping[str, Any]) -> Any:
         date_indexer=payload.get("date_indexer"),
         build_cat_indexer_from=payload.get("build_cat_indexer_from"),
         cat_indexer_target_col=payload.get("cat_indexer_target_col"),
+        categorical_vocabulary_artifact=payload.get(
+            "categorical_vocabulary_artifact"
+        ),
         split_mode=str(payload.get("split_mode", "window")),
     )
+    vocabulary_artifact = datamodule.categorical_vocabulary_artifact
+    datamodule.exogenous_schema = (
+        vocabulary_artifact.bind_schema(exogenous_schema)
+        if vocabulary_artifact is not None
+        else exogenous_schema
+    )
+    return datamodule
 
 
 def build_dataset(cfg: DataRequest | Mapping[str, Any]) -> Any:
@@ -435,6 +506,14 @@ def build_dataset(cfg: DataRequest | Mapping[str, Any]) -> Any:
     if stage in {"infer", "inference", "predict"}:
         plan_dt = payload.get("plan_dt")
         if plan_dt is not None:
+            if isinstance(datamodule, MultiPartExoDataModule):
+                return datamodule.get_inference_dataset_at_plan(
+                    plan_dt,
+                    series_ids=payload.get("series_ids"),
+                    unknown_series_policy=str(
+                        payload.get("unknown_series_policy", "error")
+                    ),
+                )
             return build_dataloader(payload).dataset
         if hasattr(datamodule, "get_inference_loader"):
             return datamodule.get_inference_loader().dataset
@@ -477,6 +556,13 @@ def build_dataloader(cfg: DataRequest | Mapping[str, Any]) -> Any:
     if stage in {"infer", "inference", "predict"}:
         plan_dt = payload.get("plan_dt")
         if plan_dt is not None:
+            if isinstance(datamodule, MultiPartExoDataModule):
+                return datamodule.get_inference_loader_at_plan(
+                    plan_dt,
+                    series_ids=payload.get("series_ids"),
+                    unknown_series_policy=str(payload.get("unknown_series_policy", "error")),
+                    **loader_kwargs,
+                )
             return datamodule.get_inference_loader_at_plan(int(plan_dt))
         if hasattr(datamodule, "get_inference_loader"):
             return datamodule.get_inference_loader()
@@ -486,11 +572,17 @@ def build_dataloader(cfg: DataRequest | Mapping[str, Any]) -> Any:
 
 
 __all__ = [
+    "CATEGORICAL_UNK_ID",
+    "CategoricalVocabulary",
+    "CategoricalVocabularyArtifact",
     "DataColumnConfig",
     "DataRequest",
     "DataWindowConfig",
+    "ExogenousBatch",
     "ExogenousConfig",
+    "ExogenousFeatureSchema",
     "LoaderConfig",
     "build_dataloader",
     "build_dataset",
+    "build_exogenous_schema",
 ]

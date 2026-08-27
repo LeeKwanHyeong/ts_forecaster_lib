@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "modeling-module"
-version = "0.1.1"
+version = "0.2.0"
 description = "Reusable time-series forecasting training and inference library"
 readme = "README.package.md"
 requires-python = ">=3.10"
@@ -55,11 +55,27 @@ plot = [
 survival = [
     "lifelines",
 ]
+sellm = [
+    "accelerate>=0.33",
+    "safetensors>=0.4",
+    "tokenizers>=0.20",
+    "transformers>=4.45,<6",
+]
+autotimes = [
+    "accelerate>=0.33",
+    "safetensors>=0.4",
+    "tokenizers>=0.20",
+    "transformers>=4.45,<6",
+]
 all = [
     "ipykernel",
     "jupyterlab",
     "matplotlib",
     "lifelines",
+    "accelerate>=0.33",
+    "safetensors>=0.4",
+    "tokenizers>=0.20",
+    "transformers>=4.45,<6",
 ]
 
 [tool.setuptools]
@@ -68,6 +84,10 @@ include-package-data = false
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["modeling_module*"]
+
+[tool.setuptools.package-data]
+"modeling_module.models.TimeMixer" = ["LICENSE.upstream", "upstream_manifest.json"]
+"modeling_module.models.AutoTimes" = ["LICENSE.upstream", "docs/README.md", "upstream_manifest.json"]
 
 [tool.setuptools.exclude-package-data]
 "*" = ["*.pyc", "*.pyo", ".DS_Store"]

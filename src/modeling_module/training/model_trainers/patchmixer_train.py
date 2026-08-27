@@ -10,7 +10,10 @@ import torch.nn as nn
 
 from torch.utils.data import DataLoader, WeightedRandomSampler
 
-from modeling_module.training.adapters import PatchMixerAdapter, DefaultAdapter
+from modeling_module.training.adapters import (
+    PatchMixerAdapter,
+    PatchMixerEndogenousAdapter,
+)
 from modeling_module.training.config import TrainingConfig, StageConfig, apply_stage
 from modeling_module.training.engine import CommonTrainer
 from modeling_module.training.model_trainers.amp_policy import amp_type_set
@@ -80,6 +83,11 @@ def train_patchmixer(
     assert train_cfg is not None, "train_cfg는 필수입니다."
     use_exogenous_mode = getattr(train_cfg, 'use_exogenous_mode', True)
     exo_is_normalized = getattr(train_cfg, 'exo_is_normalized', True)
+    is_endogenous = getattr(model, "architecture_variant", None) == "endogenous"
+    if is_endogenous and (bool(use_exogenous_mode) or future_exo_cb is not None):
+        raise RuntimeError(
+            "[train_patchmixer] PatchMixer supports endogenous-only training."
+        )
     # 1. 외생 변수 헤드 설정 (Callback 모드일 경우에만 동적 처리)
     if future_exo_cb is not None:
         horizon = getattr(model, "horizon", None) or getattr(train_cfg, "horizon", None)
@@ -106,17 +114,27 @@ def train_patchmixer(
     autocast_input = dict(device_type=amp_device, enabled=amp_enabled, dtype=amp_dtype)
 
     # 3. 모델 어댑터 초기화 (입/출력 형식 변환용)
-    adapter = PatchMixerAdapter() if PatchMixerAdapter else DefaultAdapter()
+    adapter = PatchMixerEndogenousAdapter() if is_endogenous else PatchMixerAdapter()
 
     # 4. 학습 스테이지 설정
     # 별도 스테이지가 없으면 단일 스테이지로 구성
     if not stages or len(stages) == 0:
         stages = [StageConfig(epochs=train_cfg.epochs, spike_enabled=train_cfg.spike_loss.enabled)]
 
+    is_production_refit = (
+        getattr(train_cfg, "training_mode", "qualification")
+        == "production_refit"
+    )
+    if is_production_refit and val_loader is not None:
+        raise ValueError("production_refit requires val_loader=None.")
+
     best = None
     global_best_loss = float("inf")
-    global_best_state = copy.deepcopy(model.state_dict())
+    global_best_state = (
+        None if is_production_refit else copy.deepcopy(model.state_dict())
+    )
     global_best_cfg = train_cfg
+    total_epochs_completed = 0
 
     # 5. 스테이지별 학습 루프 실행
     for i, stg in enumerate(stages, 1):
@@ -144,6 +162,20 @@ def train_patchmixer(
             device = device
         )
         model = trainer.fit(model, tl_i, val_loader, tta_steps=0)
+        total_epochs_completed += int(getattr(trainer, "epochs_completed_", 0))
+        if is_production_refit:
+            best = {
+                "model": model,
+                "cfg": cfg_i,
+                "best_val_loss": None,
+                "final_train_loss": float(
+                    getattr(trainer, "final_train_loss_", float("nan"))
+                ),
+                "epochs_completed": total_epochs_completed,
+                "state_selection": "final_epoch",
+            }
+            continue
+
         stage_best_loss = float(getattr(trainer, "best_loss_", float("inf")))
         if stage_best_loss < global_best_loss:
             global_best_loss = stage_best_loss
@@ -151,13 +183,19 @@ def train_patchmixer(
             global_best_cfg = cfg_i
         best = {"model": model, "cfg": cfg_i, "best_val_loss": stage_best_loss}
 
-    model.load_state_dict(global_best_state)
-    best = {"model": model, "cfg": global_best_cfg, "best_val_loss": global_best_loss}
+    if not is_production_refit:
+        assert global_best_state is not None
+        model.load_state_dict(global_best_state)
+        best = {
+            "model": model,
+            "cfg": global_best_cfg,
+            "best_val_loss": global_best_loss,
+        }
 
     # 학습 완료 상태 로그
     print(
         f"[EXO-train] model.exo_dim={getattr(model, 'exo_dim', 0)}  "
         f"future_exo_cb? {future_exo_cb is not None}  "
-        f"exo_is_normalized={exo_is_normalized}"
+        f"legacy_exo_is_normalized_ignored={exo_is_normalized}"
     )
     return best

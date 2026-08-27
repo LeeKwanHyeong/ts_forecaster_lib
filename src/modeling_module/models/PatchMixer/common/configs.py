@@ -1,14 +1,109 @@
-from typing import Optional, Literal, Tuple, List
+from typing import Any, List, Literal, Mapping, Optional, Tuple
 from dataclasses import dataclass, field
 
 from modeling_module.training.config import TrainingConfig, DecompositionConfig
 
 
-# =========================
-# PatchMixer 전용 설정
-# =========================
+_MISSING = object()
+
+
+def _config_value(config: Any, *names: str, default: Any = _MISSING) -> Any:
+    for name in names:
+        if isinstance(config, Mapping) and name in config:
+            return config[name]
+        if hasattr(config, name):
+            return getattr(config, name)
+    if default is not _MISSING:
+        return default
+    joined = " or ".join(repr(name) for name in names)
+    raise ValueError(f"PatchMixer config requires {joined}.")
+
+
+@dataclass(frozen=True)
+class PatchMixerConfig:
+    """Architecture fields required by the paper-faithful endogenous model."""
+
+    lookback: int
+    horizon: int
+    enc_in: int = 1
+    patch_len: int = 16
+    stride: int = 8
+    mixer_kernel_size: int = 8
+    d_model: int = 256
+    e_layers: int = 1
+    dropout: float = 0.2
+    head_dropout: float = 0.0
+    use_revin: bool = True
+    revin_affine: bool = True
+    revin_subtract_last: bool = False
+
+    def __post_init__(self) -> None:
+        positive_fields = {
+            "lookback": self.lookback,
+            "horizon": self.horizon,
+            "enc_in": self.enc_in,
+            "patch_len": self.patch_len,
+            "stride": self.stride,
+            "mixer_kernel_size": self.mixer_kernel_size,
+            "d_model": self.d_model,
+            "e_layers": self.e_layers,
+        }
+        for name, value in positive_fields.items():
+            if int(value) <= 0:
+                raise ValueError(f"{name} must be positive, got {value}.")
+        if self.patch_len > self.lookback:
+            raise ValueError(
+                f"patch_len must not exceed lookback, got {self.patch_len} > {self.lookback}."
+            )
+        for name, value in (
+            ("dropout", self.dropout),
+            ("head_dropout", self.head_dropout),
+        ):
+            if not 0.0 <= float(value) < 1.0:
+                raise ValueError(f"{name} must be in [0, 1), got {value}.")
+
+    @property
+    def seq_len(self) -> int:
+        return self.lookback
+
+    @property
+    def pred_len(self) -> int:
+        return self.horizon
+
+    @classmethod
+    def from_config(cls, config: Any) -> "PatchMixerConfig":
+        if isinstance(config, cls):
+            return config
+        return cls(
+            lookback=int(_config_value(config, "lookback", "seq_len")),
+            horizon=int(_config_value(config, "horizon", "pred_len")),
+            enc_in=int(_config_value(config, "enc_in", default=1)),
+            patch_len=int(_config_value(config, "patch_len", default=16)),
+            stride=int(_config_value(config, "stride", default=8)),
+            mixer_kernel_size=int(
+                _config_value(config, "mixer_kernel_size", default=8)
+            ),
+            d_model=int(_config_value(config, "d_model", default=256)),
+            e_layers=int(_config_value(config, "e_layers", default=1)),
+            dropout=float(_config_value(config, "dropout", default=0.2)),
+            head_dropout=float(_config_value(config, "head_dropout", default=0.0)),
+            use_revin=bool(_config_value(config, "use_revin", default=True)),
+            revin_affine=bool(
+                _config_value(config, "revin_affine", default=True)
+            ),
+            revin_subtract_last=bool(
+                _config_value(config, "revin_subtract_last", default=False)
+            ),
+        )
+
+
+# Historical name retained for checkpoint/import compatibility. New code should
+# use PatchMixerConfig for the endogenous paper implementation.
+PatchMixerOriginalConfig = PatchMixerConfig
+
+
 @dataclass
-class PatchMixerConfig(TrainingConfig):
+class PatchMixerExogenousConfig(TrainingConfig):
     """
     PatchMixer 모델 학습 및 구조 설정을 위한 구성 클래스.
 
@@ -65,7 +160,15 @@ class PatchMixerConfig(TrainingConfig):
 
     # ---------- 미래 외생 변수 (Future Exogenous) ----------
     future_exo_dim: int = 0  # 미래 외생 변수 차원 (0일 경우 미사용)
-    exo_is_normalized_default: bool = False  # 외생 변수 정규화 여부 기본값
+    # Target-shift coordinate, unrelated to exogenous input scaling. The model
+    # remains fail-closed for a mode until its complete forward path is present.
+    future_exo_shift_space: Literal["output", "normalized"] = "output"
+    # Optional tanh bound in target RevIN standard-deviation units. This is
+    # valid only for normalized-space shifts with RevIN enabled.
+    future_exo_normalized_residual_limit: Optional[float] = None
+    # Deprecated PatchMixer compatibility field. Input scaling belongs to the
+    # data contract; PatchMixer accepts and serializes this value but ignores it.
+    exo_is_normalized_default: bool = False
 
     # ---------- 과거 외생 변수 (Past Exogenous) ----------
     # 주의: 체크포인트 저장/로드 시 누락 방지를 위해 타입 어노테이션 필수
@@ -80,7 +183,8 @@ class PatchMixerConfig(TrainingConfig):
     learn_dw_gain: bool = True  # Depthwise Conv 이득(Gain) 학습 여부
 
     use_revin: bool = True
-    q_clip_norm = 10.0
+    # RevIN normalized-space eval clip; None or <=0 disables it.
+    q_clip_norm: Optional[float] = 10.0
 
 
 
@@ -88,7 +192,7 @@ class PatchMixerConfig(TrainingConfig):
 # 프리셋: 월간/주간
 # =========================
 @dataclass
-class PatchMixerConfigMonthly(PatchMixerConfig):
+class PatchMixerConfigMonthly(PatchMixerExogenousConfig):
     """
     월간(Monthly) 데이터 전용 프리셋 설정.
     특징:
@@ -100,7 +204,7 @@ class PatchMixerConfigMonthly(PatchMixerConfig):
 
 
 @dataclass
-class PatchMixerConfigWeekly(PatchMixerConfig):
+class PatchMixerConfigWeekly(PatchMixerExogenousConfig):
     """
     주간(Weekly) 데이터 전용 프리셋 설정.
     특징:
@@ -109,3 +213,8 @@ class PatchMixerConfigWeekly(PatchMixerConfig):
     """
     expander_season_period: int = 52
     expander_n_harmonics: int = 8
+
+
+# Enhanced/quantile checkpoints created before the public model consolidation
+# are restored with this config shape through load-only builders.
+PatchMixerLegacyConfig = PatchMixerExogenousConfig

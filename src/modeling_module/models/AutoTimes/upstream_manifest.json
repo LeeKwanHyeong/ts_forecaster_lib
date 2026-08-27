@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "captured_on": "2026-08-25",
+  "paper": {
+    "title": "AutoTimes: Autoregressive Time Series Forecasters via Large Language Models",
+    "url": "https://proceedings.neurips.cc/paper_files/paper/2024/file/dcf88cbc8d01ce7309b83d0ebaeb9d29-Paper-Conference.pdf"
+  },
+  "upstream": {
+    "repository": "https://github.com/thuml/AutoTimes",
+    "commit": "9ff9aac5083e24c233404c35d7b7a3c0643f2c70",
+    "tree": "ef76c299a823c1309a42f2a951ff6ea732c283b0"
+  },
+  "license": {
+    "spdx": "MIT",
+    "upstream_path": "LICENSE",
+    "vendored_path": "LICENSE.upstream",
+    "sha256": "29d2a4c09fa577780522219dc248466977f77cd420354c5e9a0e86550be2b849"
+  },
+  "reviewed_files": {
+    "models/AutoTimes_Llama.py": "130bbdf2f44526b3ac65ed6204da4212183c71ebdc06ebadca8ca41778b0e47f",
+    "models/AutoTimes_Gpt2.py": "ee7892a26af81cc5b3b151ce49089a29e626cde9b63ec42caa6c49f6977e4a08",
+    "models/AutoTimes_Opt_1b.py": "95040f6d4a84349e4fc0461d01cdcf4234eda29b646b8fd9d354a859978c1525",
+    "models/Preprocess_Llama.py": "9e44c0a502d707498626dea33b8653cab480d36f9c9c4c238eb312cbe4f8967e",
+    "layers/mlp.py": "6c1debd9e7375548b71aa347dd2c71ad73e170c351f7a3b78edcc73a6ddb1a75",
+    "data_provider/data_loader.py": "63215f70d3832a1434570f15b25e84298f2441585bb823023e6fc2f1c974435b",
+    "exp/exp_in_context_forecasting.py": "babd2856a2519d5da419cc937453dcb197f7404194e66f49158e6b2b33841c3e"
+  },
+  "product_scope": {
+    "adapted": [
+      "non-overlapping numeric tokenization",
+      "frozen decoder backbone",
+      "timestamp embedding mixing",
+      "autoregressive token generation"
+    ],
+    "excluded": [
+      "upstream benchmark CLI",
+      "upstream dataset loader",
+      "upstream experiment runners"
+    ]
+  }
+}

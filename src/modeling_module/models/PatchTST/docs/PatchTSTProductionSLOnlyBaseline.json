@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "status": "frozen",
+  "forecast_origin": 202545,
+  "model_key": "patchtst_base",
+  "training_strategy": "sl_only",
+  "checkpoint": {
+    "file_name": "weekly_PatchTST_L52_H27.pt",
+    "sha256": "2674a5b01a882a7d3bf36af598d787136d2c15181879307989a8206a43fa2d78",
+    "format_version": "modeling_module.ckpt.v3",
+    "parameters": 403099,
+    "architecture_variant": "endogenous"
+  },
+  "data": {
+    "source_range": "201801..202544",
+    "cutoff": 202544,
+    "source_rows": 2455508,
+    "series": 7000,
+    "source_sha256": "328f547d5eb0a50c80dc60dc7bb89c09799599f8f6b8677406a0e3cc4a3ef547",
+    "lookback": 52,
+    "horizon": 27,
+    "window_stride": 4,
+    "training_windows": 480072,
+    "validation_windows": 0
+  },
+  "architecture": {
+    "d_model": 128,
+    "n_layers": 2,
+    "d_ff": 512
+  },
+  "training": {
+    "seed": 42,
+    "epochs": 8,
+    "learning_rate": 0.001,
+    "scheduler": "cosine_annealing",
+    "scheduler_t_max": 40,
+    "state_selection": "final_epoch",
+    "training_mode": "production_refit",
+    "validation_enabled": false,
+    "final_train_loss": 3.2237984420906782
+  },
+  "protection": {
+    "overwrite_during_full_ssl_qualification": false,
+    "full_ssl_artifact_root_must_be_distinct": true
+  },
+  "references": [
+    "src/model_test/total_train/docs/DSIO202545PatchTSTProductionRefit.md",
+    "DSIODemandEngine/models/weekly/production/202545/weekly_PatchTST_L52_H27.pt"
+  ]
+}

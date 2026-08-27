@@ -3,28 +3,22 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-# Config는 가볍게 eager
-from .common import PatchMixerConfig
+from .common import PatchMixerConfig, PatchMixerExogenousConfig
 
 __all__ = [
     "PatchMixerConfig",
-    "BaseModel",
-    "QuantileModel",
-    "PatchMixerBackbone",
-    "MultiScalePatchMixerBackbone",
-    "make_patch_cfgs",
+    "PatchMixerExogenousConfig",
+    "PatchMixerModel",
+    "PatchMixerExogenousModel",
 ]
 
 if TYPE_CHECKING:
-    from .PatchMixer import BaseModel, QuantileModel, make_patch_cfgs
-    from .backbone import PatchMixerBackbone, MultiScalePatchMixerBackbone
+    from .PatchMixer import PatchMixerModel
+    from .variants import PatchMixerExogenousModel
 
 _LAZY = {
-    "BaseModel": (".PatchMixer", "BaseModel"),
-    "QuantileModel": (".PatchMixer", "QuantileModel"),
-    "make_patch_cfgs": (".PatchMixer", "make_patch_cfgs"),
-    "PatchMixerBackbone": (".backbone", "PatchMixerBackbone"),
-    "MultiScalePatchMixerBackbone": (".backbone", "MultiScalePatchMixerBackbone"),
+    "PatchMixerModel": (".PatchMixer", "PatchMixerModel"),
+    "PatchMixerExogenousModel": (".variants", "PatchMixerExogenousModel"),
 }
 
 

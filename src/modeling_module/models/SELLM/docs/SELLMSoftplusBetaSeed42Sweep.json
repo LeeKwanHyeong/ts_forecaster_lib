@@ -1,0 +1,169 @@
+{
+  "candidate_gates": {
+    "beta1": {
+      "checks": {
+        "absolute_bias_within_10_percent": false,
+        "checkpoint_reload_parity": true,
+        "mae_not_worse_than_identity": true,
+        "raw_negative_rate_is_zero": true
+      },
+      "status": "FAIL"
+    },
+    "beta2": {
+      "checks": {
+        "absolute_bias_within_10_percent": false,
+        "checkpoint_reload_parity": true,
+        "mae_not_worse_than_identity": true,
+        "raw_negative_rate_is_zero": true
+      },
+      "status": "FAIL"
+    },
+    "beta4": {
+      "checks": {
+        "absolute_bias_within_10_percent": false,
+        "checkpoint_reload_parity": true,
+        "mae_not_worse_than_identity": true,
+        "raw_negative_rate_is_zero": true
+      },
+      "status": "FAIL"
+    },
+    "beta8": {
+      "checks": {
+        "absolute_bias_within_10_percent": false,
+        "checkpoint_reload_parity": true,
+        "mae_not_worse_than_identity": true,
+        "raw_negative_rate_is_zero": true
+      },
+      "status": "FAIL"
+    }
+  },
+  "code_contract_sha256": "561208eaf62de3850d1ab810489e292e124d471b34e753b193f23b4effabf7bd",
+  "comparison_contract_sha256": "b0c0f82d6e60879b4f4bb26134782b68affc8533136186070f95f567cbbac4d2",
+  "conditions": {
+    "batch_size": 4,
+    "epochs": 5,
+    "horizon": 26,
+    "learning_rate": 0.0001,
+    "model_key": "sellm_base",
+    "sample_series": 256,
+    "seed": 42
+  },
+  "contract": "modeling_module.sellm_softplus_beta_seed42_sweep.v1",
+  "multiseed_candidates": [],
+  "receipt_sha256": "91c5f86852e0739573f73d4e6dfb34312dd3775f9f73deecc90fd81c01cd4d40",
+  "recommended_beta": null,
+  "results": {
+    "beta1": {
+      "bias": 0.12552924899214388,
+      "checkpoint_sha256": "d7dcec21814832980db3c71fac3cdcde756aed90962527bc3cb28d768a39a97f",
+      "delta_vs_identity": {
+        "bias_percentage_points": 8.966830571500282,
+        "mae_percent": -19.308357539018562,
+        "raw_negative_rate_percentage_points": -16.766826923076923,
+        "smape_percent": -5.916765836345206,
+        "wape_percent": -19.308357539018573
+      },
+      "mae": 3.2089312820425464,
+      "mode": "softplus",
+      "peak_allocated_mib": 2844.34765625,
+      "qualification_receipt_sha256": "3af551fcaefad9118c32527e653b2b1cf9767e8c5ef53a89847a5c0fefa9be6e",
+      "raw_negative_rate": 0.0,
+      "smape": 0.7673916319044088,
+      "softplus_beta": 1.0,
+      "source_commit": "b0e3e1588aafd163dc8d1a0b1cc0608239d8ca0a",
+      "training_seconds": 45.875545158050954,
+      "wape": 0.4768406548775493
+    },
+    "beta2": {
+      "bias": 0.17833175500884002,
+      "checkpoint_sha256": "88ab5d5cb36a31b41495b246e19448d361be8cb4b4feb078e55ee94357316f76",
+      "delta_vs_identity": {
+        "bias_percentage_points": 14.247081173169896,
+        "mae_percent": -13.677834732685323,
+        "raw_negative_rate_percentage_points": -16.766826923076923,
+        "smape_percent": -4.5250207019601145,
+        "wape_percent": -13.677834732685323
+      },
+      "mae": 3.4328449392249927,
+      "mode": "softplus",
+      "peak_allocated_mib": 2844.34765625,
+      "qualification_receipt_sha256": "5a8271d667d65f22d2a4668e5e2236c0819fdb28d8e5911b8a6916918a76e025",
+      "raw_negative_rate": 0.0,
+      "smape": 0.778743426720614,
+      "softplus_beta": 2.0,
+      "source_commit": "0cbe6f6b04ee34e7bfdc50017524b69f051c3f13",
+      "training_seconds": 46.407384490943514,
+      "wape": 0.5101137684292184
+    },
+    "beta4": {
+      "bias": 0.10968676954202475,
+      "checkpoint_sha256": "4185f0937312e6db92992a647abd7e9e25b94932cb82d80aba9732b3fc47ec21",
+      "delta_vs_identity": {
+        "bias_percentage_points": 7.382582626488368,
+        "mae_percent": -18.535423531619134,
+        "raw_negative_rate_percentage_points": -16.766826923076923,
+        "smape_percent": -2.9763091138689246,
+        "wape_percent": -18.535423531619134
+      },
+      "mae": 3.2396691879724933,
+      "mode": "softplus",
+      "peak_allocated_mib": 2844.34765625,
+      "qualification_receipt_sha256": "68fb48ce3b8815c2487da6e63b0be7d78c9d6d673ec2b7048984615e259bbd58",
+      "raw_negative_rate": 0.0,
+      "smape": 0.7913755213068531,
+      "softplus_beta": 4.0,
+      "source_commit": "0cbe6f6b04ee34e7bfdc50017524b69f051c3f13",
+      "training_seconds": 46.52465893200133,
+      "wape": 0.48140824511396935
+    },
+    "beta8": {
+      "bias": 0.10017638179512442,
+      "checkpoint_sha256": "3212a3e62cb0a7ccd6f76a8e00bd5e65679ac0a4221cd24ca5920ed63d49bfdb",
+      "delta_vs_identity": {
+        "bias_percentage_points": 6.431543851798335,
+        "mae_percent": -23.62709453040228,
+        "raw_negative_rate_percentage_points": -16.766826923076923,
+        "smape_percent": -18.71570601712016,
+        "wape_percent": -23.62709453040228
+      },
+      "mae": 3.037184496280107,
+      "mode": "softplus",
+      "peak_allocated_mib": 2844.34765625,
+      "qualification_receipt_sha256": "0dce688faafa945722dd6e7d1aae0f4915fc60168d51875b9d047fb75dd6ce7e",
+      "raw_negative_rate": 0.0,
+      "smape": 0.6629968406402491,
+      "softplus_beta": 8.0,
+      "source_commit": "0cbe6f6b04ee34e7bfdc50017524b69f051c3f13",
+      "training_seconds": 45.98310434294399,
+      "wape": 0.45131943220308074
+    },
+    "identity": {
+      "bias": 0.03586094327714107,
+      "checkpoint_sha256": "b6fb5d13a0bd36dcba80d99e25380f1bda84c1d88c655854dbc81386a229e534",
+      "delta_vs_identity": {
+        "bias_percentage_points": 0.0,
+        "mae_percent": 0.0,
+        "raw_negative_rate_percentage_points": 0.0,
+        "smape_percent": 0.0,
+        "wape_percent": 0.0
+      },
+      "mae": 3.9767827053393168,
+      "mode": "identity",
+      "peak_allocated_mib": 2844.34765625,
+      "qualification_receipt_sha256": "416138c9693b7cc375ff3e3d6392be25523e2ced11f785432d35622744ff42f2",
+      "raw_negative_rate": 0.16766826923076922,
+      "smape": 0.8156518413998773,
+      "softplus_beta": 1.0,
+      "source_commit": "b0e3e1588aafd163dc8d1a0b1cc0608239d8ca0a",
+      "training_seconds": 46.872927967924625,
+      "wape": 0.5909418129741582
+    }
+  },
+  "status": "PASS",
+  "thresholds": {
+    "max_absolute_bias": 0.1,
+    "max_mae": 3.9767827053393168,
+    "max_reload_delta": 1e-06,
+    "required_raw_negative_rate": 0.0
+  }
+}

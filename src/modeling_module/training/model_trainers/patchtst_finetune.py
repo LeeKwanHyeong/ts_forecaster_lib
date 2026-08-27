@@ -2,12 +2,23 @@
 from __future__ import annotations
 
 import os
-from typing import Optional, Callable, Dict, Any, Tuple
+from typing import Optional, Callable, Dict, Any, Mapping, Tuple
 
 import torch
 
 from modeling_module.training.config import TrainingConfig, StageConfig
+from modeling_module.training.model_trainers.patchtst_pretrain import (
+    PATCHTST_PRETRAIN_CONTRACT_VERSION,
+)
 from modeling_module.training.model_trainers.patchtst_train import train_patchtst
+
+
+PATCHTST_PRETRAIN_TRANSFER_PREFIXES = ("backbone.",)
+PATCHTST_SUPERVISED_ONLY_PREFIXES = (
+    "head.",
+    "future_cat_embedding.",
+    "future_fuser.",
+)
 
 
 def _sinusoidal_pos_emb(n: int, d: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
@@ -300,17 +311,22 @@ def _select_loadable_keys(
         state: Dict[str, torch.Tensor],
         model_state: Dict[str, torch.Tensor],
         *,
-        allow_prefixes: Tuple[str, ...] = ("backbone.", "revin_layer."),
+        allow_prefixes: Tuple[str, ...] = PATCHTST_PRETRAIN_TRANSFER_PREFIXES,
 ) -> Dict[str, torch.Tensor]:
     """
-    타겟 모델에 존재하고 허용된 접두사를 가진 키만 선별.
+    타겟 모델에 존재하고 shape가 같은 허용 prefix의 키만 선별.
     """
     model_keys = set(model_state.keys())
     out: Dict[str, torch.Tensor] = {}
     for k, v in state.items():
         if not k.startswith(allow_prefixes):
             continue
-        if k in model_keys:
+        if not torch.is_tensor(v):
+            continue
+        if (
+            k in model_keys
+            and tuple(v.shape) == tuple(model_state[k].shape)
+        ):
             out[k] = v
     return out
 
@@ -325,6 +341,288 @@ def _report_match_stats(loaded: Dict[str, torch.Tensor], model_state: Dict[str, 
     print(f"[Finetune] missing: {len(missing)} / total: {len(mkeys)} ratio={len(missing) / max(1, len(mkeys)):.3f}")
     if missing:
         print("[Finetune] missing sample (first 30):", missing[:30])
+
+
+def _supervised_patching_contract(model) -> Dict[str, Any]:
+    cfg = getattr(model, "cfg", None)
+    if cfg is None:
+        raise ValueError(
+            "PatchTST supervised model must expose `cfg` for SSL restore."
+        )
+    patch_count = getattr(getattr(model, "backbone", None), "patch_num", None)
+    return {
+        "lookback": int(getattr(cfg, "lookback")),
+        "patch_len": int(getattr(cfg, "patch_len")),
+        "stride": int(getattr(cfg, "stride")),
+        "input_channels": int(getattr(cfg, "c_in", 1)),
+        "patch_count": (
+            None if patch_count is None else int(patch_count)
+        ),
+        "padding_patch": getattr(cfg, "padding_patch", None),
+    }
+
+
+def _validate_pretrain_contract(
+        meta: Mapping[str, Any],
+        model,
+) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any], Dict[str, Any]]:
+    target = _supervised_patching_contract(model)
+    raw_contract = meta.get("pretrain_contract")
+    if raw_contract is None:
+        return (
+            None,
+            target,
+            {
+                "validation": "legacy_shape_only",
+                "patch_len_match": None,
+                "input_channels_match": None,
+                "stride_match": None,
+                "patch_count_match": None,
+                "source_to_target_stride_change_allowed": True,
+            },
+        )
+    if not isinstance(raw_contract, Mapping):
+        raise ValueError(
+            "PatchTST pretrain checkpoint has an invalid `pretrain_contract`."
+        )
+
+    contract = dict(raw_contract)
+    if contract.get("format_version") != PATCHTST_PRETRAIN_CONTRACT_VERSION:
+        raise ValueError(
+            "Unsupported PatchTST pretrain contract version: "
+            f"{contract.get('format_version')!r}."
+        )
+    if contract.get("model_family") != "patchtst":
+        raise ValueError(
+            "PatchTST pretrain checkpoint model_family must be 'patchtst'."
+        )
+    if contract.get("input_scope") != "target_history_only":
+        raise ValueError(
+            "PatchTST pretrain checkpoint input_scope must be "
+            "'target_history_only'."
+        )
+
+    patching = contract.get("patching")
+    masking = contract.get("masking")
+    transfer_target = contract.get("transfer_target")
+    if (
+        not isinstance(patching, Mapping)
+        or not isinstance(masking, Mapping)
+        or not isinstance(transfer_target, Mapping)
+    ):
+        raise ValueError(
+            "PatchTST pretrain contract is missing patching, masking or "
+            "transfer_target."
+        )
+    try:
+        source_lookback = int(patching["lookback"])
+        source_patch_len = int(patching["patch_len"])
+        source_stride = int(patching["stride"])
+        source_input_channels = int(patching["input_channels"])
+        source_patch_count = int(patching["patch_count"])
+        intended_patch_len = int(transfer_target["patch_len"])
+        mask_ratio = float(masking["mask_ratio"])
+        loss_type = str(masking["loss_type"]).strip().lower()
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(
+            "PatchTST pretrain contract contains invalid patch metadata."
+        ) from exc
+
+    if (
+        source_lookback <= 0
+        or source_patch_len <= 0
+        or source_stride <= 0
+        or source_input_channels <= 0
+        or source_patch_count <= 0
+    ):
+        raise ValueError(
+            "PatchTST pretrain contract patch metadata must be positive."
+        )
+    expected_patch_count = (
+        1
+        if source_lookback < source_patch_len
+        else (
+            (source_lookback - source_patch_len) // source_stride
+        ) + 1
+    )
+    if source_patch_count != expected_patch_count:
+        raise ValueError(
+            "PatchTST pretrain contract patch_count is inconsistent with "
+            "lookback, patch_len and stride."
+        )
+    if (
+        masking.get("unit") != "patch"
+        or not 0.0 < mask_ratio <= 1.0
+        or loss_type not in {"mse", "mae"}
+    ):
+        raise ValueError(
+            "PatchTST pretrain contract contains invalid masking metadata."
+        )
+    if source_patch_len != intended_patch_len:
+        raise ValueError(
+            "PatchTST pretrain contract patch_len is internally inconsistent."
+        )
+    if source_patch_len != target["patch_len"]:
+        raise ValueError(
+            "PatchTST pretrain/supervised patch_len mismatch: "
+            f"pretrain={source_patch_len}, supervised={target['patch_len']}."
+        )
+    if source_input_channels != target["input_channels"]:
+        raise ValueError(
+            "PatchTST pretrain/supervised input channel mismatch: "
+            f"pretrain={source_input_channels}, "
+            f"supervised={target['input_channels']}."
+        )
+
+    intended_supervised_stride = transfer_target.get(
+        "supervised_stride"
+    )
+    if intended_supervised_stride is not None:
+        try:
+            intended_supervised_stride = int(intended_supervised_stride)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "PatchTST pretrain contract has an invalid supervised stride."
+            ) from exc
+        if intended_supervised_stride <= 0:
+            raise ValueError(
+                "PatchTST pretrain contract supervised stride must be positive."
+            )
+        if intended_supervised_stride != target["stride"]:
+            raise ValueError(
+                "PatchTST pretrain checkpoint was created for supervised "
+                f"stride={intended_supervised_stride}, but target stride="
+                f"{target['stride']}."
+            )
+
+    return (
+        contract,
+        target,
+        {
+            "validation": "versioned_contract",
+            "patch_len_match": True,
+            "input_channels_match": True,
+            "stride_match": source_stride == target["stride"],
+            "patch_count_match": (
+                None
+                if target["patch_count"] is None
+                else source_patch_count == target["patch_count"]
+            ),
+            "source_to_target_stride_change_allowed": True,
+        },
+    )
+
+
+def load_patchtst_pretrained_backbone(
+        model,
+        pretrain_ckpt_path: str,
+        *,
+        load_strict: bool = False,
+) -> Dict[str, Any]:
+    """Load only compatible PatchTST backbone weights from an SSL checkpoint."""
+    if not os.path.exists(pretrain_ckpt_path):
+        raise FileNotFoundError(pretrain_ckpt_path)
+
+    raw_state, meta = _load_pretrain_blob(pretrain_ckpt_path)
+    raw_state = _strip_common_prefixes(raw_state)
+    raw_state = _drop_revin_stats(raw_state)
+    (
+        pretrain_contract,
+        target_patching,
+        patching_compatibility,
+    ) = _validate_pretrain_contract(meta, model)
+
+    model_state = model.state_dict()
+    d_model, n_layers = _infer_supervised_encoder_spec(model)
+
+    state = raw_state
+    if _looks_like_torch_transformer_encoder(raw_state):
+        state = _convert_torch_transformer_to_tst(
+            raw_state,
+            d_model=d_model,
+            n_layers=n_layers,
+        )
+    state = _map_patch_embed_to_input_proj(state)
+
+    pretrain_weight = state.get("backbone.patch_embed.weight")
+    pretrain_bias = state.get("backbone.patch_embed.bias")
+    target_weight = model_state.get("backbone.input_proj.weight")
+    target_bias = model_state.get("backbone.input_proj.bias")
+
+    if pretrain_weight is not None and target_weight is not None:
+        if pretrain_weight.shape == target_weight.shape:
+            state["backbone.input_proj.weight"] = pretrain_weight
+        else:
+            merged_weight = target_weight.clone()
+            columns = min(
+                pretrain_weight.shape[1],
+                merged_weight.shape[1],
+            )
+            merged_weight[:, :columns] = pretrain_weight[:, :columns]
+            state["backbone.input_proj.weight"] = merged_weight
+
+    if (
+        pretrain_bias is not None
+        and target_bias is not None
+        and pretrain_bias.shape == target_bias.shape
+    ):
+        state["backbone.input_proj.bias"] = pretrain_bias
+
+    transferred = _select_loadable_keys(state, model_state)
+    if not transferred:
+        raise RuntimeError(
+            "Pretrain checkpoint contains no compatible PatchTST backbone "
+            f"weights: {pretrain_ckpt_path}"
+        )
+    filtered = _maybe_add_sinusoidal_pos_enc(
+        transferred,
+        model_state,
+    )
+    initialized_backbone_keys = sorted(
+        set(filtered).difference(transferred)
+    )
+    if any(
+        not key.startswith(PATCHTST_PRETRAIN_TRANSFER_PREFIXES)
+        for key in filtered
+    ):
+        raise RuntimeError(
+            "PatchTST pretrain transfer attempted to load a non-backbone key."
+        )
+
+    print("[Finetune] loaded pretrain ckpt:", pretrain_ckpt_path)
+    if meta:
+        print("[Finetune] ckpt meta keys:", list(meta.keys()))
+    _report_match_stats(filtered, model_state)
+
+    missing, unexpected = model.load_state_dict(
+        filtered,
+        strict=load_strict,
+    )
+    print(f"[Finetune] load_strict={load_strict}")
+    print(
+        "[Finetune] load_state_dict -> "
+        f"missing_keys={len(missing)} unexpected_keys={len(unexpected)}"
+    )
+    if missing:
+        print("  - missing (first 30):", missing[:30])
+    if unexpected:
+        print("  - unexpected (first 30):", unexpected[:30])
+
+    return {
+        "checkpoint_path": str(pretrain_ckpt_path),
+        "transfer_scope": "backbone_only",
+        "pretrain_contract": pretrain_contract,
+        "target_patching": target_patching,
+        "patching_compatibility": patching_compatibility,
+        "transferred_key_count": len(transferred),
+        "transferred_keys": sorted(transferred),
+        "initialized_backbone_keys": initialized_backbone_keys,
+        "supervised_only_prefixes": list(
+            PATCHTST_SUPERVISED_ONLY_PREFIXES
+        ),
+        "missing_key_count": len(missing),
+        "unexpected_key_count": len(unexpected),
+    }
 
 
 # ---------------------------------------------------------------------
@@ -387,64 +685,14 @@ def train_patchtst_finetune(
     assert train_cfg is not None, "train_cfg는 필수입니다."
     exo_is_normalized = getattr(train_cfg, "exo_is_normalized", True)
 
-
     # 1) 사전학습 체크포인트 로드 (존재 시)
+    pretrain_load_report = None
     if pretrain_ckpt_path is not None:
-        if not os.path.exists(pretrain_ckpt_path):
-            raise FileNotFoundError(pretrain_ckpt_path)
-
-        raw_state, meta = _load_pretrain_blob(pretrain_ckpt_path)
-        raw_state = _strip_common_prefixes(raw_state)
-        raw_state = _drop_revin_stats(raw_state)
-
-        # 가중치 변환 (TransformerEncoder -> TSTEncoder)
-        model_state = model.state_dict()
-        d_model, n_layers = _infer_supervised_encoder_spec(model)
-
-        state = raw_state
-        if _looks_like_torch_transformer_encoder(raw_state):
-            state = _convert_torch_transformer_to_tst(raw_state, d_model=d_model, n_layers=n_layers)
-
-        # SSL patch_embed -> Supervised input_proj 매핑
-        state = _map_patch_embed_to_input_proj(state)
-
-        w = state.get("backbone.patch_embed.weight")
-        b = state.get("backbone.patch_embed.bias")
-
-        tgt_w = model_state.get("backbone.input_proj.weight")
-        tgt_b = model_state.get("backbone.input_proj.bias")
-
-        if (w is not None) and (tgt_w is not None):
-            if w.shape == tgt_w.shape:
-                state["backbone.input_proj.weight"] = w
-            else:
-                new_w = tgt_w.clone()
-                cols = min(w.shape[1], new_w.shape[1])
-                new_w[:, :cols] = w[:, :cols]
-                state["backbone.input_proj.weight"] = new_w
-
-        if (b is not None) and (tgt_b is not None) and (b.shape == tgt_b.shape):
-            state["backbone.input_proj.bias"] = b
-
-        # 로드 가능한 키 선별 및 위치 인코딩 보정
-        filtered = _select_loadable_keys(state, model_state)
-        filtered = _maybe_add_sinusoidal_pos_enc(filtered, model_state)
-
-        # 매칭 통계 출력 및 로드 실행
-        print("[Finetune] loaded pretrain ckpt:", pretrain_ckpt_path)
-        if meta:
-            print("[Finetune] ckpt meta keys:", list(meta.keys()))
-        _report_match_stats(filtered, model_state)
-
-        missing, unexpected = model.load_state_dict(filtered, strict=load_strict)
-
-        # 로드 결과 요약
-        print(f"[Finetune] load_strict={load_strict}")
-        print(f"[Finetune] load_state_dict -> missing_keys={len(missing)} unexpected_keys={len(unexpected)}")
-        if missing:
-            print("  - missing (first 30):", missing[:30])
-        if unexpected:
-            print("  - unexpected (first 30):", unexpected[:30])
+        pretrain_load_report = load_patchtst_pretrained_backbone(
+            model,
+            pretrain_ckpt_path,
+            load_strict=load_strict,
+        )
 
     # 2) 파인튜닝 전 인코더 동결 (옵션)
     if freeze_encoder_before_ft:
@@ -461,6 +709,8 @@ def train_patchtst_finetune(
         train_cfg=train_cfg,
         future_exo_cb=future_exo_cb,
     )
+    if pretrain_load_report is not None:
+        out["pretrain_load_report"] = pretrain_load_report
 
     # 4) 학습 후 동결 해제 (옵션)
     if freeze_encoder_before_ft and unfreeze_after_stage0:

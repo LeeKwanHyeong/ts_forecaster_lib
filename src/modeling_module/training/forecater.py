@@ -149,6 +149,48 @@ def _validate_future_exo_tensor(
     return value
 
 
+def _validate_future_exo_cat_tensor(
+    value: Any,
+    *,
+    source: str,
+    batch_size: int,
+    required_horizon: int,
+    cardinalities: Sequence[int],
+) -> torch.Tensor:
+    expected_features = len(tuple(cardinalities))
+    value = _validate_future_exo_tensor(
+        value,
+        source=source,
+        batch_size=batch_size,
+        required_horizon=required_horizon,
+        expected_features=expected_features,
+    )
+    if value.dtype not in (
+        torch.int8,
+        torch.int16,
+        torch.int32,
+        torch.int64,
+        torch.uint8,
+    ):
+        raise TypeError(
+            f"{source} must use an integer dtype, got {value.dtype}."
+        )
+    if expected_features == 0:
+        return value
+    flattened = value.reshape(-1, expected_features)
+    for feature_index, cardinality in enumerate(cardinalities):
+        column = flattened[:, feature_index]
+        if column.numel() and (
+            int(column.min().item()) < 0
+            or int(column.max().item()) >= int(cardinality)
+        ):
+            raise ValueError(
+                f"{source} feature index {feature_index} contains IDs "
+                f"outside [0, {int(cardinality) - 1}]."
+            )
+    return value
+
+
 def _first_usable(out: Any) -> Any:
     """
     Tuple/List 등에서 유효한 첫 결과(Tensor/Dict 우선)를 추출.
@@ -761,6 +803,9 @@ class DMSForecaster:
 
         # set on predict()
         self.future_exo_cb: Optional[Callable[[int, int], torch.Tensor]] = None
+        self.future_exo_cat_cb: Optional[
+            Callable[[int, int], torch.Tensor]
+        ] = None
 
     # ---------------------------------------------------------------------
     # Public Entry Point
@@ -777,6 +822,7 @@ class DMSForecaster:
         past_exo_cont: Optional[torch.Tensor] = None,
         past_exo_cat: Optional[torch.Tensor] = None,
         future_exo_batch: Optional[torch.Tensor] = None,
+        future_exo_cat_batch: Optional[torch.Tensor] = None,
         future_exo_cb: Optional[Callable[[int, int, torch.device], torch.Tensor]] = None,
         # Horizon extension policy (backward compatible)
         # - extension_policy=None: use legacy flags (is_IMS / is_linear_decay)
@@ -828,6 +874,10 @@ class DMSForecaster:
         past_exo_cont = _to_device_any(past_exo_cont, device)
         past_exo_cat = _to_device_any(past_exo_cat, device)
         future_exo_batch = _to_device_any(future_exo_batch, device)
+        future_exo_cat_batch = _to_device_any(
+            future_exo_cat_batch,
+            device,
+        )
 
         x_raw = x_init.to(device).float().clone()
         if x_raw.dim() == 2:
@@ -851,7 +901,16 @@ class DMSForecaster:
         # 1) Future exo wiring
         # --------------------------------------------------------------
         d_future_expected = _infer_d_future_expected(self.model)
+        future_cat_cardinalities = tuple(
+            int(value)
+            for value in getattr(
+                self.model,
+                "future_exo_cat_cardinalities",
+                (),
+            )
+        )
         cb_final = future_exo_cb
+        cat_cb_final = None
 
         H_hint = int(getattr(self.model, "horizon", getattr(self.model, "output_horizon", 0)) or 0)
         probe_H = int(horizon if H_hint == 0 else max(1, H_hint))
@@ -906,6 +965,82 @@ class DMSForecaster:
 
                 cb_final = _cb_from_batch_b
 
+        if (
+            future_exo_cat_batch is not None
+            and not torch.is_tensor(future_exo_cat_batch)
+        ):
+            raise RuntimeError(
+                "future_exo_cat_batch must be a torch.Tensor with shape "
+                "(H, K) or (B, H, K)."
+            )
+
+        if torch.is_tensor(future_exo_cat_batch):
+            cat_batch = _validate_future_exo_cat_tensor(
+                future_exo_cat_batch,
+                source="future_exo_cat_batch",
+                batch_size=B,
+                required_horizon=int(horizon),
+                cardinalities=future_cat_cardinalities,
+            )
+            if not future_cat_cardinalities and int(cat_batch.size(-1)) == 0:
+                cat_batch = None
+
+            if cat_batch is not None and cat_batch.dim() == 2:
+                def _cat_cb_from_batch(
+                    t0: int,
+                    h_req: int,
+                    dev: torch.device,
+                ):
+                    s, e = int(t0), int(t0) + int(h_req)
+                    total_horizon = cat_batch.size(0)
+                    if total_horizon >= e:
+                        return cat_batch[s:e, :].detach().to(dev)
+                    if total_horizon <= s:
+                        return (
+                            cat_batch[-1:, :]
+                            .expand(h_req, -1)
+                            .detach()
+                            .to(dev)
+                        )
+                    tail = cat_batch[s:, :]
+                    pad = cat_batch[-1:, :].expand(
+                        e - total_horizon,
+                        -1,
+                    )
+                    return torch.cat([tail, pad], dim=0).detach().to(dev)
+
+                cat_cb_final = _cat_cb_from_batch
+
+            elif cat_batch is not None and cat_batch.dim() == 3:
+                def _cat_cb_from_batch_b(
+                    t0: int,
+                    h_req: int,
+                    dev: torch.device,
+                ):
+                    s, e = int(t0), int(t0) + int(h_req)
+                    total_horizon = cat_batch.size(1)
+                    if total_horizon >= e:
+                        output = cat_batch[:, s:e, :]
+                    elif total_horizon <= s:
+                        output = cat_batch[:, -1:, :].expand(
+                            cat_batch.size(0),
+                            h_req,
+                            -1,
+                        )
+                    else:
+                        tail = cat_batch[:, s:, :]
+                        pad = cat_batch[:, -1:, :].expand(
+                            cat_batch.size(0),
+                            e - total_horizon,
+                            -1,
+                        )
+                        output = torch.cat([tail, pad], dim=1)
+                    if output.size(0) == 1 and B > 1:
+                        output = output.expand(B, -1, -1)
+                    return output.detach().to(dev)
+
+                cat_cb_final = _cat_cb_from_batch_b
+
         self.future_exo_cb = None
         if cb_final is not None:
             def _checked_future_exo_cb(t: int, h: int) -> torch.Tensor:
@@ -919,6 +1054,23 @@ class DMSForecaster:
                 )
 
             self.future_exo_cb = _checked_future_exo_cb
+
+        self.future_exo_cat_cb = None
+        if cat_cb_final is not None:
+            def _checked_future_exo_cat_cb(
+                t: int,
+                h: int,
+            ) -> torch.Tensor:
+                value = cat_cb_final(t, h, device)
+                return _validate_future_exo_cat_tensor(
+                    value,
+                    source="future_exo_cat callback result",
+                    batch_size=B,
+                    required_horizon=int(h),
+                    cardinalities=future_cat_cardinalities,
+                )
+
+            self.future_exo_cat_cb = _checked_future_exo_cat_cb
 
         if d_future_expected is not None:
             if d_future_expected <= 0:
@@ -936,6 +1088,20 @@ class DMSForecaster:
                         f"{d_future_expected}, but they were not provided via `future_exo_batch` "
                         "or `future_exo_cb`."
                     )
+
+        if future_cat_cardinalities:
+            if self.future_exo_cat_cb is None:
+                raise RuntimeError(
+                    f"{type(self.model).__name__} expects future categorical "
+                    "exogenous inputs with cardinalities "
+                    f"{future_cat_cardinalities}, but they were not provided "
+                    "via `future_exo_cat_batch`."
+                )
+        elif self.future_exo_cat_cb is not None:
+            raise RuntimeError(
+                f"{type(self.model).__name__} does not accept future "
+                "categorical exogenous inputs."
+            )
 
         # 2) forward kwargs
         fwd_kwargs: Dict[str, Any] = {}
@@ -961,12 +1127,24 @@ class DMSForecaster:
                 exo_probe = ex.to(device).unsqueeze(0).expand(B, -1, -1)
             else:
                 exo_probe = ex.to(device)
+        future_cat_probe = None
+        if self.future_exo_cat_cb is not None:
+            category = self.future_exo_cat_cb(0, probe_H)
+            if category.ndim == 2:
+                future_cat_probe = (
+                    category.to(device)
+                    .unsqueeze(0)
+                    .expand(B, -1, -1)
+                )
+            else:
+                future_cat_probe = category.to(device)
 
         with torch.no_grad():
             out0 = _safe_forward(
                 self.model,
                 x_raw,
                 future_exo=exo_probe,
+                future_exo_cat=future_cat_probe,
                 fe_cont=exo_probe,
                 **fwd_kwargs,
             )
@@ -993,6 +1171,43 @@ class DMSForecaster:
                 resolved_policy=resolved_policy,
                 tail_cfg=tail_cfg,
             )
+
+    def _future_inputs_at(
+        self,
+        *,
+        offset: int,
+        horizon: int,
+        batch_size: int,
+        device: torch.device,
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+        def _expand(
+            callback: Optional[Callable[[int, int], torch.Tensor]],
+            *,
+            name: str,
+        ) -> torch.Tensor | None:
+            if callback is None:
+                return None
+            value = callback(offset, horizon).to(device)
+            if value.ndim == 2:
+                return value.unsqueeze(0).expand(batch_size, -1, -1)
+            if value.ndim == 3:
+                if value.size(0) == 1 and batch_size > 1:
+                    return value.expand(batch_size, -1, -1)
+                if value.size(0) == batch_size:
+                    return value
+                raise RuntimeError(
+                    f"{name} batch dim mismatch: got {value.size(0)}, "
+                    f"expected 1 or {batch_size}."
+                )
+            raise RuntimeError(
+                f"{name} must be (H,E) or (B,H,E), "
+                f"got shape={tuple(value.shape)}."
+            )
+
+        return (
+            _expand(self.future_exo_cb, name="future_exo"),
+            _expand(self.future_exo_cat_cb, name="future_exo_cat"),
+        )
 
     # ---------------------------------------------------------------------
     # Strategies
@@ -1123,24 +1338,20 @@ class DMSForecaster:
         Hm = model_horizon
 
         def _call_point(xr, need_h, step_offset):
-            exo = None
-            if self.future_exo_cb is not None:
-                t0 = self.global_t0 + step_offset
-                ex = self.future_exo_cb(t0, need_h).to(xr.device)
-
-                if ex.ndim == 2:
-                    exo = ex.unsqueeze(0).expand(B, -1, -1)
-                elif ex.ndim == 3:
-                    if ex.size(0) == 1 and B > 1:
-                        exo = ex.expand(B, -1, -1)
-                    elif ex.size(0) == B:
-                        exo = ex
-                    else:
-                        raise RuntimeError(f"future_exo batch dim mismatch: got {ex.size(0)}, expected 1 or {B}")
-                else:
-                    raise RuntimeError(f"future_exo must be (H,E) or (B,H,E), got shape={tuple(ex.shape)}")
-
-            out = _safe_forward(self.model, xr, future_exo=exo, fe_cont=exo, **fwd_kwargs)
+            exo, future_cat = self._future_inputs_at(
+                offset=self.global_t0 + step_offset,
+                horizon=need_h,
+                batch_size=B,
+                device=xr.device,
+            )
+            out = _safe_forward(
+                self.model,
+                xr,
+                future_exo=exo,
+                future_exo_cat=future_cat,
+                fe_cont=exo,
+                **fwd_kwargs,
+            )
             return _normalize_point_to_BH(
                 out,
                 B,
@@ -1192,23 +1403,20 @@ class DMSForecaster:
         Hm = model_horizon
 
         def _call_quantile(xr, step_offset):
-            exo = None
-            if self.future_exo_cb is not None:
-                ex = self.future_exo_cb(step_offset, Hm).to(xr.device)
-
-                if ex.ndim == 2:
-                    exo = ex.unsqueeze(0).expand(B, -1, -1)
-                elif ex.ndim == 3:
-                    if ex.size(0) == 1 and B > 1:
-                        exo = ex.expand(B, -1, -1)
-                    elif ex.size(0) == B:
-                        exo = ex
-                    else:
-                        raise RuntimeError(f"future_exo batch dim mismatch: got {ex.size(0)}, expected 1 or {B}")
-                else:
-                    raise RuntimeError(f"future_exo must be (H,E) or (B,H,E), got shape={tuple(ex.shape)}")
-
-            out = _safe_forward(self.model, xr, future_exo=exo, fe_cont=exo, **fwd_kwargs)
+            exo, future_cat = self._future_inputs_at(
+                offset=step_offset,
+                horizon=Hm,
+                batch_size=B,
+                device=xr.device,
+            )
+            out = _safe_forward(
+                self.model,
+                xr,
+                future_exo=exo,
+                future_exo_cat=future_cat,
+                fe_cont=exo,
+                **fwd_kwargs,
+            )
             return _extract_quantile_block(out)
 
         q10_blk, q50_blk, q90_blk = _call_quantile(x_raw, 0)
@@ -1267,24 +1475,20 @@ class DMSForecaster:
         Hm = model_horizon
 
         def _call_point(xr, need_h, step_offset):
-            exo = None
-            if self.future_exo_cb is not None:
-                t0 = self.global_t0 + step_offset
-                ex = self.future_exo_cb(t0, need_h).to(xr.device)
-
-                if ex.ndim == 2:
-                    exo = ex.unsqueeze(0).expand(B, -1, -1)
-                elif ex.ndim == 3:
-                    if ex.size(0) == 1 and B > 1:
-                        exo = ex.expand(B, -1, -1)
-                    elif ex.size(0) == B:
-                        exo = ex
-                    else:
-                        raise RuntimeError(f"future_exo batch dim mismatch: got {ex.size(0)}, expected 1 or {B}")
-                else:
-                    raise RuntimeError(f"future_exo must be (H,E) or (B,H,E), got shape={tuple(ex.shape)}")
-
-            out = _safe_forward(self.model, xr, future_exo=exo, fe_cont=exo, **fwd_kwargs)
+            exo, future_cat = self._future_inputs_at(
+                offset=self.global_t0 + step_offset,
+                horizon=need_h,
+                batch_size=B,
+                device=xr.device,
+            )
+            out = _safe_forward(
+                self.model,
+                xr,
+                future_exo=exo,
+                future_exo_cat=future_cat,
+                fe_cont=exo,
+                **fwd_kwargs,
+            )
             return _normalize_point_to_BH(
                 out,
                 B,
@@ -1338,23 +1542,20 @@ class DMSForecaster:
         Hm = model_horizon
 
         def _call_quantile(xr, step_offset):
-            exo = None
-            if self.future_exo_cb is not None:
-                ex = self.future_exo_cb(step_offset, Hm).to(xr.device)
-
-                if ex.ndim == 2:
-                    exo = ex.unsqueeze(0).expand(B, -1, -1)
-                elif ex.ndim == 3:
-                    if ex.size(0) == 1 and B > 1:
-                        exo = ex.expand(B, -1, -1)
-                    elif ex.size(0) == B:
-                        exo = ex
-                    else:
-                        raise RuntimeError(f"future_exo batch dim mismatch: got {ex.size(0)}, expected 1 or {B}")
-                else:
-                    raise RuntimeError(f"future_exo must be (H,E) or (B,H,E), got shape={tuple(ex.shape)}")
-
-            out = _safe_forward(self.model, xr, future_exo=exo, fe_cont=exo, **fwd_kwargs)
+            exo, future_cat = self._future_inputs_at(
+                offset=step_offset,
+                horizon=Hm,
+                batch_size=B,
+                device=xr.device,
+            )
+            out = _safe_forward(
+                self.model,
+                xr,
+                future_exo=exo,
+                future_exo_cat=future_cat,
+                fe_cont=exo,
+                **fwd_kwargs,
+            )
             return _extract_quantile_block(out)
 
         # 1) DMS block
@@ -1429,24 +1630,20 @@ class DMSForecaster:
 
         # --- 1) DMS block (same as decay impl) ---
         def _call_point(xr, need_h, step_offset):
-            exo = None
-            if self.future_exo_cb is not None:
-                t0 = self.global_t0 + step_offset
-                ex = self.future_exo_cb(t0, need_h).to(xr.device)
-
-                if ex.ndim == 2:
-                    exo = ex.unsqueeze(0).expand(B, -1, -1)
-                elif ex.ndim == 3:
-                    if ex.size(0) == 1 and B > 1:
-                        exo = ex.expand(B, -1, -1)
-                    elif ex.size(0) == B:
-                        exo = ex
-                    else:
-                        raise RuntimeError(f"future_exo batch dim mismatch: got {ex.size(0)}, expected 1 or {B}")
-                else:
-                    raise RuntimeError(f"future_exo must be (H,E) or (B,H,E), got shape={tuple(ex.shape)}")
-
-            out = _safe_forward(self.model, xr, future_exo=exo, fe_cont=exo, **fwd_kwargs)
+            exo, future_cat = self._future_inputs_at(
+                offset=self.global_t0 + step_offset,
+                horizon=need_h,
+                batch_size=B,
+                device=xr.device,
+            )
+            out = _safe_forward(
+                self.model,
+                xr,
+                future_exo=exo,
+                future_exo_cat=future_cat,
+                fe_cont=exo,
+                **fwd_kwargs,
+            )
             return _normalize_point_to_BH(
                 out,
                 B,
@@ -1502,24 +1699,20 @@ class DMSForecaster:
         Hm = int(model_horizon)
 
         def _call_quantile(xr, step_offset):
-            exo = None
-            if self.future_exo_cb is not None:
-                t0 = self.global_t0 + step_offset
-                ex = self.future_exo_cb(t0, Hm).to(xr.device)
-
-                if ex.ndim == 2:
-                    exo = ex.unsqueeze(0).expand(B, -1, -1)
-                elif ex.ndim == 3:
-                    if ex.size(0) == 1 and B > 1:
-                        exo = ex.expand(B, -1, -1)
-                    elif ex.size(0) == B:
-                        exo = ex
-                    else:
-                        raise RuntimeError(f"future_exo batch dim mismatch: got {ex.size(0)}, expected 1 or {B}")
-                else:
-                    raise RuntimeError(f"future_exo must be (H,E) or (B,H,E), got shape={tuple(ex.shape)}")
-
-            out = _safe_forward(self.model, xr, future_exo=exo, fe_cont=exo, **fwd_kwargs)
+            exo, future_cat = self._future_inputs_at(
+                offset=self.global_t0 + step_offset,
+                horizon=Hm,
+                batch_size=B,
+                device=xr.device,
+            )
+            out = _safe_forward(
+                self.model,
+                xr,
+                future_exo=exo,
+                future_exo_cat=future_cat,
+                fe_cont=exo,
+                **fwd_kwargs,
+            )
             return _extract_quantile_block(out)
 
         q10_blk, q50_blk, q90_blk = _call_quantile(x_raw, 0)
@@ -1668,6 +1861,7 @@ def _unpack_batch_for_export(batch: Any) -> Dict[str, Any]:
     future_exo = batch[3] if len(batch) >= 4 else None
     past_exo_cont = batch[4] if len(batch) >= 5 else None
     past_exo_cat = batch[5] if len(batch) >= 6 else None
+    future_exo_cat = batch[6] if len(batch) >= 7 else None
 
     return dict(
         x=x,
@@ -1676,6 +1870,7 @@ def _unpack_batch_for_export(batch: Any) -> Dict[str, Any]:
         future_exo=future_exo,
         past_exo_cont=past_exo_cont,
         past_exo_cat=past_exo_cat,
+        future_exo_cat=future_exo_cat,
     )
 
 

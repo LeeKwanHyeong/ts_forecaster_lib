@@ -4,7 +4,11 @@ import torch
 
 def amp_type_set(config: TrainingConfig):
     amp_device = getattr(config, 'amp_device', 'cuda')
-    amp_enabled = (amp_device == 'cuda' and torch.cuda.is_available())
+    amp_enabled = bool(
+        getattr(config, 'use_amp', False)
+        and amp_device == 'cuda'
+        and torch.cuda.is_available()
+    )
     amp_dtype_str = getattr(config, 'amp_dtype', 'bf16')
 
     if isinstance(amp_dtype_str, torch.dtype):

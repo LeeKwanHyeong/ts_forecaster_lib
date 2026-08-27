@@ -7,8 +7,8 @@ import torch
 
 from modeling_module.models.ExoTST.ExoTST import ExoTST
 from modeling_module.models.ExoTST.configs import ExoTSTConfig
-from modeling_module.models.PatchMixer.PatchMixer import PatchMixerPointModel
-from modeling_module.models.PatchMixer.common.configs import PatchMixerConfig
+from modeling_module.models.PatchMixer.common.configs import PatchMixerExogenousConfig
+from modeling_module.models.PatchMixer.variants import PatchMixerExogenousModel
 from modeling_module.models.PatchTST.common.configs import AttentionConfig, PatchTSTConfig
 from modeling_module.models.PatchTST.supervised.PatchTST import PatchTSTModel
 from modeling_module.models.Titan.Titans import TitanBaseModel
@@ -42,7 +42,7 @@ def _patchtst_case(future_width: int) -> ModelCase:
 
 
 def _patchmixer_case(future_width: int) -> ModelCase:
-    cfg = PatchMixerConfig(
+    cfg = PatchMixerExogenousConfig(
         lookback=8,
         horizon=2,
         patch_len=4,
@@ -53,11 +53,17 @@ def _patchmixer_case(future_width: int) -> ModelCase:
         f_out=8,
         head_hidden=8,
         dropout=0.0,
+        past_exo_mode="z_gate",
+        past_exo_cont_dim=1,
         future_exo_dim=future_width,
         use_revin=False,
         final_nonneg=False,
     )
-    return PatchMixerPointModel(cfg).eval(), torch.randn(2, 8, 1), {}
+    return (
+        PatchMixerExogenousModel(cfg).eval(),
+        torch.randn(2, 8, 1),
+        {"past_exo_cont": torch.randn(2, 8, 1)},
+    )
 
 
 def _titan_case(future_width: int) -> ModelCase:

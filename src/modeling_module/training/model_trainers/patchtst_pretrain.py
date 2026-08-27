@@ -2,14 +2,16 @@
 from __future__ import annotations
 
 import os
-import json
-from dataclasses import asdict, is_dataclass
-from typing import Optional
+from typing import Any, Optional
 
 import torch
 from torch.utils.data import DataLoader
 
 from modeling_module.training.config import TrainingConfig, StageConfig, apply_stage
+
+
+PATCHTST_PRETRAIN_CONTRACT_VERSION = "patchtst.ssl.pretrain.v1"
+
 
 def _getattr(cfg, key: str, default):
     """안전한 속성 접근 유틸리티."""
@@ -41,32 +43,154 @@ def _to_device(x, device: torch.device):
     return x
 
 
+def build_patchtst_pretrain_contract(
+        model,
+        *,
+        mask_ratio: float,
+        loss_type: str,
+        supervised_stride: Optional[int] = None,
+) -> dict[str, Any]:
+    """Build the versioned PatchTST SSL patching and transfer contract."""
+    cfg = getattr(model, "cfg", None)
+    if cfg is None:
+        raise ValueError(
+            "PatchTST pretrain model must expose `cfg` for checkpoint metadata."
+        )
+
+    lookback = int(getattr(cfg, "lookback"))
+    patch_len = int(getattr(cfg, "patch_len"))
+    pretrain_stride = int(getattr(cfg, "stride"))
+    input_channels = int(
+        getattr(model, "n_vars", getattr(cfg, "c_in", 1))
+    )
+    if (
+        lookback <= 0
+        or patch_len <= 0
+        or pretrain_stride <= 0
+        or input_channels <= 0
+    ):
+        raise ValueError(
+            "PatchTST pretrain lookback, patch_len, stride and input_channels "
+            "must be positive."
+        )
+    if not 0.0 < float(mask_ratio) <= 1.0:
+        raise ValueError("PatchTST pretrain mask_ratio must be in (0, 1].")
+
+    normalized_loss = str(loss_type).strip().lower()
+    if normalized_loss not in {"mse", "mae"}:
+        raise ValueError(
+            "PatchTST pretrain loss_type must be either 'mse' or 'mae'."
+        )
+
+    patch_count = (
+        1
+        if lookback < patch_len
+        else ((lookback - patch_len) // pretrain_stride) + 1
+    )
+    covered_until = patch_len + (patch_count - 1) * pretrain_stride
+    if pretrain_stride < patch_len:
+        coverage_mode = "overlapping"
+    elif pretrain_stride == patch_len:
+        coverage_mode = "non_overlapping_contiguous"
+    else:
+        coverage_mode = "non_overlapping_gapped"
+
+    target_stride = (
+        None
+        if supervised_stride is None
+        else int(supervised_stride)
+    )
+    if target_stride is not None and target_stride <= 0:
+        raise ValueError("supervised_stride must be positive when provided.")
+
+    return {
+        "format_version": PATCHTST_PRETRAIN_CONTRACT_VERSION,
+        "model_family": "patchtst",
+        "input_scope": "target_history_only",
+        "patching": {
+            "lookback": lookback,
+            "patch_len": patch_len,
+            "stride": pretrain_stride,
+            "input_channels": input_channels,
+            "patch_count": patch_count,
+            "padding": "none",
+            "coverage_mode": coverage_mode,
+            "uncovered_tail": max(lookback - covered_until, 0),
+        },
+        "masking": {
+            "unit": "patch",
+            "mask_ratio": float(mask_ratio),
+            "loss_type": normalized_loss,
+        },
+        "transfer_target": {
+            "patch_len": patch_len,
+            "supervised_stride": target_stride,
+        },
+    }
+
+
 @torch.no_grad()
-def _eval_pretrain(model, loader: DataLoader, device: torch.device, *, mask_ratio: float, loss_type: str) -> float:
+def _eval_pretrain(
+        model,
+        loader: DataLoader,
+        device: torch.device,
+        *,
+        mask_ratio: float,
+        loss_type: str,
+        eval_seed: int,
+) -> float:
     """
-    검증 데이터셋에 대한 사전학습 손실(Reconstruction Loss) 평가.
+    고정된 masking RNG로 사전학습 검증 손실을 계산.
+
+    검증 RNG는 fork_rng 안에서만 사용하므로 다음 학습 epoch의 random
+    sequence에는 영향을 주지 않습니다.
     """
-    model.eval()
-    total_scalar = 0.0
-    total_tensor = None
-    n = 0
-    for batch in loader:
-        x = _to_device(_extract_x(batch), device)
-        # 마스킹 비율 및 손실 함수 설정 적용
-        out = model(x, mask_ratio=mask_ratio, return_loss=True, loss_type=loss_type)
-        loss = out["loss"] if isinstance(out, dict) and "loss" in out else out
-        if torch.is_tensor(loss):
-            loss_detached = loss.detach()
-            if loss_detached.numel() != 1:
-                loss_detached = loss_detached.float().mean()
-            total_tensor = loss_detached if total_tensor is None else total_tensor + loss_detached
-        else:
-            total_scalar += float(loss)
-        n += 1
-    total = float(total_scalar)
-    if total_tensor is not None:
-        total += float(total_tensor.item())
-    return total / max(n, 1)
+    cuda_devices: list[int] = []
+    if device.type == "cuda":
+        cuda_devices.append(
+            device.index
+            if device.index is not None
+            else torch.cuda.current_device()
+        )
+
+    with torch.random.fork_rng(devices=cuda_devices):
+        torch.manual_seed(int(eval_seed))
+        if device.type == "cuda":
+            torch.cuda.manual_seed(int(eval_seed))
+
+        model.eval()
+        total_scalar = 0.0
+        total_tensor = None
+        n = 0
+        for batch in loader:
+            x = _to_device(_extract_x(batch), device)
+            out = model(
+                x,
+                mask_ratio=mask_ratio,
+                return_loss=True,
+                loss_type=loss_type,
+            )
+            loss = (
+                out["loss"]
+                if isinstance(out, dict) and "loss" in out
+                else out
+            )
+            if torch.is_tensor(loss):
+                loss_detached = loss.detach()
+                if loss_detached.numel() != 1:
+                    loss_detached = loss_detached.float().mean()
+                total_tensor = (
+                    loss_detached
+                    if total_tensor is None
+                    else total_tensor + loss_detached
+                )
+            else:
+                total_scalar += float(loss)
+            n += 1
+        total = float(total_scalar)
+        if total_tensor is not None:
+            total += float(total_tensor.item())
+        return total / max(n, 1)
 
 
 def train_patchtst_pretrain(
@@ -83,6 +207,7 @@ def train_patchtst_pretrain(
         # 입출력 설정
         save_dir: Optional[str] = None,
         ckpt_name: str = "patchtst_pretrain_best.pt",
+        supervised_stride: Optional[int] = None,
 ):
     """
     PatchTST 자기지도 사전학습(Masked Patch Reconstruction) 실행 함수.
@@ -107,9 +232,24 @@ def train_patchtst_pretrain(
     log_every = int(_getattr(train_cfg, "log_every", 100))
 
     model = model.to(device)
+    pretrain_contract = build_patchtst_pretrain_contract(
+        model,
+        mask_ratio=mask_ratio,
+        loss_type=loss_type,
+        supervised_stride=supervised_stride,
+    )
 
     best_val = float("inf")
     best_state = None
+    best_epoch = None
+    history: list[dict[str, float | int | None]] = []
+    global_epoch = 0
+    random_seed = _getattr(train_cfg, "random_seed", None)
+    validation_mask_seed = (
+        int(random_seed) + 10_000_003
+        if random_seed is not None
+        else 10_000_003
+    )
 
     # 설정 저장
     if save_dir is not None:
@@ -135,6 +275,7 @@ def train_patchtst_pretrain(
             f"[Pretrain] stage={si} epochs={epochs} lr={lr} wd={weight_decay} mask_ratio={mask_ratio} loss={loss_type}")
 
         for ep in range(1, epochs + 1):
+            global_epoch += 1
             model.train()
             running_scalar = 0.0
             running_tensor = None
@@ -195,29 +336,64 @@ def train_patchtst_pretrain(
 
             # 검증 및 체크포인트 저장
             if val_loader is not None:
-                val_loss = _eval_pretrain(model, val_loader, device, mask_ratio=mask_ratio, loss_type=loss_type)
+                val_loss = _eval_pretrain(
+                    model,
+                    val_loader,
+                    device,
+                    mask_ratio=mask_ratio,
+                    loss_type=loss_type,
+                    eval_seed=validation_mask_seed,
+                )
+                history.append(
+                    {
+                        "stage": si,
+                        "epoch": ep,
+                        "global_epoch": global_epoch,
+                        "train_loss": float(train_loss),
+                        "validation_loss": float(val_loss),
+                    }
+                )
                 print(f"[Pretrain][stage={si} ep={ep}/{epochs}] train={train_loss:.6f} val={val_loss:.6f}")
 
                 if val_loss < best_val:
                     best_val = val_loss
+                    best_epoch = global_epoch
                     best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
-                    if save_dir is not None:
-                        ckpt_path = os.path.join(save_dir, ckpt_name)
-                        # torch.save(
-                        #     {"state_dict": best_state, "best_val": best_val,
-                        #      "cfg": asdict(cfg_i) if is_dataclass(cfg_i) else None},
-                        #     ckpt_path,
-                        # )
-                        torch.save(
-                            {"state_dict": best_state, "best_val": float(best_val)},
-                            ckpt_path,
-                        )
             else:
+                history.append(
+                    {
+                        "stage": si,
+                        "epoch": ep,
+                        "global_epoch": global_epoch,
+                        "train_loss": float(train_loss),
+                        "validation_loss": None,
+                    }
+                )
                 print(f"[Pretrain][stage={si} ep={ep}/{epochs}] train={train_loss:.6f}")
 
     # 학습 완료 후 최적 가중치 복원
     if best_state is not None:
         model.load_state_dict(best_state, strict=True)
+        if save_dir is not None:
+            ckpt_path = os.path.join(save_dir, ckpt_name)
+            torch.save(
+                {
+                    "state_dict": best_state,
+                    "best_val": float(best_val),
+                    "best_epoch": int(best_epoch),
+                    "history": history,
+                    "validation_mask_seed": validation_mask_seed,
+                    "pretrain_contract": pretrain_contract,
+                },
+                ckpt_path,
+            )
 
     print(f"[Pretrain] done | best_val={best_val:.6f}" if val_loader is not None else "[Pretrain] done")
-    return {"model": model, "best_val": best_val if val_loader is not None else None}
+    return {
+        "model": model,
+        "best_val": best_val if val_loader is not None else None,
+        "best_epoch": best_epoch,
+        "history": history,
+        "validation_mask_seed": validation_mask_seed,
+        "pretrain_contract": pretrain_contract,
+    }

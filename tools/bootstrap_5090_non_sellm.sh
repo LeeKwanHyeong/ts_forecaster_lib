@@ -335,6 +335,7 @@ assert torch_path.is_relative_to(base_prefix), (torch_path, base_prefix)
 assert registry_path.suffix == ".pyc", registry_path
 assert manifest["builder_commit"] == os.environ["EXPECTED_BUILDER_COMMIT"], manifest
 assert manifest["builder_worktree_dirty"] is False, manifest
+assert manifest["distribution_profile"] == "non-sellm", manifest
 assert manifest["build_tag"] == "1private", manifest
 assert manifest["python_tag"] == "cp312", manifest
 assert manifest["abi_tag"] == "none", manifest

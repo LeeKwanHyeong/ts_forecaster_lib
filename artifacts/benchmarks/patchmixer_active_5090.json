@@ -1,0 +1,129 @@
+{
+  "environment": {
+    "compute_capability": [
+      12,
+      0
+    ],
+    "cuda_runtime": "13.0",
+    "cudnn": 92000,
+    "device": "NVIDIA GeForce RTX 5090",
+    "driver": "595.71.05",
+    "gpu_free_memory_before_mib": 31583.8125,
+    "gpu_total_memory_before_mib": 32110.9375,
+    "gpu_total_memory_mib": 32110.9375,
+    "hostname": "RTX5090-server",
+    "platform": "Linux-7.0.0-28-generic-x86_64-with-glibc2.39",
+    "python": "3.12.13",
+    "torch": "2.11.0+cu130"
+  },
+  "models": [
+    {
+      "loss": {
+        "first_measured": 1.0612285137176514,
+        "last_measured": 0.0970667153596878
+      },
+      "measured_steps": 100,
+      "memory_mib": {
+        "allocated_after_run": 18.74658203125,
+        "peak_allocated": 22.96484375,
+        "peak_reserved": 28.0,
+        "reserved_after_run": 28.0
+      },
+      "model": "patchmixer",
+      "output_shape": [
+        64,
+        27
+      ],
+      "parameters": 76564,
+      "throughput": {
+        "samples_per_second": 23863.213269608466,
+        "steps_per_second": 372.8627073376323
+      },
+      "timing_ms": {
+        "max": 2.794559955596924,
+        "mean": 2.6819523119926454,
+        "median": 2.6768800020217896,
+        "min": 2.5860159397125244,
+        "p95": 2.738464117050171,
+        "population_stddev": 0.039449766346390254,
+        "total": 268.1952311992645
+      },
+      "warmup_steps": 20
+    },
+    {
+      "loss": {
+        "first_measured": 0.6703382730484009,
+        "last_measured": 0.6472252607345581
+      },
+      "measured_steps": 100,
+      "memory_mib": {
+        "allocated_after_run": 138.4912109375,
+        "peak_allocated": 206.4482421875,
+        "peak_reserved": 266.0,
+        "reserved_after_run": 266.0
+      },
+      "model": "patchmixer_exo",
+      "output_shape": [
+        64,
+        27
+      ],
+      "parameters": 7892613,
+      "throughput": {
+        "samples_per_second": 13780.925874230323,
+        "steps_per_second": 215.3269667848488
+      },
+      "timing_ms": {
+        "max": 4.747456073760986,
+        "mean": 4.644100155830383,
+        "median": 4.640415906906128,
+        "min": 4.512832164764404,
+        "p95": 4.710015773773193,
+        "population_stddev": 0.038571847513589004,
+        "total": 464.41001558303833
+      },
+      "warmup_steps": 20
+    }
+  ],
+  "protocol": {
+    "batch_size": 64,
+    "data_loader_included": false,
+    "host_to_device_transfer_included": false,
+    "loss": "mse",
+    "lr": 0.0001,
+    "measured_steps": 100,
+    "models": [
+      "patchmixer",
+      "patchmixer_exo"
+    ],
+    "optimizer": "AdamW",
+    "precision": "bf16",
+    "reference_config": {
+      "d_model": 128,
+      "dropout": 0.1,
+      "e_layers": 6,
+      "enc_in": 1,
+      "f_out": 256,
+      "head_dropout": 0.02,
+      "head_hidden": 256,
+      "horizon": 27,
+      "lookback": 54,
+      "mixer_kernel_size": 5,
+      "patch_len": 12,
+      "stride": 8
+    },
+    "seed": 20260721,
+    "torch_compile": false,
+    "warmup_steps": 20,
+    "weight_decay": 0.0001
+  },
+  "schema_version": 1,
+  "source": {
+    "git": {
+      "branch": null,
+      "commit": null,
+      "working_tree_dirty": false
+    },
+    "patchmixer_upstream_commit": "cfc6c1386e7fe1633f92ef4b258ff1a4649008b4"
+  },
+  "started_at_utc": "2026-07-23T01:47:39.518232+00:00"
+}

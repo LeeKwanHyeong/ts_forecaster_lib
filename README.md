@@ -15,7 +15,7 @@
 즉, 설치 후 실제 코드에서는 아래처럼 import 합니다.
 
 ```python
-from modeling_module import DistributionLoss, train, load_predictor, build_dataloader
+from modeling_module import DistributionLoss, forecast, load_predictor, train
 ```
 
 ## What This Library Provides
@@ -30,11 +30,15 @@ from modeling_module import DistributionLoss, train, load_predictor, build_datal
 현재 public API에서 직접 다루는 주요 함수와 타입은 아래입니다.
 
 - `train`
+- `forecast`
 - `load_predictor`
 - `predict`
 - `build_dataset`
 - `build_dataloader`
 - `TrainRequest`
+- `ForecastRequest`
+- `ForecastResult`
+- `ForecastRuntimeConfig`
 - `DataRequest`
 - `TrainerConfig`
 - `DistributionLoss`
@@ -50,19 +54,22 @@ from modeling_module import DistributionLoss, train, load_predictor, build_datal
 
 현재 library에서 안정적으로 사용하기를 권장하는 표면은 아래입니다.
 
-- 함수: `train`, `load_predictor`, `predict`, `build_dataset`, `build_dataloader`
-- request/result 타입: `TrainRequest`, `TrainResult`, `DataRequest`
+- 함수: `train`, `forecast`, `load_predictor`, `predict`, `build_dataset`, `build_dataloader`
+- request/result 타입: `TrainRequest`, `TrainResult`, `ForecastRequest`, `ForecastResult`,
+  `ForecastRuntimeConfig`, `DataRequest`
 - nested config 타입:
   `TrainerConfig`, `SSLConfig`, `RuntimeConfig`, `ArtifactConfig`,
   `DataWindowConfig`, `DataColumnConfig`, `ExogenousConfig`, `LoaderConfig`,
   `ArchitectureConfig`, `PatchTSTArchitectureConfig`, `PatchMixerArchitectureConfig`,
-  `TitanArchitectureConfig`, `ExoTSTArchitectureConfig`, `TimexerArchitectureConfig`
+  `TitanArchitectureConfig`, `ExoTSTArchitectureConfig`, `NHITSArchitectureConfig`,
+  `TimexerArchitectureConfig`
 - loss selector: `DistributionLoss` (`Normal`, `StudentT`)
 
 권장 사용 방식은 dataclass 기반입니다.
 
 - training: `train(TrainRequest(...))`
 - data: `build_dataloader(DataRequest(...))`
+- anchored inference: `forecast(ForecastRequest(...))`
 - inference: `predict(...)` 또는 `load_predictor(...)`
 
 flat dict style도 아직 지원하지만, 호환성 목적에 가깝습니다.
@@ -90,12 +97,13 @@ public API 시그니처는 그대로 유지할 수 있습니다.
 
 - `patchtst_base`
 - `patchtst_quantile`
-- `patchmixer_base`
-- `patchmixer_quantile`
+- `patchmixer`
+- `patchmixer_exo`
 - `titan_base`
 - `titan_lmm`
 - `titan_seq2seq`
 - `exotst_base`
+- `nhits_base`
 - `timexer_base`
 
 `titan_base`, `titan_lmm`, `titan_seq2seq`는 deprecation 기간의 학습/checkpoint 호환을 위해
@@ -107,6 +115,7 @@ family 이름으로도 요청할 수 있습니다.
 - `patchmixer`
 - `titan`
 - `exotst`
+- `nhits`
 - `timexer`
 
 예를 들어:
@@ -120,22 +129,33 @@ family 이름으로도 요청할 수 있습니다.
 
 | Family | Canonical Key | Status | 구현된 학습/checkpoint mode | Continuous exogenous | SSL |
 |---|---|---|---|---|---|
-| PatchTST | `patchtst_base` | 지원 | point, Normal, StudentT | past/future optional | `full`, `ssl_only` |
-| PatchTST | `patchtst_quantile` | 지원 | q10/q50/q90 | past/future optional | `full`, `ssl_only` |
-| PatchMixer | `patchmixer_base` | 지원 | point, Normal, StudentT | past/future optional | 미지원 |
-| PatchMixer | `patchmixer_quantile` | 지원 | q10/q50/q90 | past/future optional | 미지원 |
+| PatchTST | `patchtst_base` | 지원 | point, Normal, StudentT | endogenous 기본, legacy exogenous 호환 | `full`, `ssl_only` |
+| PatchTST | `patchtst_exogenous` | 지원 | point, Normal, StudentT | past/future 중 하나 이상 필수 | `full`, `ssl_only` |
+| PatchTST | `patchtst_quantile` | 지원 | q10/q50/q90 | endogenous 기본, legacy exogenous 호환 | `full`, `ssl_only` |
+| PatchTST | `patchtst_quantile_exogenous` | 지원 | q10/q50/q90 | past/future 중 하나 이상 필수 | `full`, `ssl_only` |
+| PatchMixer | `patchmixer` | 지원 | point only | 미지원 | 미지원 |
+| PatchMixer | `patchmixer_exo` | 지원 | point only | past/future 중 하나 이상 필수 | 미지원 |
 | Titan | `titan_base` | Deprecated | point, Normal, StudentT | past/future optional | 미지원 |
 | Titan | `titan_lmm` | Deprecated | point, Normal, StudentT | past/future optional | 미지원 |
 | Titan | `titan_seq2seq` | Deprecated | point, Normal, StudentT | past/future optional | 미지원 |
 | ExoTST | `exotst_base` | 지원 | point, Normal, StudentT | past/future 모두 필수 | 미지원 |
+| N-HiTS | `nhits_base` | 지원 | point only | 미지원 | 미지원 |
 | TimeXer | `timexer_base` | 지원 | point only | past 필수, future 금지 | 미지원 |
 
 추가 메모:
 
 - `PatchTST`의 `full`/`ssl_only`는 artifact `save_dir`가 필수이며 다른 family-only request에는 사용할 수 없습니다.
+- 신규 exogenous 학습은 `patchtst_exogenous`, `patchtst_quantile_exogenous`,
+  `patchmixer_exo`를 직접 요청합니다. 이 키들은 기존 `patchtst`/`patchmixer` family 기본
+  확장에는 포함되지 않습니다.
+- `patchmixer`는 논문 기반 endogenous point 모델입니다. `patchmixer_original`은 같은 모델의
+  legacy alias이며, 과거 `patchmixer_base`와 quantile key는 지원 schema의 checkpoint
+  복원에만 사용하는 load-only key입니다.
 - mixed request에서는 SSL이 PatchTST stage에만 적용되고 다른 family는 supervised로 실행됩니다.
   `ssl_only`는 PatchTST supervised checkpoint 없이 pretraining checkpoint만 만듭니다.
 - `ExoTST`는 `use_exogenous_mode=True`와 past/future continuous exogenous가 모두 필요합니다.
+- `N-HiTS` public artifact는 single-target endogenous point 전용이며 exogenous,
+  distribution, quantile output을 거부합니다.
 - `TimeXer` v1은 past continuous exogenous만 사용하며 future/categorical exogenous와
   quantile/distribution output을 거부합니다.
 - categorical past exogenous는 현재 모든 public family에서 fail-fast합니다.
@@ -150,8 +170,8 @@ family 이름으로도 요청할 수 있습니다.
 - `models` 생략 또는 빈 목록은 `patchtst_base`, `patchtst_quantile`로 확장됩니다.
 - `models=["titan"]`은 호환상 세 Titan artifact로 계속 확장되지만 `FutureWarning`을 냅니다.
 - artifact key를 직접 주면 family 전체가 아니라 그 모델만 학습됩니다.
-  예: `models=["titan_lmm"]`, `models=["titan_seq2seq"]`, `models=["titan_base"]`, `models=["patchmixer_quantile"]`, `models=["patchtst_quantile"]`
-- repo 안에는 `NHITS`, `Transformer` 디렉토리도 있지만, 현재 README의 이 섹션은 "public training/inference registry에 연결된 모델" 기준입니다.
+  예: `models=["titan_lmm"]`, `models=["titan_seq2seq"]`, `models=["titan_base"]`, `models=["patchmixer_exo"]`, `models=["patchtst_quantile"]`
+- repo 안의 `Transformer` 디렉토리는 아직 public training/inference registry에 연결되지 않았습니다.
 
 ## Installation
 
@@ -173,7 +193,7 @@ pip install -e .[notebook]
 wheel만 다시 설치할 때는 dependency 재해결을 피하는 편이 안전합니다.
 
 ```bash
-pip install --no-deps --force-reinstall /path/to/modeling_module-0.1.1-py3-none-any.whl
+pip install --no-deps --force-reinstall /path/to/modeling_module-0.2.0-py3-none-any.whl
 ```
 
 최소 의존성만 수동 설치하려면:
@@ -212,6 +232,8 @@ python3 tools/build_private_wheel.py
 기본 동작:
 
 - 현재 `src/modeling_module` 만 clean staging한 뒤 public wheel을 build
+- private distribution profile은 `non-sellm`이며 SELLM model, trainer, public export,
+  registry entry와 LLM extra dependency metadata를 제외
 - wheel을 unpack
 - `modeling_module/__init__.py` 와 `modeling_module/api/**/*.py` 만 source로 유지
 - 나머지 `modeling_module/**/*.py` 는 `.pyc` 로 컴파일 후 source 제거
@@ -219,6 +241,9 @@ python3 tools/build_private_wheel.py
 - 빈 임시 venv에 `--no-deps --no-index` 로 wheel만 설치해 metadata와 설치 경로를 검사
 - repository 밖의 격리 모드 Python에서 그 venv의 wheel과 기존 ML 의존성을 사용해 public import와
   `build_dataset` smoke를 실행
+
+일반 source checkout과 `python3 -m build`로 생성한 public wheel의 SELLM 지원은 유지됩니다.
+`tools/build_private_wheel.py`로 생성하는 core private wheel만 non-SELLM 경계를 적용합니다.
 
 Private wheel filename/ABI 정책은 다음과 같습니다.
 

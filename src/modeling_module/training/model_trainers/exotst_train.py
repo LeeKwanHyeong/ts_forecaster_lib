@@ -1,9 +1,10 @@
 import copy
 from contextlib import contextmanager
+import math
 from typing import Optional, Callable
 
 import torch
-import torch.nn as nn
+import torch.nn.functional as F
 
 from modeling_module.models.ExoTST.backbone import HorizonDistMLPHead, HorizonMLPHead
 from modeling_module.training.adapters import DefaultAdapter
@@ -19,6 +20,52 @@ from modeling_module.training.model_trainers.exo_policy import (
     infer_exo_dim_from_cb,
     wrap_future_exo_cb,
 )
+
+
+def exotst_negative_output_penalty(
+    prediction: torch.Tensor,
+    *,
+    weight: float,
+) -> torch.Tensor:
+    """Penalize negative point forecasts in denormalized demand coordinates."""
+
+    if not torch.is_tensor(prediction):
+        raise TypeError("ExoTST negative-output penalty requires a tensor prediction.")
+    if prediction.ndim not in (2, 3):
+        raise ValueError(
+            "ExoTST point prediction must be rank 2 or 3, "
+            f"got shape={tuple(prediction.shape)}"
+        )
+    penalty_weight = float(weight)
+    if not math.isfinite(penalty_weight) or penalty_weight <= 0.0:
+        raise ValueError(
+            "ExoTST negative-output penalty weight must be finite and > 0, "
+            f"got {weight!r}"
+        )
+    return penalty_weight * F.relu(-prediction).square().mean()
+
+
+def make_exotst_negative_output_penalty(
+    model,
+    *,
+    loss_mode: str,
+):
+    """Build a training-only penalty hook, or no hook for the baseline."""
+
+    cfg = getattr(model, "cfg", None)
+    weight = float(getattr(cfg, "negative_output_penalty_weight", 0.0))
+    if weight == 0.0:
+        return None
+    if loss_mode != "point":
+        raise ValueError(
+            "negative_output_penalty_weight is supported only for ExoTST "
+            f"point training, got loss_mode={loss_mode!r}"
+        )
+
+    def penalty(_x, prediction, _cfg):
+        return exotst_negative_output_penalty(prediction, weight=weight)
+
+    return penalty
 
 def _ensure_exotst_loss_head(model, train_cfg: TrainingConfig):
     """
@@ -216,6 +263,11 @@ def train_exotst(
 
     # loss_mode에 따른 head 동기화
     _ensure_exotst_loss_head(model, train_cfg)
+    loss_mode = infer_loss_mode(train_cfg)
+    negative_output_penalty_fn = make_exotst_negative_output_penalty(
+        model,
+        loss_mode=loss_mode,
+    )
 
     print(
         f"[EXO-setup] E_past_cont={E_past_cont} | E_future={E_future} | "
@@ -232,10 +284,19 @@ def train_exotst(
         stages = [StageConfig(epochs=train_cfg.epochs, spike_enabled=train_cfg.spike_loss.enabled)]
 
     adapter = DefaultAdapter()
+    is_production_refit = (
+        getattr(train_cfg, "training_mode", "qualification")
+        == "production_refit"
+    )
+    if is_production_refit and val_loader is not None:
+        raise ValueError("production_refit requires val_loader=None.")
     best = None
     global_best_loss = float("inf")
-    global_best_state = copy.deepcopy(model.state_dict())
+    global_best_state = (
+        None if is_production_refit else copy.deepcopy(model.state_dict())
+    )
     global_best_cfg = train_cfg
+    total_epochs_completed = 0
 
     for i, stg in enumerate(stages, 1):
         cfg_i = apply_stage(train_cfg, stg)
@@ -256,12 +317,28 @@ def train_exotst(
             metrics_fn=None,
             autocast_input=autocast_input,
             extra_loss_fn=None,
+            training_only_extra_loss_fn=negative_output_penalty_fn,
             use_exogenous_mode=use_exogenous_mode,
             device=device,
         )
 
         with sdp_math_only():
             model = trainer.fit(model, tl_i, val_loader, tta_steps=0)
+        total_epochs_completed += int(
+            getattr(trainer, "epochs_completed_", 0)
+        )
+        if is_production_refit:
+            best = {
+                "model": model,
+                "cfg": cfg_i,
+                "best_val_loss": None,
+                "final_train_loss": float(
+                    getattr(trainer, "final_train_loss_", float("nan"))
+                ),
+                "epochs_completed": total_epochs_completed,
+                "state_selection": "final_epoch",
+            }
+            continue
         stage_best_loss = float(getattr(trainer, "best_loss_", float("inf")))
         if stage_best_loss < global_best_loss:
             global_best_loss = stage_best_loss
@@ -269,7 +346,14 @@ def train_exotst(
             global_best_cfg = cfg_i
         best = {"model": model, "cfg": cfg_i, "best_val_loss": stage_best_loss}
 
-    model.load_state_dict(global_best_state)
-    best = {"model": model, "cfg": global_best_cfg, "best_val_loss": global_best_loss}
+    if not is_production_refit:
+        assert global_best_state is not None
+        model.load_state_dict(global_best_state)
+        best = {
+            "model": model,
+            "cfg": global_best_cfg,
+            "best_val_loss": global_best_loss,
+        }
 
+    assert best is not None
     return best

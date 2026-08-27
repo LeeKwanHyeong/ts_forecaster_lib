@@ -6,8 +6,10 @@ from typing import Optional, Callable
 
 # PatchTST 내부 head 재구성에 필요
 from modeling_module.models.PatchTST.common.patching import compute_patch_num
-from modeling_module.models.PatchTST.supervised.PatchTST import PointHeadWithExo, QuantileHeadWithExo, DistHeadWithExo
-from modeling_module.training.adapters import DefaultAdapter
+from modeling_module.models.PatchTST.heads.distribution_head import DistHeadWithExo
+from modeling_module.models.PatchTST.heads.point_head import PointHeadWithExo
+from modeling_module.models.PatchTST.heads.quantile_head import QuantileHeadWithExo
+from modeling_module.training.adapters import PatchTSTAdapter
 from modeling_module.training.config import TrainingConfig, StageConfig, apply_stage
 from modeling_module.training.engine import CommonTrainer
 from modeling_module.training.model_trainers.amp_policy import amp_type_set
@@ -159,12 +161,22 @@ def train_patchtst(
     if not stages or len(stages) == 0:
         stages = [StageConfig(epochs=train_cfg.epochs, spike_enabled=train_cfg.spike_loss.enabled)]
 
-    adapter = DefaultAdapter()
+    adapter = PatchTSTAdapter()
+
+    is_production_refit = (
+        getattr(train_cfg, "training_mode", "qualification")
+        == "production_refit"
+    )
+    if is_production_refit and val_loader is not None:
+        raise ValueError("production_refit requires val_loader=None.")
 
     best = None
     global_best_loss = float("inf")
-    global_best_state = copy.deepcopy(model.state_dict())
+    global_best_state = (
+        None if is_production_refit else copy.deepcopy(model.state_dict())
+    )
     global_best_cfg = train_cfg
+    total_epochs_completed = 0
     for i, stg in enumerate(stages, 1):
         # 스테이지별 설정 적용
         cfg_i = apply_stage(train_cfg, stg)
@@ -188,6 +200,20 @@ def train_patchtst(
             device = device
         )
         model = trainer.fit(model, tl_i, val_loader, tta_steps=0)
+        total_epochs_completed += int(getattr(trainer, "epochs_completed_", 0))
+        if is_production_refit:
+            best = {
+                "model": model,
+                "cfg": cfg_i,
+                "best_val_loss": None,
+                "final_train_loss": float(
+                    getattr(trainer, "final_train_loss_", float("nan"))
+                ),
+                "epochs_completed": total_epochs_completed,
+                "state_selection": "final_epoch",
+            }
+            continue
+
         stage_best_loss = float(getattr(trainer, "best_loss_", float("inf")))
         if stage_best_loss < global_best_loss:
             global_best_loss = stage_best_loss
@@ -195,8 +221,10 @@ def train_patchtst(
             global_best_cfg = cfg_i
         best = {"model": model, "cfg": cfg_i, "best_val_loss": stage_best_loss}
 
-    model.load_state_dict(global_best_state)
-    best = {"model": model, "cfg": global_best_cfg, "best_val_loss": global_best_loss}
+    if not is_production_refit:
+        assert global_best_state is not None
+        model.load_state_dict(global_best_state)
+        best = {"model": model, "cfg": global_best_cfg, "best_val_loss": global_best_loss}
 
     print(
         f"[EXO-train] inferred E={E} | future_exo_cb? {future_exo_cb is not None} | exo_is_normalized={exo_is_normalized}")

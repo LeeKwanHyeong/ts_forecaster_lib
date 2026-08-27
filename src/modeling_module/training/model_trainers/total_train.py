@@ -10,25 +10,35 @@ import torch
 import torch.nn as nn
 
 from modeling_module.models.registry import (
+    PRODUCTION_REFIT_ARTIFACT_KEYS,
     expand_training_targets,
     filter_targets_for_family,
     ordered_training_families_for_targets,
     resolve_artifact_model_key,
 )
-from modeling_module.models.PatchMixer.common.configs import PatchMixerConfig
+from modeling_module.models.PatchMixer.common.configs import (
+    PatchMixerConfig,
+    PatchMixerExogenousConfig,
+)
 from modeling_module.models.PatchTST.common.configs import PatchTSTConfig
 from modeling_module.models.PatchTST.self_supervised.PatchTST import PatchTSTPretrainModel
+from modeling_module.models.NHITS.configs import NHITSConfig
+from modeling_module.models.TimeMixer.configs import TimeMixerConfig
 from modeling_module.models.TimeXer.configs import TimeXerConfig
 from modeling_module.models.Titan.common.configs import TitanConfig
 from modeling_module.models.model_builder import (
     build_titan_base,
     build_titan_lmm,
     build_titan_seq2seq,
-    build_patch_mixer_quantile,
+    build_patch_mixer_exogenous,
     build_patch_mixer,
     build_patchTST,
+    build_patchTST_exogenous,
     build_patchTST_quantile,
+    build_patchTST_quantile_exogenous,
     build_exotst,
+    build_nhits,
+    build_timemixer,
     build_timexer,
 )
 from modeling_module.training.config import SpikeLossConfig, TrainingConfig, StageConfig
@@ -44,7 +54,9 @@ from modeling_module.training.model_trainers.patchmixer_train import train_patch
 from modeling_module.training.model_trainers.patchtst_finetune import train_patchtst_finetune
 from modeling_module.training.model_trainers.patchtst_pretrain import train_patchtst_pretrain
 from modeling_module.training.model_trainers.patchtst_train import train_patchtst
+from modeling_module.training.model_trainers.timemixer_train import train_timemixer
 from modeling_module.training.model_trainers.timexer_train import train_timexer
+from modeling_module.training.model_trainers.nhits_train import train_nhits
 from modeling_module.training.model_trainers.titan_train import train_titan
 from .exotst_train import train_exotst
 from ...models.ExoTST.configs import ExoTSTConfig
@@ -61,12 +73,24 @@ except Exception:  # pragma: no cover
 
 # exo_policy: prefer resolve_exogenous; fallback to resolve_future_exogenous for compatibility
 try:
-    from .exo_policy import ExoSpec, resolve_exogenous
+    from .exo_policy import (
+        ExoSpec,
+        infer_future_cat_cardinalities_from_loader,
+        resolve_exogenous,
+    )
 except Exception:  # pragma: no cover
     try:
-        from exo_policy import ExoSpec, resolve_exogenous  # type: ignore
+        from exo_policy import (  # type: ignore
+            ExoSpec,
+            infer_future_cat_cardinalities_from_loader,
+            resolve_exogenous,
+        )
     except Exception:  # pragma: no cover
-        from .exo_policy import ExoSpec, resolve_future_exogenous as resolve_exogenous  # type: ignore
+        from .exo_policy import (  # type: ignore
+            ExoSpec,
+            infer_future_cat_cardinalities_from_loader,
+            resolve_future_exogenous as resolve_exogenous,
+        )
 
 
 # =============================================================================
@@ -332,9 +356,84 @@ def save_model(
     path: Union[str, Path],
     *,
     extra_meta: Optional[Dict[str, Any]] = None,
+    exogenous_schema=None,
+    categorical_vocabulary_artifact=None,
 ) -> None:
     """학습기 내부 저장은 utils.checkpoint 포맷을 공식 포맷으로 사용한다."""
-    save_checkpoint(model, cfg, str(path), extra_meta=extra_meta)
+    save_checkpoint(
+        model,
+        cfg,
+        str(path),
+        extra_meta=extra_meta,
+        exogenous_schema=exogenous_schema,
+        categorical_vocabulary_artifact=categorical_vocabulary_artifact,
+    )
+
+
+def _training_checkpoint_meta(
+    train_cfg: TrainingConfig,
+    stages: list[StageConfig],
+    result: Mapping[str, Any],
+) -> Dict[str, Any]:
+    training_mode = getattr(train_cfg, "training_mode", "qualification")
+    is_production_refit = training_mode == "production_refit"
+    meta: Dict[str, Any] = {
+        "training_mode": training_mode,
+        "validation_enabled": not is_production_refit,
+        "state_selection": (
+            "final_epoch" if is_production_refit else "best_validation"
+        ),
+        "configured_epochs": sum(int(stage.epochs) for stage in stages),
+        "optimizer": "adamw",
+        "learning_rate": float(train_cfg.lr),
+        "weight_decay": float(train_cfg.weight_decay),
+        "lr_scheduler": str(train_cfg.lr_scheduler),
+        "t_max": int(train_cfg.t_max),
+        "use_amp": bool(train_cfg.use_amp),
+        "amp_dtype": str(train_cfg.amp_dtype),
+        "loss": train_cfg.loss.__class__.__name__.lower(),
+        "max_grad_norm": float(train_cfg.max_grad_norm),
+    }
+    if result.get("epochs_completed") is not None:
+        meta["completed_epochs"] = int(result["epochs_completed"])
+    if result.get("final_train_loss") is not None:
+        meta["final_train_loss"] = float(result["final_train_loss"])
+    if getattr(train_cfg, "random_seed", None) is not None:
+        meta["random_seed"] = int(train_cfg.random_seed)
+    return meta
+
+
+def _patchtst_ssl_checkpoint_meta(
+    *,
+    use_ssl_mode: str,
+    pretrain_ckpt_path: Optional[str],
+    result: Mapping[str, Any],
+) -> Dict[str, Any]:
+    if use_ssl_mode != "full" or pretrain_ckpt_path is None:
+        return {}
+
+    meta: Dict[str, Any] = {
+        "ssl_mode": "full",
+        "ssl_pretrain_checkpoint": str(pretrain_ckpt_path),
+    }
+    report = result.get("pretrain_load_report")
+    if not isinstance(report, Mapping):
+        return meta
+
+    contract = report.get("pretrain_contract")
+    if contract is not None:
+        meta["ssl_pretrain_contract"] = contract
+    meta["ssl_backbone_transfer"] = {
+        key: report.get(key)
+        for key in (
+            "transfer_scope",
+            "transferred_key_count",
+            "initialized_backbone_keys",
+            "target_patching",
+            "patching_compatibility",
+        )
+    }
+    return meta
 
 
 def _make_ckpt_path(save_dir: Path, freq: str, model_name: str, lookback: int, horizon: int) -> Path:
@@ -392,6 +491,14 @@ def _build_common_train_configs(
     loss_point: Optional[nn.Module],
     loss_quantile: Optional[nn.Module],
     use_exogenous_mode: bool,
+    training_mode: Literal["qualification", "production_refit"] = "qualification",
+    random_seed: Optional[int] = None,
+    weight_decay: Optional[float] = None,
+    lr_scheduler: Optional[Literal["cosine", "constant"]] = None,
+    t_max: Optional[int] = None,
+    use_amp: Optional[bool] = None,
+    amp_dtype: Optional[Literal["bf16", "fp16", "fp32"]] = None,
+    max_grad_norm: Optional[float] = None,
     quantiles=(0.1, 0.5, 0.9),
     use_intermittent: bool = True,
     val_use_weights: bool = True,
@@ -401,6 +508,8 @@ def _build_common_train_configs(
     - point_train_cfg.loss: loss_point(또는 기본 MAE)
     - quantile_train_cfg.loss: loss_quantile(또는 기본 MQLoss)
     """
+    if training_mode not in {"qualification", "production_refit"}:
+        raise ValueError(f"Unsupported training_mode: {training_mode!r}.")
     base_lr = float(base_lr) if base_lr is not None else 1e-4
 
     loss_point_obj = loss_point if loss_point is not None else default_loss_point()
@@ -412,12 +521,17 @@ def _build_common_train_configs(
         horizon=horizon,
         epochs=0,
         lr=base_lr,
-        weight_decay=1e-3,
-        t_max=40,
+        weight_decay=float(weight_decay if weight_decay is not None else 1e-3),
+        lr_scheduler=str(lr_scheduler or "cosine"),
+        t_max=int(t_max if t_max is not None else 40),
         patience=100,
-        max_grad_norm=30.0,
+        max_grad_norm=float(max_grad_norm if max_grad_norm is not None else 30.0),
         amp_device="cuda",
+        use_amp=bool(use_amp if use_amp is not None else torch.cuda.is_available()),
+        amp_dtype=str(amp_dtype or "bf16"),
         use_exogenous_mode=bool(use_exogenous_mode),
+        training_mode=training_mode,
+        random_seed=random_seed,
         loss=loss_point_obj,
 
         huber_delta=0.8,
@@ -457,12 +571,17 @@ def _build_common_train_configs(
         horizon=horizon,
         epochs=0,
         lr=base_lr,
-        weight_decay=1e-3,
-        t_max=40,
+        weight_decay=float(weight_decay if weight_decay is not None else 1e-3),
+        lr_scheduler=str(lr_scheduler or "cosine"),
+        t_max=int(t_max if t_max is not None else 40),
         patience=100,
-        max_grad_norm=30.0,
+        max_grad_norm=float(max_grad_norm if max_grad_norm is not None else 30.0),
         amp_device="cuda",
+        use_amp=bool(use_amp if use_amp is not None else torch.cuda.is_available()),
+        amp_dtype=str(amp_dtype or "bf16"),
         use_exogenous_mode=bool(use_exogenous_mode),
+        training_mode=training_mode,
+        random_seed=random_seed,
         loss=loss_quantile_obj,
 
         huber_delta=0.8,
@@ -514,6 +633,202 @@ def _infer_mode_and_dist(loss_obj) -> tuple[str, int, Optional[List[str]], Optio
 # =============================================================================
 # Model runners (Contract: exo dims are provided by exo_policy)
 # =============================================================================
+
+def _run_nhits(
+    *,
+    results: Dict[str, Dict],
+    freq: str,
+    train_loader,
+    val_loader,
+    point_train_cfg: TrainingConfig,
+    stages: List[StageConfig],
+    device: str,
+    lookback: int,
+    horizon: int,
+    use_exogenous_mode: bool,
+    save_root: Optional[Path] = None,
+    requested_artifact_keys: Optional[Iterable[str]] = None,
+    architecture_override: Optional[Mapping[str, Any]] = None,
+    **kwargs,
+):
+    """Run the public endogenous, point-only N-HiTS artifact."""
+
+    requested = _requested_target_set(requested_artifact_keys)
+    if not _wants_artifact(requested, "nhits_base"):
+        return
+    if use_exogenous_mode:
+        raise RuntimeError("[total_train] nhits_base supports endogenous inputs only.")
+
+    loss_obj = getattr(point_train_cfg, "loss", None)
+    mode = infer_supervised_mode(loss_obj)
+    if mode != "point":
+        raise NotImplementedError(
+            f"[total_train] nhits_base supports only point mode, got {mode!r}."
+        )
+
+    cfg_kwargs = asdict(point_train_cfg)
+    cfg_kwargs["loss"] = loss_obj
+    cfg_kwargs.update(y_dim=1, use_exogenous_mode=False)
+    if architecture_override:
+        cfg_kwargs.update(
+            {
+                key: value
+                for key, value in dict(architecture_override).items()
+                if value is not None
+            }
+        )
+
+    nhits_cfg = NHITSConfig(**cfg_kwargs)
+    nhits_model = build_nhits(nhits_cfg).to(device)
+    nhits_train_cfg = replace(point_train_cfg, use_exogenous_mode=False)
+
+    print(f"N-HiTS ({freq.capitalize()}) mode=point")
+    best = train_nhits(
+        model=nhits_model,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        stages=list(stages),
+        train_cfg=nhits_train_cfg,
+        device=device,
+    )
+
+    if save_root:
+        ckpt_path = _make_ckpt_path(
+            save_root,
+            freq,
+            "NHITSBase",
+            lookback,
+            horizon,
+        )
+        save_model(
+            nhits_model,
+            nhits_cfg,
+            ckpt_path,
+            extra_meta={
+                "model_key": "nhits_base",
+                "family_key": "nhits",
+                **_training_checkpoint_meta(
+                    nhits_train_cfg,
+                    stages,
+                    best,
+                ),
+            },
+        )
+        best["ckpt_path"] = str(ckpt_path)
+
+    _store_result(
+        results,
+        result_name="N-HiTS",
+        best=best,
+        model_key="nhits_base",
+        family_key="nhits",
+    )
+
+
+def _run_timemixer(
+    *,
+    results: Dict[str, Dict],
+    freq: str,
+    train_loader,
+    val_loader,
+    point_train_cfg: TrainingConfig,
+    stages: List[StageConfig],
+    device: str,
+    lookback: int,
+    horizon: int,
+    use_exogenous_mode: bool,
+    exo_dim: int,
+    future_exo_cb: Optional[Callable],
+    past_cont_dim: int,
+    past_cat_dim: int,
+    save_root: Optional[Path] = None,
+    requested_artifact_keys: Optional[Iterable[str]] = None,
+    architecture_override: Optional[Mapping[str, Any]] = None,
+    **kwargs,
+):
+    """Run the endogenous, point-only TimeMixer artifact."""
+
+    requested = _requested_target_set(requested_artifact_keys)
+    if not _wants_artifact(requested, "timemixer"):
+        return
+    if (
+        use_exogenous_mode
+        or int(exo_dim) > 0
+        or future_exo_cb is not None
+        or int(past_cont_dim) > 0
+        or int(past_cat_dim) > 0
+    ):
+        raise RuntimeError("[total_train] TimeMixer supports endogenous inputs only.")
+
+    loss_obj = getattr(point_train_cfg, "loss", None)
+    mode = infer_supervised_mode(loss_obj)
+    if mode != "point":
+        raise NotImplementedError(
+            f"[total_train] TimeMixer supports only point mode, got {mode!r}."
+        )
+
+    cfg_kwargs = asdict(point_train_cfg)
+    cfg_kwargs["loss"] = loss_obj
+    cfg_kwargs.update(
+        y_dim=1,
+        use_exogenous_mode=False,
+        future_exo_dim=0,
+    )
+    if architecture_override:
+        cfg_kwargs.update(
+            {
+                key: value
+                for key, value in dict(architecture_override).items()
+                if value is not None
+            }
+        )
+
+    timemixer_cfg = TimeMixerConfig(**cfg_kwargs)
+    timemixer_model = build_timemixer(timemixer_cfg).to(device)
+    timemixer_train_cfg = replace(point_train_cfg, use_exogenous_mode=False)
+
+    print(f"TimeMixer ({freq.capitalize()}) mode=point")
+    best = train_timemixer(
+        model=timemixer_model,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        stages=list(stages),
+        train_cfg=timemixer_train_cfg,
+        device=device,
+    )
+
+    if save_root:
+        ckpt_path = _make_ckpt_path(
+            save_root,
+            freq,
+            "TimeMixer",
+            lookback,
+            horizon,
+        )
+        save_model(
+            timemixer_model,
+            timemixer_cfg,
+            ckpt_path,
+            extra_meta={
+                "model_key": "timemixer",
+                "family_key": "timemixer",
+                **_training_checkpoint_meta(
+                    timemixer_train_cfg,
+                    stages,
+                    best,
+                ),
+            },
+        )
+        best["ckpt_path"] = str(ckpt_path)
+
+    _store_result(
+        results,
+        result_name="TimeMixer",
+        best=best,
+        model_key="timemixer",
+        family_key="timemixer",
+    )
+
 
 def _run_exotst(
     *,
@@ -607,7 +922,25 @@ def _run_exotst(
             exotst_model,
             exotst_cfg,
             ckpt_path,
-            extra_meta={"model_key": "exotst_base", "family_key": "exotst"},
+            extra_meta={
+                "model_key": "exotst_base",
+                "family_key": "exotst",
+                **_training_checkpoint_meta(
+                    point_train_cfg,
+                    stages,
+                    best,
+                ),
+            },
+            exogenous_schema=getattr(
+                train_loader,
+                "exogenous_schema",
+                None,
+            ),
+            categorical_vocabulary_artifact=getattr(
+                train_loader,
+                "categorical_vocabulary_artifact",
+                None,
+            ),
         )
         best["ckpt_path"] = str(ckpt_path)
 
@@ -698,11 +1031,242 @@ def _run_timexer(
             timexer_model,
             timexer_cfg,
             ckpt_path,
-            extra_meta={"model_key": "timexer_base", "family_key": "timexer"},
+            extra_meta={
+                "model_key": "timexer_base",
+                "family_key": "timexer",
+                **_training_checkpoint_meta(
+                    point_train_cfg,
+                    stages,
+                    best,
+                ),
+            },
+            exogenous_schema=getattr(
+                train_loader,
+                "exogenous_schema",
+                None,
+            ),
+            categorical_vocabulary_artifact=getattr(
+                train_loader,
+                "categorical_vocabulary_artifact",
+                None,
+            ),
         )
         best["ckpt_path"] = str(ckpt_path)
 
     _store_result(results, result_name="TimeXer", best=best, model_key="timexer_base", family_key="timexer")
+
+
+def _run_sellm(
+    *,
+    results: Dict[str, Dict],
+    freq: str,
+    train_loader,
+    val_loader,
+    point_train_cfg: TrainingConfig,
+    stages: List[StageConfig],
+    device: str,
+    lookback: int,
+    horizon: int,
+    patch_len: int,
+    use_exogenous_mode: bool,
+    exo_dim: int,
+    future_exo_cb: Optional[Callable],
+    past_cont_dim: int,
+    past_cat_dim: int,
+    save_root: Optional[Path] = None,
+    requested_artifact_keys: Optional[Iterable[str]] = None,
+    architecture_override: Optional[Mapping[str, Any]] = None,
+    **kwargs,
+):
+    """SELLM runner for semantic-enhanced point forecasting."""
+
+    requested = _requested_target_set(requested_artifact_keys)
+    if not _wants_artifact(requested, "sellm_base"):
+        return
+
+    from modeling_module.models.SELLM.configs import SELLMConfig
+    from modeling_module.models.model_builder import build_sellm
+    from modeling_module.training.model_trainers.sellm_train import train_sellm
+
+    if int(past_cat_dim) > 0:
+        print(
+            "[WARN] SELLM v1 ignores categorical past exogenous inputs. "
+            "Encode them as continuous/future features if they should affect the forecast."
+        )
+    if use_exogenous_mode and int(past_cont_dim) > 0 and int(exo_dim) <= 0 and future_exo_cb is None:
+        print(
+            "[WARN] SELLM v1 uses future continuous exogenous inputs only; "
+            "past_exo_cont will be ignored for this artifact."
+        )
+
+    loss_obj = getattr(point_train_cfg, "loss", None)
+    mode = infer_supervised_mode(loss_obj)
+    if mode != "point":
+        raise NotImplementedError(f"[total_train] SELLM v1 supports only point mode, got {mode!r}.")
+
+    cfg_kwargs = asdict(point_train_cfg)
+    cfg_kwargs["loss"] = loss_obj
+    cfg_kwargs.update(
+        dict(
+            y_dim=1,
+            future_exo_dim=(max(int(exo_dim), 0) if use_exogenous_mode else 0),
+            token_len=max(int(patch_len), 1),
+            use_exogenous_mode=bool(use_exogenous_mode),
+        )
+    )
+    if architecture_override:
+        cfg_kwargs.update({key: value for key, value in dict(architecture_override).items() if value is not None})
+
+    sellm_cfg = SELLMConfig(**cfg_kwargs)
+    sellm_model = build_sellm(sellm_cfg).to(device)
+
+    llm_runtime = sellm_cfg.llm_source if sellm_cfg.use_pretrained_llm else "fallback"
+    print(
+        f"SELLM ({freq.capitalize()}) use_pretrained_llm={sellm_cfg.use_pretrained_llm} "
+        f"llm_runtime={llm_runtime}"
+    )
+    best = train_sellm(
+        model=sellm_model,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        stages=list(stages),
+        train_cfg=point_train_cfg,
+        device=device,
+    )
+
+    if save_root:
+        ckpt_path = _make_ckpt_path(save_root, freq, "SELLMBase", lookback, horizon)
+        configured_epochs = sum(int(stage.epochs) for stage in stages)
+        training_meta = _training_checkpoint_meta(
+            point_train_cfg,
+            stages,
+            best,
+        )
+        save_model(
+            sellm_model,
+            sellm_cfg,
+            ckpt_path,
+            extra_meta={
+                "model_key": "sellm_base",
+                "family_key": "sellm",
+                **training_meta,
+                "epochs": configured_epochs,
+                "batch_size": getattr(train_loader, "batch_size", None),
+                "token_len": int(sellm_cfg.token_len),
+                "semantic_vocab_size": int(sellm_cfg.semantic_vocab_size),
+                "final_nonneg": bool(sellm_cfg.final_nonneg),
+                "output_head_mode": str(sellm_cfg.output_head_mode),
+                "output_head_hidden_dim": int(sellm_cfg.output_head_hidden_dim),
+                "output_head_softplus_beta": float(
+                    sellm_cfg.output_head_softplus_beta
+                ),
+                "output_head_initial_nonzero_probability": float(
+                    sellm_cfg.output_head_initial_nonzero_probability
+                ),
+                "output_calibration_mode": str(
+                    sellm_cfg.output_calibration_mode
+                ),
+                "output_calibration_scale": float(
+                    sellm_cfg.output_calibration_scale
+                ),
+                "output_calibration_fitted": bool(
+                    sellm_cfg.output_calibration_fitted
+                ),
+                "output_calibration_source_fingerprint": (
+                    sellm_cfg.output_calibration_source_fingerprint
+                ),
+                "negative_output_penalty_weight": float(
+                    sellm_cfg.negative_output_penalty_weight
+                ),
+            },
+        )
+        best["ckpt_path"] = str(ckpt_path)
+
+    _store_result(results, result_name="SELLM", best=best, model_key="sellm_base", family_key="sellm")
+
+
+def _run_autotimes(
+    *,
+    results: Dict[str, Dict],
+    freq: str,
+    train_loader,
+    val_loader,
+    point_train_cfg: TrainingConfig,
+    stages: List[StageConfig],
+    device: str,
+    lookback: int,
+    horizon: int,
+    use_exogenous_mode: bool,
+    save_root: Optional[Path] = None,
+    requested_artifact_keys: Optional[Iterable[str]] = None,
+    architecture_override: Optional[Mapping[str, Any]] = None,
+    **kwargs,
+):
+    """Run the endogenous, point-only AutoTimes artifact."""
+
+    requested = _requested_target_set(requested_artifact_keys)
+    if not _wants_artifact(requested, "autotimes_base"):
+        return
+    if use_exogenous_mode:
+        raise RuntimeError("[total_train] autotimes_base supports endogenous inputs only.")
+    loss_obj = getattr(point_train_cfg, "loss", None)
+    mode = infer_supervised_mode(loss_obj)
+    if mode != "point":
+        raise NotImplementedError(
+            f"[total_train] autotimes_base supports point mode only, got {mode!r}."
+        )
+
+    from modeling_module.models.AutoTimes.configs import AutoTimesConfig
+    from modeling_module.models.model_builder import build_autotimes
+    from modeling_module.training.model_trainers.autotimes_train import train_autotimes
+
+    cfg_kwargs = asdict(point_train_cfg)
+    cfg_kwargs["loss"] = loss_obj
+    cfg_kwargs.update(y_dim=1, use_exogenous_mode=False)
+    if architecture_override:
+        cfg_kwargs.update(
+            {key: value for key, value in dict(architecture_override).items() if value is not None}
+        )
+    autotimes_cfg = AutoTimesConfig(**cfg_kwargs)
+    autotimes_model = build_autotimes(autotimes_cfg).to(device)
+    autotimes_train_cfg = replace(point_train_cfg, use_exogenous_mode=False)
+
+    print(
+        f"AutoTimes ({freq.capitalize()}) backbone={autotimes_cfg.backbone_type} "
+        f"token_len={autotimes_cfg.token_len} horizon={autotimes_cfg.horizon}"
+    )
+    best = train_autotimes(
+        model=autotimes_model,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        stages=list(stages),
+        train_cfg=autotimes_train_cfg,
+        device=device,
+    )
+
+    if save_root:
+        ckpt_path = _make_ckpt_path(save_root, freq, "AutoTimesBase", lookback, horizon)
+        save_model(
+            autotimes_model,
+            autotimes_cfg,
+            ckpt_path,
+            extra_meta={
+                "model_key": "autotimes_base",
+                "family_key": "autotimes",
+                "token_len": int(autotimes_cfg.token_len),
+                "backbone_type": str(autotimes_cfg.backbone_type),
+                **_training_checkpoint_meta(autotimes_train_cfg, stages, best),
+            },
+        )
+        best["ckpt_path"] = str(ckpt_path)
+
+    _store_result(
+        results,
+        result_name="AutoTimes",
+        best=best,
+        model_key="autotimes_base",
+        family_key="autotimes",
+    )
 
 
 def _run_patchtst(
@@ -729,6 +1293,7 @@ def _run_patchtst(
     use_exogenous_mode: bool = True,
     use_ssl_mode: SSLMode = "sl_only",
     ssl_pretrain_epochs: int = 10,
+    ssl_pretrain_stride: Optional[int] = None,
     ssl_mask_ratio: float = 0.3,
     ssl_loss_type: str = "mse",
     ssl_freeze_encoder_before_ft: bool = False,
@@ -748,8 +1313,54 @@ def _run_patchtst(
             "Provide `save_dir` before starting PatchTST SSL training."
         )
     requested = _requested_target_set(requested_artifact_keys)
-    run_base = _wants_artifact(requested, "patchtst_base")
-    run_quantile = _wants_artifact(requested, "patchtst_quantile")
+    run_explicit_exogenous = requested is not None and "patchtst_exogenous" in requested
+    run_explicit_quantile_exogenous = (
+        requested is not None and "patchtst_quantile_exogenous" in requested
+    )
+    run_base = _wants_artifact(requested, "patchtst_base") or run_explicit_exogenous
+    run_quantile = (
+        _wants_artifact(requested, "patchtst_quantile")
+        or run_explicit_quantile_exogenous
+    )
+    future_cat_cardinalities = (
+        infer_future_cat_cardinalities_from_loader(train_loader)
+        if use_exogenous_mode
+        else ()
+    )
+    checkpoint_exogenous_schema = getattr(
+        train_loader,
+        "exogenous_schema",
+        None,
+    )
+    checkpoint_categorical_vocabulary = getattr(
+        train_loader,
+        "categorical_vocabulary_artifact",
+        None,
+    )
+
+    if requested is not None and {
+        "patchtst_base",
+        "patchtst_exogenous",
+    }.issubset(requested):
+        raise ValueError("Request either patchtst_base or patchtst_exogenous, not both.")
+    if requested is not None and {
+        "patchtst_quantile",
+        "patchtst_quantile_exogenous",
+    }.issubset(requested):
+        raise ValueError(
+            "Request either patchtst_quantile or patchtst_quantile_exogenous, not both."
+        )
+    if (run_explicit_exogenous or run_explicit_quantile_exogenous) and not use_exogenous_mode:
+        raise ValueError("Explicit PatchTST exogenous variants require use_exogenous_mode=True.")
+    if (run_explicit_exogenous or run_explicit_quantile_exogenous) and not any(
+        (
+            int(exo_dim),
+            int(past_cont_dim),
+            int(past_cat_dim),
+            len(future_cat_cardinalities),
+        )
+    ):
+        raise ValueError("Explicit PatchTST exogenous variants require configured exogenous features.")
 
     # ------------------------------------------------------------
     # 1) PatchTST common kwargs
@@ -758,6 +1369,8 @@ def _run_patchtst(
         device=device,
         lookback=lookback,
         horizon=horizon,
+        training_mode=point_train_cfg.training_mode,
+        random_seed=point_train_cfg.random_seed,
         c_in=1,
         patch_len=patch_len,
         stride=stride,
@@ -777,11 +1390,21 @@ def _run_patchtst(
     if architecture_override:
         pt_kwargs.update({key: value for key, value in dict(architecture_override).items() if value is not None})
 
+    supervised_stride = int(pt_kwargs["stride"])
+    pretrain_stride = (
+        supervised_stride
+        if ssl_pretrain_stride is None or use_ssl_mode == "sl_only"
+        else int(ssl_pretrain_stride)
+    )
+    if use_ssl_mode in ("ssl_only", "full") and pretrain_stride <= 0:
+        raise ValueError("ssl_pretrain_stride must be positive.")
+
     if use_exogenous_mode:
         pt_kwargs.update(
             dict(
                 past_exo_cont_dim=int(past_cont_dim),
                 past_exo_cat_dim=int(past_cat_dim),
+                future_exo_cat_cardinalities=future_cat_cardinalities,
                 # cat 미사용이면 []/0 유지
                 cat_cardinalities=[],
                 d_cat_emb=0,
@@ -789,7 +1412,15 @@ def _run_patchtst(
         )
     else:
         # exo OFF 불변식
-        pt_kwargs.update(dict(past_exo_cont_dim=0, past_exo_cat_dim=0, cat_cardinalities=[], d_cat_emb=0))
+        pt_kwargs.update(
+            dict(
+                past_exo_cont_dim=0,
+                past_exo_cat_dim=0,
+                future_exo_cat_cardinalities=(),
+                cat_cardinalities=[],
+                d_cat_emb=0,
+            )
+        )
 
     # ------------------------------------------------------------
     # 2) external pretrained ckpt path(optional)
@@ -804,6 +1435,7 @@ def _run_patchtst(
     # ------------------------------------------------------------
     # 3) SSL pretrain (Optional)
     # ------------------------------------------------------------
+    pretrain_result = None
     if (use_ssl_mode in ("ssl_only", "full")) and (pretrain_ckpt_path is None) and (save_root is not None):
         pretrain_dir = Path(save_root) / "pretrain"
         pretrain_dir.mkdir(parents=True, exist_ok=True)
@@ -811,16 +1443,24 @@ def _run_patchtst(
 
         pt_pre_kwargs = dict(pt_kwargs)
         pt_pre_kwargs["future_exo_dim"] = 0
+        pt_pre_kwargs["future_exo_cat_cardinalities"] = ()
         pt_pre_kwargs["past_exo_cont_dim"] = 0
         pt_pre_kwargs["past_exo_cat_dim"] = 0
+        pt_pre_kwargs["stride"] = pretrain_stride
 
         pt_pre_cfg = PatchTSTConfig(**pt_pre_kwargs)
         pre_model = PatchTSTPretrainModel(cfg=pt_pre_cfg)
 
         pre_stages = [StageConfig(epochs=int(ssl_pretrain_epochs), lr=float(point_train_cfg.lr), spike_enabled=False)]
-        print(f"[SSL] PatchTST Pretrain ({freq.capitalize()}) -> {pretrain_ckpt_path}")
+        print(
+            f"[SSL] PatchTST Pretrain ({freq.capitalize()}) "
+            f"patch_len={pt_pre_cfg.patch_len} "
+            f"pretrain_stride={pt_pre_cfg.stride} "
+            f"supervised_stride={supervised_stride} "
+            f"mask_ratio={ssl_mask_ratio} -> {pretrain_ckpt_path}"
+        )
 
-        _ = train_patchtst_pretrain(
+        pretrain_result = train_patchtst_pretrain(
             pre_model,
             train_loader,
             val_loader,
@@ -831,11 +1471,17 @@ def _run_patchtst(
             save_dir=str(pretrain_dir),
             ckpt_name="patchtst_pretrain_best.pt",
             device=device,
+            supervised_stride=supervised_stride,
         )
 
     if use_ssl_mode == "ssl_only":
         results["PatchTST SSL"] = {
             "pretrain_ckpt_path": pretrain_ckpt_path,
+            "pretrain_contract": (
+                None
+                if pretrain_result is None
+                else pretrain_result.get("pretrain_contract")
+            ),
             "note": "use_ssl_mode='ssl_only' 이므로 supervised(point/dist/quantile) 학습은 수행하지 않음",
         }
         return
@@ -850,9 +1496,11 @@ def _run_patchtst(
     _fcb = future_exo_cb if use_exogenous_mode else None
     print(f"[PatchTST][EXO] use_exo={use_exogenous_mode} future_exo_dim={pt_kwargs.get('future_exo_dim')} "
           f"past_exo_cont_dim={pt_kwargs.get('past_exo_cont_dim')} future_cb={_fcb is not None} "
-          f"past_exo_cat_dim={pt_kwargs.get('past_exo_cat_dim')}")
+          f"past_exo_cat_dim={pt_kwargs.get('past_exo_cat_dim')} "
+          f"future_exo_cat_cardinalities={pt_kwargs.get('future_exo_cat_cardinalities')}")
 
     if run_base:
+        point_model_key = "patchtst_exogenous" if run_explicit_exogenous else "patchtst_base"
         pt_train_cfg = PatchTSTConfig(
             **pt_kwargs,
             loss=loss_point_obj,
@@ -862,8 +1510,9 @@ def _run_patchtst(
             dist_name=dist_name,
         )
 
-        pt_base = build_patchTST(pt_train_cfg)
-        name_base = "PatchTST"
+        point_builder = build_patchTST_exogenous if run_explicit_exogenous else build_patchTST
+        pt_base = point_builder(pt_train_cfg)
+        name_base = "PatchTST Exogenous" if run_explicit_exogenous else "PatchTST"
         print(f"{name_base} ({freq.capitalize()})")
 
         if (use_ssl_mode == "full") and (pretrain_ckpt_path is not None):
@@ -891,12 +1540,30 @@ def _run_patchtst(
             )
 
         if save_root:
-            ckpt_path = _make_ckpt_path(save_root, freq, "PatchTST", lookback, horizon)
+            artifact_name = "PatchTSTExogenous" if run_explicit_exogenous else "PatchTST"
+            ckpt_path = _make_ckpt_path(save_root, freq, artifact_name, lookback, horizon)
             save_model(
                 pt_base,
                 pt_train_cfg,
                 ckpt_path,
-                extra_meta={"model_key": "patchtst_base", "family_key": "patchtst"},
+                extra_meta={
+                    "model_key": point_model_key,
+                    "family_key": "patchtst",
+                    **_training_checkpoint_meta(
+                        point_train_cfg,
+                        stages,
+                        best_pt_base,
+                    ),
+                    **_patchtst_ssl_checkpoint_meta(
+                        use_ssl_mode=use_ssl_mode,
+                        pretrain_ckpt_path=pretrain_ckpt_path,
+                        result=best_pt_base,
+                    ),
+                },
+                exogenous_schema=checkpoint_exogenous_schema,
+                categorical_vocabulary_artifact=(
+                    checkpoint_categorical_vocabulary
+                ),
             )
             best_pt_base["ckpt_path"] = str(ckpt_path)
             if (use_ssl_mode == "full") and (pretrain_ckpt_path is not None):
@@ -905,7 +1572,7 @@ def _run_patchtst(
             results,
             result_name=name_base,
             best=best_pt_base,
-            model_key="patchtst_base",
+            model_key=point_model_key,
             family_key="patchtst",
         )
 
@@ -913,13 +1580,28 @@ def _run_patchtst(
     # 5) Supervised - Quantile
     # ============================================================
     if run_quantile:
+        quantile_model_key = (
+            "patchtst_quantile_exogenous"
+            if run_explicit_quantile_exogenous
+            else "patchtst_quantile"
+        )
         quantiles = (0.1, 0.5, 0.9)
         loss_q_obj = coerce_quantile_loss(loss_quantile, quantiles=quantiles)
         quantile_train_cfg = replace(quantile_train_cfg, loss=loss_q_obj)
 
         pt_q_cfg = PatchTSTConfig(**pt_kwargs, quantiles=quantiles, loss=loss_q_obj)
-        pt_q = build_patchTST_quantile(pt_q_cfg)
-        print(f"PatchTST Quantile ({freq.capitalize()})")
+        quantile_builder = (
+            build_patchTST_quantile_exogenous
+            if run_explicit_quantile_exogenous
+            else build_patchTST_quantile
+        )
+        pt_q = quantile_builder(pt_q_cfg)
+        quantile_name = (
+            "PatchTST Quantile Exogenous"
+            if run_explicit_quantile_exogenous
+            else "PatchTST Quantile"
+        )
+        print(f"{quantile_name} ({freq.capitalize()})")
 
         if (use_ssl_mode == "full") and (pretrain_ckpt_path is not None):
             best_pt_q = train_patchtst_finetune(
@@ -946,12 +1628,34 @@ def _run_patchtst(
             )
 
         if save_root:
-            ckpt_path_q = _make_ckpt_path(save_root, freq, "PatchTSTQuantile", lookback, horizon)
+            artifact_name = (
+                "PatchTSTQuantileExogenous"
+                if run_explicit_quantile_exogenous
+                else "PatchTSTQuantile"
+            )
+            ckpt_path_q = _make_ckpt_path(save_root, freq, artifact_name, lookback, horizon)
             save_model(
                 pt_q,
                 pt_q_cfg,
                 ckpt_path_q,
-                extra_meta={"model_key": "patchtst_quantile", "family_key": "patchtst"},
+                extra_meta={
+                    "model_key": quantile_model_key,
+                    "family_key": "patchtst",
+                    **_training_checkpoint_meta(
+                        quantile_train_cfg,
+                        stages,
+                        best_pt_q,
+                    ),
+                    **_patchtst_ssl_checkpoint_meta(
+                        use_ssl_mode=use_ssl_mode,
+                        pretrain_ckpt_path=pretrain_ckpt_path,
+                        result=best_pt_q,
+                    ),
+                },
+                exogenous_schema=checkpoint_exogenous_schema,
+                categorical_vocabulary_artifact=(
+                    checkpoint_categorical_vocabulary
+                ),
             )
             best_pt_q["ckpt_path"] = str(ckpt_path_q)
             if (use_ssl_mode == "full") and (pretrain_ckpt_path is not None):
@@ -959,9 +1663,9 @@ def _run_patchtst(
 
         _store_result(
             results,
-            result_name="PatchTST Quantile",
+            result_name=quantile_name,
             best=best_pt_q,
-            model_key="patchtst_quantile",
+            model_key=quantile_model_key,
             family_key="patchtst",
         )
 
@@ -1217,19 +1921,30 @@ def _run_patchmixer(
     requested_artifact_keys: Optional[Iterable[str]] = None,
     architecture_override: Optional[Mapping[str, Any]] = None,
 ):
-    """PatchMixer (Base/Dist + Quantile) runner."""
+    """Train the paper endogenous model or the dedicated exogenous point model."""
     if stages is None:
         stages = [StageConfig(epochs=1, lr=1e-4, spike_enabled=False)]
 
     loss_point_obj = loss if loss is not None else (loss_point if loss_point is not None else point_train_cfg.loss)
-    mode, out_mul, param_names, dist_name = _infer_mode_and_dist(loss_point_obj)
-    requested = _requested_target_set(requested_artifact_keys)
-    run_base = _wants_artifact(requested, "patchmixer_base")
-    run_quantile = _wants_artifact(requested, "patchmixer_quantile")
+    mode, _, _, _ = _infer_mode_and_dist(loss_point_obj)
+    if mode != "point":
+        raise NotImplementedError(
+            "PatchMixer public training supports point loss only; retired distribution "
+            "and quantile artifacts remain load-only."
+        )
 
-    quantiles = (0.1, 0.5, 0.9)
-    loss_q_obj = coerce_quantile_loss(loss_quantile, quantiles=quantiles)
-    quantile_train_cfg = replace(quantile_train_cfg, loss=loss_q_obj)
+    requested = _requested_target_set(requested_artifact_keys)
+    run_endogenous = _wants_artifact(requested, "patchmixer")
+    run_exogenous = _wants_artifact(requested, "patchmixer_exo")
+
+    if run_exogenous and not use_exogenous_mode:
+        raise ValueError("patchmixer_exo requires use_exogenous_mode=True.")
+    if run_exogenous and not any(
+        (int(exo_dim), int(past_cont_dim), int(past_cat_dim))
+    ):
+        raise ValueError("patchmixer_exo requires configured exogenous features.")
+    if run_endogenous and use_exogenous_mode:
+        raise ValueError("patchmixer is endogenous-only; set use_exogenous_mode=False.")
 
     # cat embedding 정책 (데이터 메타로 대체 권장)
     if use_exogenous_mode and int(past_cat_dim) > 0:
@@ -1241,15 +1956,17 @@ def _run_patchmixer(
 
 
 
-    pm_kwargs = dict(
+    exogenous_kwargs = dict(
         lookback=lookback,
         horizon=horizon,
         device=device,
         enc_in=1,
         d_model=128,
         e_layers=6,
+        mixer_kernel_size=5,
         patch_len=patch_len,
         stride=stride,
+        dropout=0.1,
         f_out=256,
         head_hidden=256,
 
@@ -1271,10 +1988,8 @@ def _run_patchmixer(
         expander_season_period=int(season_period),
         expander_n_harmonics=min(int(season_period) // 2, 24),
 
-        out_mul=int(out_mul),
-        dist_name=dist_name,
-        param_names=param_names,
-        quantiles=quantiles,
+        out_mul=1,
+        param_names=None,
 
         head_dropout=0.02,
         learn_output_scale=True,
@@ -1282,11 +1997,13 @@ def _run_patchmixer(
         past_exo_mode="z_gate",
     )
     if architecture_override:
-        pm_kwargs.update({key: value for key, value in dict(architecture_override).items() if value is not None})
+        exogenous_kwargs.update(
+            {key: value for key, value in dict(architecture_override).items() if value is not None}
+        )
 
     _fcb = future_exo_cb if use_exogenous_mode else None
     if use_exogenous_mode:
-        pm_kwargs.update(
+        exogenous_kwargs.update(
             dict(
                 past_exo_cont_dim=int(past_cont_dim),
                 past_exo_cat_dim=int(past_cat_dim),
@@ -1297,23 +2014,67 @@ def _run_patchmixer(
         )
     else:
         # exo OFF 불변식
-        pm_kwargs.update(dict(future_exo_dim = 0,
-                              past_exo_cont_dim=0,
-                              past_exo_cat_dim=0,
-                              past_exo_cat_vocab_sizes=(),
-                              past_exo_cat_embed_dims=()))
+        exogenous_kwargs.update(dict(future_exo_dim=0,
+                                     past_exo_cont_dim=0,
+                                     past_exo_cat_dim=0,
+                                     past_exo_cat_vocab_sizes=(),
+                                     past_exo_cat_embed_dims=()))
 
-    print(f"[PatchMixer][EXO] use_exo={use_exogenous_mode} future_exo_dim={pm_kwargs.get('future_exo_dim')} "
-          f"past_exo_cont_dim={pm_kwargs.get('past_exo_cont_dim')} future_cb={_fcb is not None} "
-          f"past_exo_cat_dim={pm_kwargs.get('past_exo_cat_dim')}")
-    if run_base:
-        pm_base_cfg = PatchMixerConfig(**pm_kwargs)
-        pm_base_cfg.loss = loss_point_obj
-        pm_base_model = build_patch_mixer(pm_base_cfg)
+    print(f"[PatchMixer][EXO] use_exo={use_exogenous_mode} future_exo_dim={exogenous_kwargs.get('future_exo_dim')} "
+          f"past_exo_cont_dim={exogenous_kwargs.get('past_exo_cont_dim')} future_cb={_fcb is not None} "
+          f"past_exo_cat_dim={exogenous_kwargs.get('past_exo_cat_dim')}")
 
-        print(f"PatchMixer ({freq.capitalize()}) mode={mode}")
-        best_pm_base = train_patchmixer(
-            pm_base_model,
+    if run_endogenous:
+        endogenous_source = dict(exogenous_kwargs)
+        if architecture_override:
+            endogenous_source.update(dict(architecture_override))
+        pm_cfg = PatchMixerConfig.from_config(endogenous_source)
+        pm_model = build_patch_mixer(pm_cfg)
+        endogenous_train_cfg = replace(point_train_cfg, use_exogenous_mode=False)
+
+        print(f"PatchMixer ({freq.capitalize()}) mode=point")
+        best_pm = train_patchmixer(
+            pm_model,
+            train_loader,
+            val_loader,
+            device=device,
+            train_cfg=endogenous_train_cfg,
+            stages=list(stages),
+            future_exo_cb=None,
+        )
+        if save_root:
+            ckpt_path = _make_ckpt_path(save_root, freq, "PatchMixer", lookback, horizon)
+            save_model(
+                pm_model,
+                pm_cfg,
+                ckpt_path,
+                extra_meta={
+                    "model_key": "patchmixer",
+                    "family_key": "patchmixer",
+                    **_training_checkpoint_meta(
+                        endogenous_train_cfg,
+                        stages,
+                        best_pm,
+                    ),
+                },
+            )
+            best_pm["ckpt_path"] = str(ckpt_path)
+        _store_result(
+            results,
+            result_name="PatchMixer",
+            best=best_pm,
+            model_key="patchmixer",
+            family_key="patchmixer",
+        )
+
+    if run_exogenous:
+        pm_exo_cfg = PatchMixerExogenousConfig(**exogenous_kwargs)
+        pm_exo_cfg.loss = loss_point_obj
+        pm_exo_model = build_patch_mixer_exogenous(pm_exo_cfg)
+
+        print(f"PatchMixer Exogenous ({freq.capitalize()}) mode=point")
+        best_pm_exo = train_patchmixer(
+            pm_exo_model,
             train_loader,
             val_loader,
             device=device,
@@ -1322,51 +2083,37 @@ def _run_patchmixer(
             future_exo_cb=_fcb,
         )
         if save_root:
-            ckpt_path = _make_ckpt_path(save_root, freq, "PatchMixer", lookback, horizon)
+            ckpt_path = _make_ckpt_path(save_root, freq, "PatchMixerExogenous", lookback, horizon)
             save_model(
-                pm_base_model,
-                pm_base_cfg,
+                pm_exo_model,
+                pm_exo_cfg,
                 ckpt_path,
-                extra_meta={"model_key": "patchmixer_base", "family_key": "patchmixer"},
+                extra_meta={
+                    "model_key": "patchmixer_exo",
+                    "family_key": "patchmixer",
+                    **_training_checkpoint_meta(
+                        point_train_cfg,
+                        stages,
+                        best_pm_exo,
+                    ),
+                },
+                exogenous_schema=getattr(
+                    train_loader,
+                    "exogenous_schema",
+                    None,
+                ),
+                categorical_vocabulary_artifact=getattr(
+                    train_loader,
+                    "categorical_vocabulary_artifact",
+                    None,
+                ),
             )
-            best_pm_base["ckpt_path"] = str(ckpt_path)
+            best_pm_exo["ckpt_path"] = str(ckpt_path)
         _store_result(
             results,
-            result_name="PatchMixer",
-            best=best_pm_base,
-            model_key="patchmixer_base",
-            family_key="patchmixer",
-        )
-
-    if run_quantile:
-        pm_q_cfg = PatchMixerConfig(**pm_kwargs)
-        pm_q_cfg.loss = loss_q_obj
-        pm_q_model = build_patch_mixer_quantile(pm_q_cfg)
-
-        print(f"PatchMixer Quantile ({freq.capitalize()})")
-        best_pm_q = train_patchmixer(
-            pm_q_model,
-            train_loader,
-            val_loader,
-            device=device,
-            train_cfg=quantile_train_cfg,
-            stages=list(stages),
-            future_exo_cb=_fcb,
-        )
-        if save_root:
-            ckpt_path = _make_ckpt_path(save_root, freq, "PatchMixerQuantile", lookback, horizon)
-            save_model(
-                pm_q_model,
-                pm_q_cfg,
-                ckpt_path,
-                extra_meta={"model_key": "patchmixer_quantile", "family_key": "patchmixer"},
-            )
-            best_pm_q["ckpt_path"] = str(ckpt_path)
-        _store_result(
-            results,
-            result_name="PatchMixer Quantile",
-            best=best_pm_q,
-            model_key="patchmixer_quantile",
+            result_name="PatchMixer Exogenous",
+            best=best_pm_exo,
+            model_key="patchmixer_exo",
             family_key="patchmixer",
         )
 
@@ -1376,7 +2123,11 @@ MODEL_REGISTRY: Dict[str, Callable] = {
     "titan": _run_titan,
     "patchmixer": _run_patchmixer,
     "exotst": _run_exotst,
+    "nhits": _run_nhits,
+    "timemixer": _run_timemixer,
     "timexer": _run_timexer,
+    "sellm": _run_sellm,
+    "autotimes": _run_autotimes,
 }
 
 
@@ -1464,6 +2215,7 @@ def run_total_train(
     # PatchTST SSL
     use_ssl_mode: SSLMode = "sl_only",
     ssl_pretrain_epochs: int = 10,
+    ssl_pretrain_stride: Optional[int] = None,
     ssl_mask_ratio: float = 0.3,
     ssl_loss_type: str = "mse",
     ssl_freeze_encoder_before_ft: bool = False,
@@ -1472,6 +2224,14 @@ def run_total_train(
     # weights policy
     use_intermittent: bool = True,
     val_use_weights: bool = True,
+    training_mode: Literal["qualification", "production_refit"] = "qualification",
+    random_seed: Optional[int] = None,
+    weight_decay: Optional[float] = None,
+    lr_scheduler: Optional[Literal["cosine", "constant"]] = None,
+    t_max: Optional[int] = None,
+    use_amp: Optional[bool] = None,
+    amp_dtype: Optional[Literal["bf16", "fp16", "fp32"]] = None,
+    max_grad_norm: Optional[float] = None,
 ) -> Dict[str, Dict]:
     """
     Unified training entrypoint.
@@ -1487,8 +2247,32 @@ def run_total_train(
 
     selected_artifact_keys = _resolve_requested_artifact_keys(models_to_run)
     selected_families = ordered_training_families_for_targets(selected_artifact_keys)
+    if training_mode not in {"qualification", "production_refit"}:
+        raise ValueError(f"Unsupported training_mode: {training_mode!r}.")
+    if training_mode == "production_refit":
+        if val_loader is not None:
+            raise ValueError("production_refit requires val_loader=None.")
+        if (
+            len(selected_artifact_keys) != 1
+            or selected_artifact_keys[0] not in PRODUCTION_REFIT_ARTIFACT_KEYS
+        ):
+            supported = ", ".join(PRODUCTION_REFIT_ARTIFACT_KEYS)
+            raise ValueError(
+                "production_refit supports exactly one approved artifact: "
+                f"{supported}."
+            )
+
     use_ssl_mode = _validate_ssl_mode(use_ssl_mode)
     if use_ssl_mode in ("ssl_only", "full"):
+        if int(ssl_pretrain_epochs) <= 0:
+            raise ValueError("ssl_pretrain_epochs must be positive.")
+        if (
+            ssl_pretrain_stride is not None
+            and int(ssl_pretrain_stride) <= 0
+        ):
+            raise ValueError("ssl_pretrain_stride must be positive.")
+        if not 0.0 < float(ssl_mask_ratio) <= 1.0:
+            raise ValueError("ssl_mask_ratio must be in (0, 1].")
         if "patchtst" not in selected_families:
             requested = ", ".join(selected_artifact_keys)
             raise ValueError(
@@ -1516,6 +2300,14 @@ def run_total_train(
         loss_point=loss_point,
         loss_quantile=loss_quantile,
         use_exogenous_mode=bool(use_exogenous_mode),
+        training_mode=training_mode,
+        random_seed=random_seed,
+        weight_decay=weight_decay,
+        lr_scheduler=lr_scheduler,
+        t_max=t_max,
+        use_amp=use_amp,
+        amp_dtype=amp_dtype,
+        max_grad_norm=max_grad_norm,
         quantiles=(0.1, 0.5, 0.9),
         use_intermittent=bool(use_intermittent),
         val_use_weights=bool(val_use_weights),
@@ -1579,6 +2371,7 @@ def run_total_train(
                     stride=freq_spec.stride,
                     use_ssl_mode=use_ssl_mode,
                     ssl_pretrain_epochs=ssl_pretrain_epochs,
+                    ssl_pretrain_stride=ssl_pretrain_stride,
                     ssl_mask_ratio=ssl_mask_ratio,
                     ssl_loss_type=ssl_loss_type,
                     ssl_freeze_encoder_before_ft=ssl_freeze_encoder_before_ft,
@@ -1602,6 +2395,10 @@ def run_total_train(
         elif m == "timexer":
             # TimeXer v1 intentionally ignores the library's future-exo fallback callback.
             kwargs.update(dict(patch_len=freq_spec.patch_len, exo_dim=0, future_exo_cb=None))
+        elif m == "sellm":
+            kwargs.update(dict(patch_len=freq_spec.patch_len))
+        elif m == "autotimes":
+            kwargs.update(dict(patch_len=freq_spec.patch_len))
 
         MODEL_REGISTRY[m](**kwargs)
         gc.collect()
@@ -1640,6 +2437,7 @@ def run_total_train_weekly(
     loss: Optional[nn.Module] = None,
     use_ssl_mode: SSLMode = "sl_only",
     ssl_pretrain_epochs: int = 10,
+    ssl_pretrain_stride: Optional[int] = None,
     ssl_mask_ratio: float = 0.3,
     ssl_loss_type: str = "mse",
     ssl_freeze_encoder_before_ft: bool = False,
@@ -1668,6 +2466,7 @@ def run_total_train_weekly(
         loss=loss,
         use_ssl_mode=use_ssl_mode,
         ssl_pretrain_epochs=ssl_pretrain_epochs,
+        ssl_pretrain_stride=ssl_pretrain_stride,
         ssl_mask_ratio=ssl_mask_ratio,
         ssl_loss_type=ssl_loss_type,
         ssl_freeze_encoder_before_ft=ssl_freeze_encoder_before_ft,
@@ -1698,6 +2497,7 @@ def run_total_train_monthly(
     loss: Optional[nn.Module] = None,
     use_ssl_mode: SSLMode = "sl_only",
     ssl_pretrain_epochs: int = 2,
+    ssl_pretrain_stride: Optional[int] = None,
     ssl_mask_ratio: float = 0.3,
     ssl_loss_type: str = "mse",
     ssl_freeze_encoder_before_ft: bool = False,
@@ -1726,6 +2526,7 @@ def run_total_train_monthly(
         loss=loss,
         use_ssl_mode=use_ssl_mode,
         ssl_pretrain_epochs=ssl_pretrain_epochs,
+        ssl_pretrain_stride=ssl_pretrain_stride,
         ssl_mask_ratio=ssl_mask_ratio,
         ssl_loss_type=ssl_loss_type,
         ssl_freeze_encoder_before_ft=ssl_freeze_encoder_before_ft,
@@ -1756,6 +2557,7 @@ def run_total_train_daily(
     loss: Optional[nn.Module] = None,
     use_ssl_mode: SSLMode = "sl_only",
     ssl_pretrain_epochs: int = 10,
+    ssl_pretrain_stride: Optional[int] = None,
     ssl_mask_ratio: float = 0.3,
     ssl_loss_type: str = "mse",
     ssl_freeze_encoder_before_ft: bool = False,
@@ -1784,6 +2586,7 @@ def run_total_train_daily(
         loss=loss,
         use_ssl_mode=use_ssl_mode,
         ssl_pretrain_epochs=ssl_pretrain_epochs,
+        ssl_pretrain_stride=ssl_pretrain_stride,
         ssl_mask_ratio=ssl_mask_ratio,
         ssl_loss_type=ssl_loss_type,
         ssl_freeze_encoder_before_ft=ssl_freeze_encoder_before_ft,
@@ -1814,6 +2617,7 @@ def run_total_train_hourly(
     loss: Optional[nn.Module] = None,
     use_ssl_mode: SSLMode = "sl_only",
     ssl_pretrain_epochs: int = 10,
+    ssl_pretrain_stride: Optional[int] = None,
     ssl_mask_ratio: float = 0.3,
     ssl_loss_type: str = "mse",
     ssl_freeze_encoder_before_ft: bool = False,
@@ -1842,6 +2646,7 @@ def run_total_train_hourly(
         loss=loss,
         use_ssl_mode=use_ssl_mode,
         ssl_pretrain_epochs=ssl_pretrain_epochs,
+        ssl_pretrain_stride=ssl_pretrain_stride,
         ssl_mask_ratio=ssl_mask_ratio,
         ssl_loss_type=ssl_loss_type,
         ssl_freeze_encoder_before_ft=ssl_freeze_encoder_before_ft,

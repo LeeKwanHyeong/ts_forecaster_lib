@@ -10,6 +10,8 @@ import torch
 from dataclasses import asdict, is_dataclass
 
 from modeling_module.models.PatchMixer.common.configs import (
+    PatchMixerConfig,
+    PatchMixerExogenousConfig,
     PatchMixerConfigMonthly,
     PatchMixerConfigWeekly,
 )
@@ -20,8 +22,16 @@ from modeling_module.models.PatchTST.common.configs import (
     AttentionConfig,
 )
 from modeling_module.models.TimeXer.configs import TimeXerConfig
+from modeling_module.models.TimeMixer.configs import TimeMixerConfig
+from modeling_module.models.NHITS.configs import NHITSConfig
 from modeling_module.models.Titan.common.configs import TitanConfig
 from modeling_module.training.config import DecompositionConfig
+from modeling_module.data_loader.categorical_vocabulary import (
+    CategoricalVocabularyArtifact,
+)
+from modeling_module.data_loader.exogenous_contracts import (
+    ExogenousFeatureSchema,
+)
 
 
 # ------------------------------------------------------------------
@@ -46,12 +56,28 @@ def _rebuild_patchmixer_weekly(cfgd: dict):
     return PatchMixerConfigWeekly(**cfgd)
 
 
+def _rebuild_patchmixer_original(cfgd: dict):
+    return PatchMixerConfig.from_config(cfgd)
+
+
+def _rebuild_patchmixer_exogenous(cfgd: dict):
+    return PatchMixerExogenousConfig(**cfgd)
+
+
 def _rebuild_titan(cfgd: dict):
     return TitanConfig(**cfgd)
 
 
 def _rebuild_timexer(cfgd: dict):
     return TimeXerConfig(**cfgd)
+
+
+def _rebuild_nhits(cfgd: dict):
+    return NHITSConfig(**cfgd)
+
+
+def _rebuild_timemixer(cfgd: dict):
+    return TimeMixerConfig(**cfgd)
 
 
 _REBUILDERS_BY_CLS = {
@@ -61,10 +87,14 @@ _REBUILDERS_BY_CLS = {
     # PatchMixer
     "PatchMixerConfigMonthly": _rebuild_patchmixer_monthly,
     "PatchMixerConfigWeekly": _rebuild_patchmixer_weekly,
+    "PatchMixerExogenousConfig": _rebuild_patchmixer_exogenous,
+    "PatchMixerOriginalConfig": _rebuild_patchmixer_original,
     # Titan
     "TitanConfig": _rebuild_titan,
     # TimeXer
     "TimeXerConfig": _rebuild_timexer,
+    "NHITSConfig": _rebuild_nhits,
+    "TimeMixerConfig": _rebuild_timemixer,
 }
 
 # -----------------------------
@@ -377,11 +407,120 @@ def _build_output_spec(model: torch.nn.Module, cfg: Any) -> dict[str, Any]:
     return _sanitize(spec)
 
 
+def _coerce_exogenous_schema(
+    value: ExogenousFeatureSchema | Mapping[str, Any] | None,
+) -> ExogenousFeatureSchema | None:
+    if value is None:
+        return None
+    if isinstance(value, ExogenousFeatureSchema):
+        return value
+    if isinstance(value, Mapping):
+        return ExogenousFeatureSchema.from_dict(value)
+    raise TypeError(
+        "exogenous_schema must be an ExogenousFeatureSchema, mapping, or None."
+    )
+
+
+def _coerce_categorical_vocabulary_artifact(
+    value: CategoricalVocabularyArtifact | Mapping[str, Any] | None,
+) -> CategoricalVocabularyArtifact | None:
+    if value is None:
+        return None
+    if isinstance(value, CategoricalVocabularyArtifact):
+        return value
+    if isinstance(value, Mapping):
+        return CategoricalVocabularyArtifact.from_dict(value)
+    raise TypeError(
+        "categorical_vocabulary_artifact must be a "
+        "CategoricalVocabularyArtifact, mapping, or None."
+    )
+
+
+def _build_checkpoint_data_artifacts(
+    *,
+    exogenous_schema: ExogenousFeatureSchema | Mapping[str, Any] | None,
+    categorical_vocabulary_artifact: (
+        CategoricalVocabularyArtifact | Mapping[str, Any] | None
+    ),
+) -> dict[str, Any] | None:
+    schema = _coerce_exogenous_schema(exogenous_schema)
+    vocabulary = _coerce_categorical_vocabulary_artifact(
+        categorical_vocabulary_artifact
+    )
+    if schema is None and vocabulary is None:
+        return None
+    if vocabulary is not None:
+        if schema is None:
+            raise ValueError(
+                "A categorical vocabulary checkpoint artifact requires an "
+                "exogenous schema."
+            )
+        schema = vocabulary.bind_schema(schema)
+    return {
+        "version": 1,
+        "exogenous_schema": None if schema is None else schema.to_dict(),
+        "categorical_vocabulary": (
+            None if vocabulary is None else vocabulary.to_dict()
+        ),
+        "categorical_vocabulary_fingerprint": (
+            None if vocabulary is None else vocabulary.fingerprint
+        ),
+    }
+
+
+def _extract_checkpoint_data_artifacts(
+    checkpoint: Mapping[str, Any],
+) -> tuple[
+    ExogenousFeatureSchema | None,
+    CategoricalVocabularyArtifact | None,
+]:
+    payload = checkpoint.get("data_artifacts")
+    if payload is None:
+        return None, None
+    if not isinstance(payload, Mapping):
+        raise TypeError("Checkpoint data_artifacts must be a mapping.")
+    if int(payload.get("version", 0)) != 1:
+        raise ValueError(
+            "Unsupported checkpoint data_artifacts version: "
+            f"{payload.get('version')!r}."
+        )
+
+    schema = _coerce_exogenous_schema(payload.get("exogenous_schema"))
+    vocabulary = _coerce_categorical_vocabulary_artifact(
+        payload.get("categorical_vocabulary")
+    )
+    saved_fingerprint = payload.get(
+        "categorical_vocabulary_fingerprint"
+    )
+    if vocabulary is None:
+        if saved_fingerprint is not None:
+            raise ValueError(
+                "Checkpoint contains a categorical vocabulary fingerprint "
+                "without a vocabulary artifact."
+            )
+        return schema, None
+    if schema is None:
+        raise ValueError(
+            "Checkpoint categorical vocabulary is missing its exogenous schema."
+        )
+    if saved_fingerprint != vocabulary.fingerprint:
+        raise ValueError(
+            "Checkpoint categorical vocabulary fingerprint mismatch."
+        )
+    return vocabulary.bind_schema(schema), vocabulary
+
+
 def build_checkpoint_payload(
     model,
     cfg,
     *,
     extra_meta: Optional[Mapping[str, Any]] = None,
+    exogenous_schema: (
+        ExogenousFeatureSchema | Mapping[str, Any] | None
+    ) = None,
+    categorical_vocabulary_artifact: (
+        CategoricalVocabularyArtifact | Mapping[str, Any] | None
+    ) = None,
 ) -> dict[str, Any]:
     cfg_state, cfg_cls = _cfg_to_primitive_state(cfg)
 
@@ -390,10 +529,24 @@ def build_checkpoint_payload(
         "torch_version": torch.__version__,
         "saved_at": datetime.now(timezone.utc).isoformat(),
     }
+    for attr in (
+        "architecture_variant",
+        "token_len",
+        "output_head_mode",
+        "output_calibration_mode",
+        "output_calibration_scale",
+        "output_calibration_source_fingerprint",
+        "exogenous_fusion_strategy",
+        "upstream_repository",
+        "upstream_commit",
+    ):
+        value = getattr(model, attr, None)
+        if value is not None:
+            meta[attr] = _sanitize(value)
     if extra_meta:
         meta.update(_sanitize(dict(extra_meta)))
 
-    return {
+    payload = {
         "format_version": CHECKPOINT_FORMAT_VERSION,
         "config": cfg_state,
         "cfg_state": cfg_state,
@@ -403,13 +556,38 @@ def build_checkpoint_payload(
         "state_dict": model.state_dict(),
         "meta": meta,
     }
+    data_artifacts = _build_checkpoint_data_artifacts(
+        exogenous_schema=exogenous_schema,
+        categorical_vocabulary_artifact=categorical_vocabulary_artifact,
+    )
+    if data_artifacts is not None:
+        payload["data_artifacts"] = data_artifacts
+    return payload
 
 
-def save_model(model, cfg, path: str, *, extra_meta: Optional[Mapping[str, Any]] = None):
+def save_model(
+    model,
+    cfg,
+    path: str,
+    *,
+    extra_meta: Optional[Mapping[str, Any]] = None,
+    exogenous_schema: (
+        ExogenousFeatureSchema | Mapping[str, Any] | None
+    ) = None,
+    categorical_vocabulary_artifact: (
+        CategoricalVocabularyArtifact | Mapping[str, Any] | None
+    ) = None,
+):
     """
     안전한 단일 모델 저장.
     """
-    ckpt = build_checkpoint_payload(model, cfg, extra_meta=extra_meta)
+    ckpt = build_checkpoint_payload(
+        model,
+        cfg,
+        extra_meta=extra_meta,
+        exogenous_schema=exogenous_schema,
+        categorical_vocabulary_artifact=categorical_vocabulary_artifact,
+    )
 
     path_obj = Path(path)
     path_obj.parent.mkdir(parents=True, exist_ok=True)
@@ -522,13 +700,19 @@ def _canonical_model_key(name: str) -> str:
 
     # 이미 builders가 snake_case로 들어오는 경우
     if sl in {
-        "patchmixer_base", "patchmixer_quantile", "patchmixer_dist"
+        "patchmixer_base", "patchmixer_exogenous", "patchmixer_original",
+        "patchmixer_quantile", "patchmixer_quantile_exogenous", "patchmixer_dist",
         "titan_base", "titan_lmm", "titan_seq2seq",
-        "patchtst_base", "patchtst_quantile", 'exotst_base', 'timexer_base'
+        "patchtst_base", "patchtst_exogenous", "patchtst_quantile",
+        "patchtst_quantile_exogenous", "exotst_base", "timexer_base",
     }:
         return sl
 
     # 클래스/별칭 정규화
+    if "patchtst" in sl and "quant" in sl and ("exogenous" in sl or "exo" in sl):
+        return "patchtst_quantile_exogenous"
+    if "patchtst" in sl and ("exogenous" in sl or "exo" in sl):
+        return "patchtst_exogenous"
     if "patchtst" in sl and "quant" in sl:
         return "patchtst_quantile"
     if "patchtst" in sl and ("base" in sl or "point" in sl):
@@ -536,6 +720,12 @@ def _canonical_model_key(name: str) -> str:
     if "patchtst" in sl and "dist" in sl:
         return "patchtst_dist"
 
+    if "patchmixer" in sl and ("original" in sl or "canonical" in sl or "upstream" in sl):
+        return "patchmixer_original"
+    if "patchmixer" in sl and "quant" in sl and ("exogenous" in sl or "exo" in sl):
+        return "patchmixer_quantile_exogenous"
+    if "patchmixer" in sl and ("exogenous" in sl or "exo" in sl):
+        return "patchmixer_exogenous"
     if "patchmixer" in sl and "quant" in sl:
         return "patchmixer_quantile"
     if "patchmixer" in sl:
@@ -861,6 +1051,16 @@ def _extract_cfg_obj(ckpt: dict) -> Any:
     cfg_cls = ckpt.get("cfg_cls", None)
     if cfg_state is not None and cfg_cls is not None:
         prepared_cfg_state = _prepare_config_for_restore(ckpt, cfg_state)
+        if cfg_cls == "PatchMixerConfig":
+            try:
+                from modeling_module.models.registry import infer_artifact_model_key_from_checkpoint
+
+                model_key = infer_artifact_model_key_from_checkpoint(ckpt)
+            except ValueError:
+                model_key = None
+            if model_key == "patchmixer":
+                return _rebuild_patchmixer_original(prepared_cfg_state)
+            return _rebuild_patchmixer_exogenous(prepared_cfg_state)
         rb = _REBUILDERS_BY_CLS.get(cfg_cls, None)
         if rb is not None:
             return rb(prepared_cfg_state)
@@ -1003,6 +1203,30 @@ def load_model_dict(
                 print(f"[warn][{selected_key}] skipped shape-mismatch keys (sample):")
                 for sk in skipped[:10]:
                     print("  -", sk)
+
+        exogenous_schema, categorical_vocabulary = (
+            _extract_checkpoint_data_artifacts(ckpt)
+        )
+        if exogenous_schema is not None:
+            configured_cardinalities = tuple(
+                getattr(model, "future_exo_cat_cardinalities", ())
+            )
+            if (
+                configured_cardinalities
+                != exogenous_schema.future_cat_cardinalities
+            ):
+                raise ValueError(
+                    "Checkpoint future categorical cardinalities do not "
+                    "match the restored model config."
+                )
+            model.exogenous_schema = exogenous_schema
+        if categorical_vocabulary is not None:
+            model.categorical_vocabulary_artifact = (
+                categorical_vocabulary
+            )
+            model.categorical_vocabulary_fingerprint = (
+                categorical_vocabulary.fingerprint
+            )
 
         model.to(device).eval()
         models[selected_key] = model

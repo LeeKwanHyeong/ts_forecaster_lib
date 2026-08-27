@@ -58,6 +58,62 @@ def _validate_future_exo_contract(
         )
 
 
+def _validate_past_exo_contract(
+    past_exo_cont: Optional[torch.Tensor],
+    *,
+    batch_size: int,
+    lookback: int,
+    expected_dim: int,
+) -> None:
+    expected_dim = int(expected_dim)
+    if past_exo_cont is None:
+        if expected_dim > 0:
+            raise RuntimeError(
+                f"[ExoTST] past_exo_cont is required when configured past width={expected_dim}; "
+                f"expected shape ({batch_size}, {lookback}, {expected_dim})."
+            )
+        return
+    if not torch.is_tensor(past_exo_cont):
+        raise RuntimeError(
+            "[ExoTST] past_exo_cont must be a tensor with rank-3 [B,L,E], "
+            f"got {type(past_exo_cont).__name__}."
+        )
+    if expected_dim <= 0:
+        if past_exo_cont.numel() > 0:
+            raise RuntimeError(
+                "[ExoTST] past_exo_cont is not accepted when configured past width=0; "
+                f"got non-empty shape {tuple(past_exo_cont.shape)}."
+            )
+        return
+    if past_exo_cont.dim() != 3:
+        raise RuntimeError(
+            "[ExoTST] past_exo_cont must be rank-3 [B,L,E], "
+            f"got shape {tuple(past_exo_cont.shape)}."
+        )
+
+    actual_batch, actual_lookback, actual_dim = past_exo_cont.shape
+    if actual_batch != batch_size:
+        raise RuntimeError(
+            f"[ExoTST] past_exo_cont batch mismatch: got {actual_batch}, expected {batch_size}."
+        )
+    if actual_lookback != lookback:
+        raise RuntimeError(
+            f"[ExoTST] past_exo_cont lookback mismatch: got {actual_lookback}, expected {lookback}."
+        )
+    if actual_dim != expected_dim:
+        raise RuntimeError(
+            f"[ExoTST] past_exo_cont last dimension mismatch: got {actual_dim}, expected {expected_dim}."
+        )
+
+
+def _has_nonempty_features(value) -> bool:
+    if value is None:
+        return False
+    if torch.is_tensor(value):
+        return value.numel() > 0 and (value.ndim == 0 or int(value.shape[-1]) > 0)
+    return True
+
+
 def _nan_policy_apply(x: torch.Tensor, policy: str) -> torch.Tensor:
     """
     x: (B, T, E)
@@ -306,19 +362,29 @@ class ExoTST(nn.Module):
                 raise RuntimeError(f"[ExoTST] {name} has NaN/Inf: shape={tuple(t.shape)}")
 
         _assert_finite("x", x)
-        _assert_finite("past_exo_cont", past_exo_cont)
         if x.dim() != 3:
             raise ValueError("ExoTST expects x shape (B, L, Cy)")
 
         b, L, cy = x.shape
+        expected_past_dim = int(self.cfg.exo_dim_past) if bool(self.cfg.use_past_exo) else 0
         expected_future_dim = int(self.cfg.exo_dim_future) if bool(self.cfg.use_future_exo) else 0
+        _validate_past_exo_contract(
+            past_exo_cont,
+            batch_size=b,
+            lookback=self.lookback,
+            expected_dim=expected_past_dim,
+        )
         _validate_future_exo_contract(
             future_exo,
             batch_size=b,
             horizon=self.horizon,
             expected_dim=expected_future_dim,
         )
-        _assert_finite("future_exo", future_exo)
+        if _has_nonempty_features(past_exo_cat):
+            raise RuntimeError(
+                "[ExoTST] categorical past exogenous inputs are not supported; "
+                "encode them as continuous features."
+            )
         if self.cfg.strict_shape:
             if L != self.lookback:
                 raise ValueError(f"lookback mismatch: got L={L}, expected {self.lookback}")
@@ -348,6 +414,7 @@ class ExoTST(nn.Module):
             if past_exo_cont is None or past_exo_cont.shape[-1] == 0:
                 raise RuntimeError("[ExoTST] use_past_exo=True but past_exo_cont is None or dim==0")
             xp = _nan_policy_apply(past_exo_cont, self.cfg.exo_nan_policy)  # (B,L,E')  E' = E or 2E
+            _assert_finite("normalized past_exo_cont", xp)
         else:
             xp = None
 
@@ -355,6 +422,7 @@ class ExoTST(nn.Module):
             if future_exo is None or future_exo.shape[-1] == 0:
                 raise RuntimeError("[ExoTST] use_future_exo=True but future_exo is None or dim==0")
             xf = _nan_policy_apply(future_exo, self.cfg.exo_nan_policy)  # (B,H,E')
+            _assert_finite("normalized future_exo", xf)
         else:
             xf = None
 

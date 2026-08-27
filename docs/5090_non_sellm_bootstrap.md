@@ -10,6 +10,8 @@
 - PyTorch: `2.11.0+cu130`
 - CUDA runtime: `13.0`
 - GPU: `NVIDIA GeForce RTX 5090`, capability `(12, 0)`, `sm_120`
+- cu13 dynamic libraries:
+  `/opt/miniconda3/envs/ai_env/lib/python3.12/site-packages/nvidia/cu13/lib`
 - venv overlay: `scikit-learn==1.7.2`의 CPython 3.12 manylinux wheel과 고정 SHA-256
 - private wheel: `1private-cp312-none-any`, 승인된 clean Git commit provenance 필수
 
@@ -22,6 +24,18 @@ Bootstrap은 `--system-site-packages` venv를 새로 만들고, 충돌하는 sci
 그 패키지들의 물리적 부재까지 보장하지는 않습니다. 대신 private wheel의 member/metadata/registry에
 SELLM이 없고, bootstrap smoke 중 해당 dependency들이 import되지 않았음을 검증합니다. 완전한
 dependency 물리 격리는 CUDA/PyTorch까지 독립 설치하는 별도 환경 사양이 필요합니다.
+
+`StudentT` loss의 `torch.lgamma`처럼 NVRTC kernel을 사용하는 경로는 cu13 builtins를 동적
+loader가 찾을 수 있어야 합니다. 서비스, benchmark, bootstrap 검증 프로세스에는 다음 환경을
+전달해야 합니다.
+
+```bash
+NVIDIA_CU13_LIB=/opt/miniconda3/envs/ai_env/lib/python3.12/site-packages/nvidia/cu13/lib
+export LD_LIBRARY_PATH="$NVIDIA_CU13_LIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+```
+
+이 경로가 없으면 일반 CUDA tensor, point, Normal smoke는 통과하더라도 StudentT에서
+`libnvrtc-builtins.so.13.0` 로드 오류가 발생할 수 있습니다.
 
 ## 준비
 

@@ -54,3 +54,13 @@ def test_pyproject_declares_dev_and_notebook_extras():
     assert requirements_dev_names == dev_dependency_names
     assert "jupyterlab" in optional["notebook"]
     assert "ipykernel" in optional["notebook"]
+
+
+def test_timemixer_upstream_fixtures_are_explicit_package_data():
+    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    package_data = pyproject["tool"]["setuptools"]["package-data"]
+
+    assert package_data["modeling_module.models.TimeMixer"] == [
+        "LICENSE.upstream",
+        "upstream_manifest.json",
+    ]

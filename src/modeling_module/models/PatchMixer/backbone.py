@@ -2,37 +2,222 @@
 # PatchMixer Backbone
 # -------------------------
 import copy
+from typing import List, Tuple
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from modeling_module.models.PatchMixer.common.configs import PatchMixerConfig
 
-class FeatureAlign(nn.Module):
+
+def _infer_patch_cfgs(lookback: int, n_branches: int = 3) -> List[Tuple[int, int, int]]:
     """
-    입력 텐서의 차원을 동적으로 감지하여 목표 차원(out_dim)으로 투영하는 유틸리티 모듈.
+    Lookback 길이에 비례하여 결정론적(Deterministic)인 멀티스케일 패치 설정 생성.
 
     기능:
-    - 선형 레이어(Linear)를 이용한 차원 맞춤.
-    - 입력 차원이 변경될 경우 자동으로 내부 가중치를 재생성(Lazy Initialization).
+    - 입력 길이의 1/4, 1/2, 3/4 비율을 기반으로 패치 길이(Patch Len) 계산.
+    - 각 패치 길이에 적합한 Stride(P//2)와 Kernel Size(3, 5, 7) 자동 매핑.
+    - 반환 형식: List[(Patch_Len, Stride, Kernel_Size)]
     """
+    # 최소 Lookback 길이 검증
+    assert lookback >= 8
 
-    def __init__(self, out_dim: int):
+    # 비율에 따른 패치 길이 후보군 생성
+    fracs = [1 / 4, 1 / 2, 3 / 4][:n_branches]
+    raw = [max(4, min(lookback, int(round(lookback * f)))) for f in fracs]
+
+    # 중복 제거 및 정렬
+    P = sorted(list(dict.fromkeys(raw)))
+
+    cfgs: List[Tuple[int, int, int]] = []
+    for i, p in enumerate(P):
+        s = max(1, p // 2)  # Stride는 패치 길이의 절반
+        k = [3, 5, 7][min(i, 2)]  # 스케일별 커널 크기 차등 할당
+        if k % 2 == 0:
+            k += 1  # 홀수 커널 보장
+        cfgs.append((p, s, k))
+    return cfgs
+
+
+# =====================================================================
+# Canonical upstream-compatible point backbone
+# The definitions in this section remain source-equivalent to the MIT-licensed
+# implementation pinned in provenance.py.
+# =====================================================================
+class PatchMixerRevIN(nn.Module):
+    """Upstream RevIN math kept local to preserve strict output parity."""
+
+    def __init__(
+        self,
+        num_features: int,
+        eps: float = 1e-5,
+        affine: bool = True,
+        subtract_last: bool = False,
+    ) -> None:
         super().__init__()
-        self.out_dim = out_dim
-        self.fc: nn.Linear | None = None
-        self.in_dim: int | None = None
+        self.num_features = int(num_features)
+        self.eps = float(eps)
+        self.affine = bool(affine)
+        self.subtract_last = bool(subtract_last)
+        if self.affine:
+            self.affine_weight = nn.Parameter(torch.ones(self.num_features))
+            self.affine_bias = nn.Parameter(torch.zeros(self.num_features))
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        d = x.size(-1)
-        # 초기화 상태이거나 입력 차원이 달라진 경우 레이어 재생성
-        if (self.fc is None) or (self.in_dim != d):
-            self.fc = nn.Linear(d, self.out_dim, bias=True).to(x.device)
-            self.in_dim = d
-        return self.fc(x)
+    def forward(self, x: torch.Tensor, mode: str) -> torch.Tensor:
+        if mode == "norm":
+            self._get_statistics(x)
+            return self._normalize(x)
+        if mode == "denorm":
+            return self._denormalize(x)
+        raise NotImplementedError(f"RevIN mode must be 'norm' or 'denorm', got {mode!r}.")
+
+    def _get_statistics(self, x: torch.Tensor) -> None:
+        dims = tuple(range(1, x.ndim - 1))
+        if self.subtract_last:
+            self.last = x[:, -1, :].unsqueeze(1)
+        else:
+            self.mean = torch.mean(x, dim=dims, keepdim=True).detach()
+        self.stdev = torch.sqrt(
+            torch.var(x, dim=dims, keepdim=True, unbiased=False) + self.eps
+        ).detach()
+
+    def _normalize(self, x: torch.Tensor) -> torch.Tensor:
+        x = x - (self.last if self.subtract_last else self.mean)
+        x = x / self.stdev
+        if self.affine:
+            x = x * self.affine_weight
+            x = x + self.affine_bias
+        return x
+
+    def _denormalize(self, x: torch.Tensor) -> torch.Tensor:
+        if self.affine:
+            x = x - self.affine_bias
+            x = x / (self.affine_weight + self.eps * self.eps)
+        x = x * self.stdev
+        x = x + (self.last if self.subtract_last else self.mean)
+        return x
 
 
 class PatchMixerLayer(nn.Module):
+    """Upstream separable convolution over `(patch_num, d_model)`."""
+
+    def __init__(self, dim: int, a: int, kernel_size: int = 8) -> None:
+        super().__init__()
+        self.Resnet = nn.Sequential(
+            nn.Conv1d(
+                dim,
+                dim,
+                kernel_size=kernel_size,
+                groups=dim,
+                padding="same",
+            ),
+            nn.GELU(),
+            nn.BatchNorm1d(dim),
+        )
+        self.Conv_1x1 = nn.Sequential(
+            nn.Conv1d(dim, a, kernel_size=1),
+            nn.GELU(),
+            nn.BatchNorm1d(a),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = x + self.Resnet(x)
+        return self.Conv_1x1(x)
+
+
+class PatchMixerBackbone(nn.Module):
+    """Canonical single-scale, channel-independent PatchMixer point backbone."""
+
+    def __init__(self, configs: PatchMixerConfig) -> None:
+        super().__init__()
+        self.nvals = int(configs.enc_in)
+        self.lookback = int(configs.seq_len)
+        self.forecasting = int(configs.pred_len)
+        self.patch_size = int(configs.patch_len)
+        self.stride = int(configs.stride)
+        self.kernel_size = int(configs.mixer_kernel_size)
+        self.patch_num = int(
+            (self.lookback - self.patch_size) / self.stride + 1
+        ) + 1
+        self.a = self.patch_num
+        self.d_model = int(configs.d_model)
+        self.depth = int(configs.e_layers)
+
+        self.PatchMixer_blocks = nn.ModuleList(
+            [
+                PatchMixerLayer(
+                    dim=self.patch_num,
+                    a=self.a,
+                    kernel_size=self.kernel_size,
+                )
+                for _ in range(self.depth)
+            ]
+        )
+        self.padding_patch_layer = nn.ReplicationPad1d((0, self.stride))
+        self.W_P = nn.Linear(self.patch_size, self.d_model)
+        self.head0 = nn.Sequential(
+            nn.Flatten(start_dim=-2),
+            nn.Linear(self.patch_num * self.d_model, self.forecasting),
+            nn.Dropout(float(configs.head_dropout)),
+        )
+        self.head1 = nn.Sequential(
+            nn.Flatten(start_dim=-2),
+            nn.Linear(self.a * self.d_model, self.forecasting * 2),
+            nn.GELU(),
+            nn.Dropout(float(configs.head_dropout)),
+            nn.Linear(self.forecasting * 2, self.forecasting),
+            nn.Dropout(float(configs.head_dropout)),
+        )
+        self.dropout = nn.Dropout(float(configs.dropout))
+        self.revin = bool(configs.use_revin)
+        if self.revin:
+            self.revin_layer = PatchMixerRevIN(
+                self.nvals,
+                affine=bool(configs.revin_affine),
+                subtract_last=bool(configs.revin_subtract_last),
+            )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.ndim != 3:
+            raise ValueError(
+                f"PatchMixer expects [B,L,N], got shape {tuple(x.shape)}."
+            )
+        if x.shape[1] != self.lookback:
+            raise ValueError(
+                f"PatchMixer expected lookback={self.lookback}, got {x.shape[1]}."
+            )
+        if x.shape[2] != self.nvals:
+            raise ValueError(
+                f"PatchMixer expected enc_in={self.nvals}, got {x.shape[2]}."
+            )
+
+        batch_size, _, nvars = x.shape
+        if self.revin:
+            x = self.revin_layer(x, "norm")
+        x = x.permute(0, 2, 1)
+        x = self.padding_patch_layer(x)
+        x = x.unfold(
+            dimension=-1,
+            size=self.patch_size,
+            step=self.stride,
+        )
+        x = self.W_P(x)
+        x = x.reshape(batch_size * nvars, x.shape[2], x.shape[3])
+        x = self.dropout(x)
+
+        linear_forecast = self.head0(x)
+        for block in self.PatchMixer_blocks:
+            x = block(x)
+        nonlinear_forecast = self.head1(x)
+        x = linear_forecast + nonlinear_forecast
+        x = x.reshape(batch_size, nvars, -1).permute(0, 2, 1)
+        if self.revin:
+            x = self.revin_layer(x, "denorm")
+        return x
+
+
+class _PatchMixerLegacyLayer(nn.Module):
     """
     PatchMixer의 핵심 연산 블록. Depthwise Conv와 Pointwise Conv를 사용해 시간/채널 정보를 혼합.
 
@@ -97,7 +282,7 @@ class PatchMixerLayer(nn.Module):
         return x + res
 
 
-class PatchMixerBackbone(nn.Module):
+class _PatchMixerLegacyBackbone(nn.Module):
     """
     단일 스케일 PatchMixer 백본 네트워크.
 
@@ -111,7 +296,7 @@ class PatchMixerBackbone(nn.Module):
     Output: (B, Out_Dim)
     """
 
-    def __init__(self, configs, revin: bool = True, affine: bool = True, subtract_last: bool = False):
+    def __init__(self, configs):
         super().__init__()
         self.configs = configs
 
@@ -140,7 +325,7 @@ class PatchMixerBackbone(nn.Module):
 
         # 믹서 블록 스택 생성
         self.blocks = nn.ModuleList([
-            PatchMixerLayer(d_model=self.d_model, kernel_size=int(configs.mixer_kernel_size), dropout=self.dropout_rate)
+            _PatchMixerLegacyLayer(d_model=self.d_model, kernel_size=int(configs.mixer_kernel_size), dropout=self.dropout_rate)
             for _ in range(self.depth)
         ])
 
@@ -211,14 +396,14 @@ class PatchMixerBackbone(nn.Module):
         # 학습 모드 시 차원 불일치 경고 (디버깅용)
         if z.size(-1) != self.out_dim:
             if self.training:
-                print(f"[PatchMixerBackbone][warn] forward out_dim={z.size(-1)} "
+                print(f"[PatchMixerLegacyBackbone][warn] forward out_dim={z.size(-1)} "
                       f"!= declared out_dim={self.out_dim} "
                       f"(A_eff={A_eff}, A_cfg={self.patch_num})")
 
         return z
 
 
-class MultiScalePatchMixerBackbone(nn.Module):
+class _MultiScalePatchMixerLegacyBackbone(nn.Module):
     """
     멀티 스케일(Multi-scale) PatchMixer 백본.
 
@@ -238,8 +423,6 @@ class MultiScalePatchMixerBackbone(nn.Module):
             per_branch_dim: int = 128,
             fused_dim: int = 256,
             fusion: str = "concat",  # ['concat', 'gated']
-            affine: bool = True,
-            subtract_last: bool = False,
     ):
         super().__init__()
         self.fusion = fusion
@@ -253,8 +436,8 @@ class MultiScalePatchMixerBackbone(nn.Module):
             cfg.stride = int(st)
             cfg.mixer_kernel_size = int(ks)
 
-            # 개별 스케일 백본 (RevIN은 외부에서 처리 가정하에 False)
-            branch = PatchMixerBackbone(cfg, revin=False)
+            # RevIN is applied once by the parent quantile model.
+            branch = _PatchMixerLegacyBackbone(cfg)
             self.branches.append(branch)
             # 차원 통일용 투영 레이어
             self.projs.append(nn.Linear(branch.out_dim, per_branch_dim))
@@ -290,61 +473,4 @@ class MultiScalePatchMixerBackbone(nn.Module):
             S = torch.stack(reps, dim=1)  # (B, n_branch, per_branch_dim)
             z = (G.unsqueeze(-1) * S).sum(dim=1)  # 가중 합
             z = self.fuse(z)  # (B, fused_dim)
-        return z
-
-
-class PatchMixerBackboneWithPatcher(nn.Module):
-    """
-    외부 패처(External Patcher) 모듈을 사용하는 확장형 백본.
-
-    특징:
-    - 기본 Unfold 방식 대신 DynamicPatcher 등 복잡한 패치 생성기 사용 가능.
-    - 패처가 생성한 임베딩을 그대로 Mixer 블록에 전달.
-
-    입력: (B, L, N)
-    출력: (B, Out_Dim)
-    """
-
-    def __init__(self, configs, patcher: nn.Module, e_layers: int | None = None, dropout_rate: float | None = None):
-        super().__init__()
-        self.cfg = configs
-        self.patcher = patcher
-
-        # 패처에서 차원 정보 추출
-        self.a: int = int(getattr(patcher, "patch_num"))
-        self.d_model: int = int(getattr(patcher, "d_model"))
-        self.patch_repr_dim: int = self.a * self.d_model
-        self.out_dim: int = self.patch_repr_dim
-
-        self.depth = int(e_layers if e_layers is not None else configs.e_layers)
-        self.dropout_rate = float(dropout_rate if dropout_rate is not None else configs.head_dropout)
-
-        # Mixer 블록 스택
-        self.blocks = nn.ModuleList([
-            PatchMixerLayer(d_model=self.d_model, kernel_size=int(configs.mixer_kernel_size), dropout=self.dropout_rate)
-            for _ in range(self.depth)
-        ])
-        self.flatten = nn.Flatten(start_dim=-2)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        B, L, N = x.shape
-        # 1. 외부 패처 호출 (패치 생성 및 투영)
-        z = self.patcher(x)  # (B*N, A, D)
-
-        # 2. Mixer 블록 통과
-        # 주의: PatchMixerLayer는 (D, A) 순서를 기대하므로
-        # 구현에 따라 여기서 permute(0, 2, 1)이 필요할 수 있음.
-        # 현재 코드에서는 patcher 출력이 (B*N, A, D)이고
-        # PatchMixerLayer 내부 Conv1d가 (D, D, k)이므로 차원 확인 필요.
-        # 일반적인 Conv1d 입력은 (Batch, Channel, Length) -> (B*N, D, A)
-
-        # 만약 patcher가 (B*N, A, D)를 뱉는다면 아래 루프 전에 permute 필요 가능성 높음
-        z = z.permute(0, 2, 1)  # (B*N, D, A)로 변환 가정
-
-        for blk in self.blocks:
-            z = blk(z)  # (B*N, D, A)
-
-        # 3. 결과 평탄화 및 집약
-        z = self.flatten(z)  # (B*N, D*A)
-        z = z.view(B, N, -1).mean(1)  # (B, D*A) - 변수 축 평균
         return z
