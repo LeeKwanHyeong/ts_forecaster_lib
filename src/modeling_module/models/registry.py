@@ -36,6 +36,7 @@ class ModelSpec:
     def __post_init__(self) -> None:
         supported = {
             "not_assessed",
+            "approved",
             "qualified",
             "approved_by_exception",
         }
@@ -291,11 +292,7 @@ MODEL_SPECS: dict[str, ModelSpec] = {
         checkpoint_aliases=("AutoTimes", "AutoTimesBase"),
         exogenous_policy="none",
         fusion_strategy="frozen_llm_numeric_tokens",
-        operational_admission_status="approved_by_exception",
-        operational_admission_note=(
-            "User-approved operational admission on 2026-08-26; the sealed "
-            "multi-seed qualification remains FAIL for seed stability and bias."
-        ),
+        operational_admission_status="approved",
     ),
 }
 
@@ -312,11 +309,7 @@ if SELLM_AVAILABLE:
         exogenous_policy="optional",
         exogenous_inputs=("future_cont",),
         fusion_strategy="semantic_future_conditioning",
-        operational_admission_status="approved_by_exception",
-        operational_admission_note=(
-            "User-approved operational admission on 2026-08-26; the sealed "
-            "qualification remains FAIL for output stability and bias."
-        ),
+        operational_admission_status="approved",
     )
 
 

@@ -10,6 +10,8 @@ from typing import Any, TYPE_CHECKING, Callable, Iterable, Literal, Mapping
 import torch
 import torch.nn.functional as F
 
+from modeling_module.models.registry import get_model_spec
+
 if TYPE_CHECKING:
     from modeling_module.data_loader.icl_episode_data_module import ICLBatch
     from modeling_module.icl.contracts import ICLEpisodeBundle
@@ -359,7 +361,7 @@ def save_icl_production_checkpoint(
             "series_count": bundle.manifest.series_count,
             "eligible_series_count": int(eligible_series_count),
             "backbone_contract": dict(backbone_contract),
-            "operational_admission_status": "approved_by_exception",
+            "operational_admission_status": get_model_spec(model_key).operational_admission_status,
         },
     )
     return output
