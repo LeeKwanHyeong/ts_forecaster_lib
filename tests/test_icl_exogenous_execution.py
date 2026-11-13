@@ -369,6 +369,7 @@ def test_autotimes_production_refit_saves_final_epoch_contract(tmp_path: Path):
         },
     )
     payload = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    assert payload["meta"]["operational_admission_status"] == "approved"
     assert payload["meta"]["training_mode"] == "production_refit"
     assert payload["meta"]["validation_enabled"] is False
     assert payload["meta"]["state_selection"] == "final_epoch"
@@ -459,6 +460,7 @@ def test_sellm_production_refit_saves_and_restores_icl_contract(tmp_path: Path):
         },
     )
     payload = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    assert payload["meta"]["operational_admission_status"] == "approved"
     assert payload["meta"]["model_key"] == "sellm_base"
     assert payload["meta"]["training_mode"] == "production_refit"
     assert payload["meta"]["validation_enabled"] is False

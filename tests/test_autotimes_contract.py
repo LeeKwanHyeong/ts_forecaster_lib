@@ -153,12 +153,12 @@ def test_autotimes_registry_contract():
     assert spec.family == "autotimes"
     assert spec.exogenous_policy == "none"
     assert spec.fusion_strategy == "frozen_llm_numeric_tokens"
-    assert spec.operational_admission_status == "approved_by_exception"
-    assert "qualification remains FAIL" in spec.operational_admission_note
+    assert spec.operational_admission_status == "approved"
+    assert spec.operational_admission_note is None
     assert "autotimes_base" in PRODUCTION_REFIT_ARTIFACT_KEYS
     sellm = get_model_spec("sellm_base")
-    assert sellm.operational_admission_status == "approved_by_exception"
-    assert "qualification remains FAIL" in sellm.operational_admission_note
+    assert sellm.operational_admission_status == "approved"
+    assert sellm.operational_admission_note is None
 
     approval_path = Path(__file__).parents[1] / (
         "docs/ICLOperationalExceptionApproval.json"
