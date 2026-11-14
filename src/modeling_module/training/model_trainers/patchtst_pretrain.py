@@ -10,6 +10,9 @@ import torch
 from torch.utils.data import DataLoader
 
 from modeling_module.training.config import TrainingConfig, StageConfig, apply_stage
+from modeling_module.training.loss_safety import (
+    checked_loss_mean, require_finite_loss, require_nonempty_loader,
+)
 
 def _getattr(cfg, key: str, default):
     """안전한 속성 접근 유틸리티."""
@@ -41,20 +44,36 @@ def _to_device(x, device: torch.device):
     return x
 
 
+def _accumulate_mask_count(total, out):
+    mask = out.get("patch_mask") if isinstance(out, dict) else None
+    if torch.is_tensor(mask):
+        count = mask.detach().sum()
+        return count if total is None else total + count
+    return total
+
+
+def _mask_count_text(count):
+    return "unknown" if count is None else str(int(count.item()))
+
+
 @torch.no_grad()
 def _eval_pretrain(model, loader: DataLoader, device: torch.device, *, mask_ratio: float, loss_type: str) -> float:
     """
     검증 데이터셋에 대한 사전학습 손실(Reconstruction Loss) 평가.
     """
+    require_nonempty_loader(loader, context="PatchTST pretrain validation")
     model.eval()
     total_scalar = 0.0
     total_tensor = None
     n = 0
+    masked_patches = None
     for batch in loader:
         x = _to_device(_extract_x(batch), device)
         # 마스킹 비율 및 손실 함수 설정 적용
         out = model(x, mask_ratio=mask_ratio, return_loss=True, loss_type=loss_type)
         loss = out["loss"] if isinstance(out, dict) and "loss" in out else out
+        require_finite_loss(loss, context="PatchTST pretrain validation")
+        masked_patches = _accumulate_mask_count(masked_patches, out)
         if torch.is_tensor(loss):
             loss_detached = loss.detach()
             if loss_detached.numel() != 1:
@@ -63,10 +82,9 @@ def _eval_pretrain(model, loader: DataLoader, device: torch.device, *, mask_rati
         else:
             total_scalar += float(loss)
         n += 1
-    total = float(total_scalar)
-    if total_tensor is not None:
-        total += float(total_tensor.item())
-    return total / max(n, 1)
+    mean = checked_loss_mean(total_scalar, total_tensor, n, context="PatchTST pretrain validation")
+    print(f"[Pretrain validation] loss={mean:.8e} batches={n} masked_patches={_mask_count_text(masked_patches)}")
+    return mean
 
 
 def train_patchtst_pretrain(
@@ -97,6 +115,9 @@ def train_patchtst_pretrain(
     - 모델의 forward 시그니처가 `mask_ratio`, `return_loss` 인자를 지원해야 함.
     """
     assert train_cfg is not None, "train_cfg는 필수입니다."
+    require_nonempty_loader(train_loader, context="PatchTST pretrain training")
+    if val_loader is not None:
+        require_nonempty_loader(val_loader, context="PatchTST pretrain validation")
     # 기본 스테이지 설정 (없을 경우 10 에포크 단일 스테이지)
     stages = stages or [StageConfig(epochs=10)]
 
@@ -139,6 +160,7 @@ def train_patchtst_pretrain(
             running_scalar = 0.0
             running_tensor = None
             step = 0
+            masked_patches = None
 
             for batch in train_loader:
                 step += 1
@@ -152,6 +174,7 @@ def train_patchtst_pretrain(
                     with torch.amp.autocast("cuda"):
                         out = model(x, mask_ratio=mask_ratio, return_loss=True, loss_type=loss_type)
                         loss = out["loss"] if isinstance(out, dict) and "loss" in out else out
+                        require_finite_loss(loss, context="PatchTST pretrain training")
 
                     # 역전파 및 가중치 업데이트
                     scaler.scale(loss).backward()
@@ -166,6 +189,7 @@ def train_patchtst_pretrain(
                     # AMP 미사용 시 일반적인 학습 루틴
                     out = model(x, mask_ratio=mask_ratio, return_loss=True, loss_type=loss_type)
                     loss = out["loss"] if isinstance(out, dict) and "loss" in out else out
+                    require_finite_loss(loss, context="PatchTST pretrain training")
 
                     loss.backward()
 
@@ -174,6 +198,7 @@ def train_patchtst_pretrain(
 
                     optimizer.step()
 
+                masked_patches = _accumulate_mask_count(masked_patches, out)
                 if torch.is_tensor(loss):
                     loss_detached = loss.detach()
                     if loss_detached.numel() != 1:
@@ -186,17 +211,17 @@ def train_patchtst_pretrain(
                     running_total = float(running_scalar)
                     if running_tensor is not None:
                         running_total += float(running_tensor.item())
-                    print(f"[Pretrain][stage={si} ep={ep}/{epochs} step={step}] loss={running_total / step:.6f}")
+                    print(f"[Pretrain][stage={si} ep={ep}/{epochs} step={step}] loss={running_total / step:.8e}")
 
             train_total = float(running_scalar)
             if running_tensor is not None:
                 train_total += float(running_tensor.item())
-            train_loss = train_total / max(step, 1)
+            train_loss = checked_loss_mean(train_total, None, step, context="PatchTST pretrain training")
 
             # 검증 및 체크포인트 저장
             if val_loader is not None:
                 val_loss = _eval_pretrain(model, val_loader, device, mask_ratio=mask_ratio, loss_type=loss_type)
-                print(f"[Pretrain][stage={si} ep={ep}/{epochs}] train={train_loss:.6f} val={val_loss:.6f}")
+                print(f"[Pretrain][stage={si} ep={ep}/{epochs}] train={train_loss:.8e} val={val_loss:.8e} train_batches={step} masked_patches={_mask_count_text(masked_patches)}")
 
                 if val_loss < best_val:
                     best_val = val_loss
@@ -213,11 +238,11 @@ def train_patchtst_pretrain(
                             ckpt_path,
                         )
             else:
-                print(f"[Pretrain][stage={si} ep={ep}/{epochs}] train={train_loss:.6f}")
+                print(f"[Pretrain][stage={si} ep={ep}/{epochs}] train={train_loss:.8e} train_batches={step} masked_patches={_mask_count_text(masked_patches)}")
 
     # 학습 완료 후 최적 가중치 복원
     if best_state is not None:
         model.load_state_dict(best_state, strict=True)
 
-    print(f"[Pretrain] done | best_val={best_val:.6f}" if val_loader is not None else "[Pretrain] done")
+    print(f"[Pretrain] done | best_val={best_val:.8e}" if val_loader is not None else "[Pretrain] done")
     return {"model": model, "best_val": best_val if val_loader is not None else None}
