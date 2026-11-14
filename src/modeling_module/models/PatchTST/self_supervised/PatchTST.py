@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Optional, Dict, Any, Tuple
+import math
 
 import torch
 from torch import nn
@@ -11,6 +12,7 @@ from modeling_module.models.PatchTST.common.configs import PatchTSTConfig
 from modeling_module.models.common_layers.RevIN import RevIN
 
 from modeling_module.models.PatchTST.self_supervised.backbone import PatchTSTSelfSupBackbone
+from modeling_module.training.loss_safety import require_finite_loss
 
 
 def _masked_recon_loss(
@@ -28,8 +30,12 @@ def _masked_recon_loss(
         target: 원본 패치 값 [B,N,D]
         mask:   마스크 여부 [B,N] (True=손실 계산 포함)
     """
+    if pred.shape != target.shape or mask.shape != pred.shape[:2]:
+        raise ValueError("Reconstruction prediction, target and patch mask shapes must match.")
     if mask.dtype != torch.bool:
         mask = mask.bool()
+    if not bool(mask.any()):
+        raise ValueError("Reconstruction loss requires at least one masked patch.")
 
     # 마스크 차원 확장 [B,N] -> [B,N,1] (채널 D에 브로드캐스팅)
     m = mask.unsqueeze(-1)
@@ -46,7 +52,9 @@ def _masked_recon_loss(
     # 마스킹된 요소의 총 개수로 나누어 평균 손실 산출
     denom = m.sum() * pred.size(-1)
     denom = denom.clamp_min(eps)  # 0으로 나누기 방지
-    return masked.sum() / denom
+    loss = masked.sum() / denom
+    require_finite_loss(loss, context="PatchTST reconstruction")
+    return loss
 
 
 class PatchTSTPretrainModel(nn.Module):
@@ -81,7 +89,9 @@ class PatchTSTPretrainModel(nn.Module):
 
         # 정규화 모듈 (RevIN) 설정
         self.use_revin = bool(getattr(cfg, "revin", True))
-        self.revin_layer = RevIN(num_features=self.n_vars) if self.use_revin else None
+        # 학습 가능한 affine이 정답 스케일까지 축소하는 우회 경로 차단.
+        # 기존 평균 중심 정규화와 use_std 기본값은 유지.
+        self.revin_layer = RevIN(num_features=self.n_vars, affine=False) if self.use_revin else None
 
         # 사전학습용 백본 초기화
         self.backbone = PatchTSTSelfSupBackbone(cfg, attn_core=attn_core)
@@ -101,14 +111,20 @@ class PatchTSTPretrainModel(nn.Module):
         Returns:
             mask [B,N] bool (True=Masked)
         """
-        if mask_ratio <= 0.0:
-            return torch.zeros((B, N), device=device, dtype=torch.bool)
+        if not math.isfinite(mask_ratio) or not 0.0 < mask_ratio <= 1.0:
+            raise ValueError("mask_ratio must be finite and in (0, 1].")
+        if B <= 0 or N <= 0:
+            raise ValueError("Masking requires a non-empty batch and patch sequence.")
         if mask_ratio >= 1.0:
             return torch.ones((B, N), device=device, dtype=torch.bool)
 
         # 샘플별 무작위 마스킹
         rand = torch.rand((B, N), device=device)
-        return rand < mask_ratio
+        mask = rand < mask_ratio
+        # 짧은 시계열에서도 샘플별 최소 한 패치는 복원 대상으로 유지.
+        empty_rows = ~mask.any(dim=1)
+        selected = torch.nn.functional.one_hot(rand.argmin(dim=1), num_classes=N).bool()
+        return mask | (empty_rows[:, None] & selected)
 
     def forward(
             self,

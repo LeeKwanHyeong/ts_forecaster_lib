@@ -63,6 +63,9 @@ def _resolve_autocast_dtype(dtype_like, device_type: str) -> torch.dtype:
 
 from modeling_module.training.adapters import DefaultAdapter
 from modeling_module.training.model_losses.losses import LossComputer
+from modeling_module.training.loss_safety import (
+    checked_loss_mean, require_finite_loss, require_nonempty_loader,
+)
 from modeling_module.data_loader.exogenous_contracts import (
     ExogenousBatch,
     ExogenousFeatureSchema,
@@ -693,6 +696,8 @@ class CommonTrainer:
         device = self.device
         total_scalar = 0.0
         total_tensor = None
+        processed_batches = 0
+        require_nonempty_loader(loader, context="training" if train else "evaluation")
 
         # 모델 모드(학습/평가) 전환
         model.train() if train else model.eval()
@@ -729,11 +734,12 @@ class CommonTrainer:
             self._prof_simple_steps = int(_cfg_get("simple_profile_steps", 200))
             self._prof_simple_i = 0
 
-        def _finalize_epoch_total(denom: int) -> float:
-            total = float(total_scalar)
-            if total_tensor is not None:
-                total += float(total_tensor.item())
-            return total / max(1, denom)
+        def _finalize_epoch_total() -> float:
+            self.last_epoch_batches_ = processed_batches
+            return checked_loss_mean(
+                total_scalar, total_tensor, processed_batches,
+                context="training" if train else "evaluation",
+            )
 
         def _print_top_ops_with_stack(prof, *, sort_by="cpu_time_total", topk=15, stack_depth=8):
             """
@@ -790,7 +796,7 @@ class CommonTrainer:
         exogenous_schema = self._exogenous_schema_from_loader(loader)
 
         def _run_one_step(batch):
-            nonlocal total_scalar, total_tensor
+            nonlocal total_scalar, total_tensor, processed_batches
 
             t0 = time.perf_counter()
 
@@ -886,13 +892,11 @@ class CommonTrainer:
                     # self._nan_stat("reg", reg)
                     loss = loss + reg
 
+            require_finite_loss(loss, context="training" if train else "evaluation")
+
             # 5) 역전파 및 최적화 (train only)
             if train:
                 loss_t = self._to_tensor(loss, device)
-
-                if torch.isnan(loss_t):
-                    self.logger("[Warn] NaN loss. step skipped.")
-                    return
 
                 # detect_anomaly는 매우 느림. 필요 시 cfg로 켜는 것을 권장.
                 if bool(_cfg_get("detect_anomaly", False)):
@@ -931,6 +935,7 @@ class CommonTrainer:
                 total_tensor = loss_detached if total_tensor is None else total_tensor + loss_detached
             else:
                 total_scalar += float(loss)
+            processed_batches += 1
 
         # ----------------------
         # 루프 실행 (profiler on/off)
@@ -980,15 +985,14 @@ class CommonTrainer:
                 except Exception as e:
                     self.logger(f"[Profiler] summary print failed: {e}")
 
-                # 프로파일 모드에서는 epoch 전체를 다 돌지 않았으므로 len(loader) 대신 실제 step로 평균
-                denom = max(1, max_steps)
-                return _finalize_epoch_total(denom)
+                # 프로파일이 중간에 끝나도 실제 처리한 배치 수로 평균.
+                return _finalize_epoch_total()
 
             # 일반 학습/검증 (전체 epoch)
             for batch in loader:
                 _run_one_step(batch)
 
-        return _finalize_epoch_total(len(loader))
+        return _finalize_epoch_total()
 
     # ----------------- 학습 진입 -----------------
     def fit(self, model, train_loader, val_loader, *, tta_steps: int = 0):
@@ -1013,6 +1017,9 @@ class CommonTrainer:
         if not is_production_refit and val_loader is None:
             raise ValueError("qualification training requires a validation loader.")
 
+        require_nonempty_loader(train_loader, context="training")
+        if val_loader is not None:
+            require_nonempty_loader(val_loader, context="validation")
         model.to(device)
         from modeling_module.training.optim import build_optimizer_and_scheduler
 
@@ -1042,9 +1049,9 @@ class CommonTrainer:
                 self.sched.step()
                 cur_lr = self.sched.get_last_lr()[0]
                 self.logger(
-                    f"Epoch {epoch + 1}/{self.cfg.epochs} | LR {cur_lr:.6f} | "
-                    f"Train {train_loss:.6f} | Validation disabled "
-                    "(production_refit)"
+                    f"Epoch {epoch + 1}/{self.cfg.epochs} | LR {cur_lr:.8e} | "
+                    f"Train {train_loss:.8e} | Validation disabled "
+                    f"(production_refit) train_batches={getattr(self, 'last_epoch_batches_', 'unknown')}"
                 )
                 continue
 
@@ -1052,6 +1059,7 @@ class CommonTrainer:
             model.eval()
             val_total_scalar = 0.0
             val_total_tensor = None
+            val_batches = 0
             with torch.no_grad():
                 for batch in val_loader:
                     (
@@ -1103,6 +1111,7 @@ class CommonTrainer:
                                 if self.extra_loss_fn is not None:
                                     loss = loss + self.extra_loss_fn(x_val, pred, self.cfg)
                                 loss = float(loss.detach())
+                        require_finite_loss(loss, context="validation")
                         if torch.is_tensor(loss):
                             loss_detached = loss.detach()
                             if loss_detached.numel() != 1:
@@ -1132,10 +1141,12 @@ class CommonTrainer:
 
                             if self.extra_loss_fn is not None:
                                 vloss = vloss + self.extra_loss_fn(x_val, pred, self.cfg)
+                            require_finite_loss(vloss, context="validation")
                             vloss_detached = vloss.detach()
                             if vloss_detached.numel() != 1:
                                 vloss_detached = vloss_detached.float().mean()
                             val_total_tensor = vloss_detached if val_total_tensor is None else val_total_tensor + vloss_detached
+                    val_batches += 1
 
                     # 메트릭 계산 (선택 사항)
                     if self.metrics_fn:
@@ -1146,7 +1157,8 @@ class CommonTrainer:
             val_total = float(val_total_scalar)
             if val_total_tensor is not None:
                 val_total += float(val_total_tensor.item())
-            val_loss = val_total / max(1, len(val_loader))
+            val_loss = checked_loss_mean(val_total, None, val_batches, context="validation")
+            self.last_validation_batches_ = val_batches
             self.sched.step()
 
             # 3. 조기 종료(Early Stopping) 체크 및 최적 모델 저장
@@ -1161,7 +1173,8 @@ class CommonTrainer:
 
             cur_lr = self.sched.get_last_lr()[0]
             self.logger(
-                f"Epoch {epoch + 1}/{self.cfg.epochs} | LR {cur_lr:.6f} | Train {train_loss:.6f} | Val {val_loss:.6f}")
+                f"Epoch {epoch + 1}/{self.cfg.epochs} | LR {cur_lr:.8e} | Train {train_loss:.8e} | Val {val_loss:.8e} "
+                f"| train_batches={getattr(self, 'last_epoch_batches_', 'unknown')} val_batches={val_batches}")
 
         self.final_train_loss_ = final_train_loss
         self.epochs_completed_ = epochs_completed
