@@ -578,6 +578,10 @@ src/model_test/total_train/run_dsio_total_running_linux.sh \
 
 ## Tests
 
+삼성 GCS 실험의 통합 실행·FAR 평가·그래프 생성은
+[삼성 GCS v2 통합 안내](docs/SamsungGCSV2Consolidation.md)를 참고합니다.
+기존 삼성 모델을 공통 구현 위에 덮어쓰지 않고 v2 공개 API를 사용하는 경로입니다.
+
 대표 smoke test는 아래로 실행할 수 있습니다.
 
 ```bash

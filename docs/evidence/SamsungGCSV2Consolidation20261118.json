@@ -1,0 +1,46 @@
+{
+  "date": "2026-11-18",
+  "repository": "ts_forecaster_lib",
+  "target_branch": "ts_forecaster_lib_v2",
+  "target_base_commit": "391fb996168aaa0aeca4bbc514b4d4adcb4042cc",
+  "samsung_source_commit": "a09203ee83feac3785a65d97cd5069ce4610e750",
+  "integration_strategy": "selective source migration followed by an ours-strategy ancestry merge",
+  "modeling_module_tree_changed": false,
+  "pyproject_changed": false,
+  "source_worktree_preservation": {
+    "branch": "samsung_gcs",
+    "tracked_and_untracked_file_digest_sha256": "311b6c809a0e8f6132e2e9c0c762f6063fcd615bb1c186315bb8d03deeadad1f",
+    "unstaged_diff_digest_sha256": "14a00b7036773354a87774afbae46ff9c6bc87cf9e1f516908c32c21fec4fa73",
+    "staged_diff_digest_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "status_unchanged": true,
+    "file_digest_unchanged": true,
+    "unstaged_diff_unchanged": true,
+    "staged_diff_unchanged": true
+  },
+  "tests": {
+    "baseline": {"passed": 865, "skipped": 6, "subtests_passed": 46},
+    "focused_initial": {"passed": 40},
+    "final": {"passed": 903, "skipped": 6, "subtests_passed": 46},
+    "skip_reason": "NVIDIA CUDA runtime unavailable",
+    "final_command": "PYTHONPATH=src python -m pytest -q tests src/model_test/patchtst_loss_comparison/test_common.py",
+    "local_junit": "/private/tmp/ts-forecaster-v2-final-20261118.xml",
+    "sweep_cli_dry_run_count": 8,
+    "native_pretrain_finetune_smoke": "small synthetic CPU dataset, horizon 27"
+  },
+  "environment": {
+    "type": "temporary venv with system site packages; existing environments unchanged",
+    "python": "3.12.10",
+    "torch": "2.9.1",
+    "numpy": "2.1.3",
+    "polars": "1.31.0",
+    "hugging_face_offline": true
+  },
+  "not_performed": [
+    "customer dataset retraining or full load",
+    "actual LLM backbone download or qualification",
+    "CUDA training",
+    "database writes",
+    "shared runtime deployment",
+    "ReasonCast implementation"
+  ]
+}
