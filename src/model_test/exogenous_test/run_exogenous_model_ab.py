@@ -238,6 +238,8 @@ def build_parser() -> argparse.ArgumentParser:
         description="Train and compare PatchTST(no-future / token-cross-attn), TimeXer, and ExoTST on the DSIO exogenous dataset."
     )
     parser.add_argument("--artifact-root", type=Path, default=REPO_ROOT / "artifacts" / "exogenous_test")
+    parser.add_argument("--target-source", type=Path, default=TARGET_SOURCE)
+    parser.add_argument("--exo-source", type=Path)
     parser.add_argument(
         "--models",
         nargs="+",
@@ -322,15 +324,15 @@ def main() -> None:
     if args.device == "auto" and device_note:
         print("DEVICE_NOTE       :", device_note)
     print("MODELS            :", [spec.label for spec in model_specs])
-    print("TARGET_SOURCE     :", TARGET_SOURCE)
-    print("TARGET_EXO_SOURCE :", TARGET_EXO_SOURCE)
+    print("TARGET_SOURCE     :", args.target_source)
+    print("TARGET_EXO_SOURCE :", args.exo_source or TARGET_EXO_SOURCE)
     print("LOOKBACK          :", args.lookback)
     print("HORIZON           :", args.horizon)
     print("PLAN_WEEK         :", args.plan_week)
     print("SAMPLE_PART_COUNT :", args.sample_part_count)
     print("FUTURE_EXO_SOURCE :", args.future_exo_source)
 
-    target_raw = load_polars_table(TARGET_SOURCE, "tb_master_target")
+    target_raw = load_polars_table(args.target_source, "tb_master_target")
     # 전체 master target이 크기 때문에,
     # 빠른 AB 비교를 위해 eligible part 중 일부만 샘플링해서 실험할 수 있다.
     target_df = prepare_target_df(
@@ -345,7 +347,8 @@ def main() -> None:
         seed=args.seed,
     )
 
-    exo_source = resolve_exo_source(TARGET_EXO_SOURCE, EXO_SOURCE_FALLBACK)
+    # 명시한 파일이 없으면 다른 데이터로 조용히 바꾸지 않고 오류를 낸다.
+    exo_source = args.exo_source if args.exo_source is not None else resolve_exo_source(TARGET_EXO_SOURCE, EXO_SOURCE_FALLBACK)
     exo_raw = load_polars_table(exo_source, exo_source.name)
     exo_one_table = prepare_exo_one_table(
         target_df=target_df,

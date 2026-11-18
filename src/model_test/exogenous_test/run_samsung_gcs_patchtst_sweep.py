@@ -5,6 +5,7 @@ import json
 import subprocess
 import sys
 from dataclasses import asdict, dataclass
+from datetime import date
 from pathlib import Path
 from typing import Final
 
@@ -31,6 +32,10 @@ class SweepRun:
     case_name: str
     artifact_root: str
     command: tuple[str, ...]
+    architecture: str
+    batch_size: int
+    seed: int
+    plan_week: int
 
 
 ARCHITECTURE_CASES: Final[dict[str, ArchitectureCase]] = {
@@ -61,6 +66,9 @@ def build_parser() -> argparse.ArgumentParser:
         default=REPO_ROOT / "artifacts" / "samsung_gcs_patchtst_sweep",
     )
     parser.add_argument("--plan-weeks", type=int, nargs="+", required=True)
+    parser.add_argument("--target-source", type=Path)
+    parser.add_argument("--exo-source", type=Path)
+    parser.add_argument("--scope-label", default="samsung_gcs")
     parser.add_argument(
         "--architectures",
         nargs="+",
@@ -87,6 +95,16 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def build_sweep_runs(args: argparse.Namespace) -> list[SweepRun]:
+    artifact_root_base = args.artifact_root.expanduser().resolve()
+    # YYYYWW를 정수 범위로 늘리지 않고 실제 ISO 주차인지 확인한다.
+    for week in args.plan_weeks:
+        date.fromisocalendar(int(week) // 100, int(week) % 100, 1)
+    for name in ("architectures", "batch_sizes", "seeds", "plan_weeks"):
+        values = getattr(args, name)
+        if not values or len(values) != len(set(values)):
+            raise ValueError(f"{name} must be non-empty and contain no duplicates")
+    if args.lookback <= 0 or args.horizon <= 0:
+        raise ValueError("lookback and horizon must be positive")
     runs: list[SweepRun] = []
     for architecture_name in args.architectures:
         architecture = ARCHITECTURE_CASES[architecture_name]
@@ -99,7 +117,7 @@ def build_sweep_runs(args: argparse.Namespace) -> list[SweepRun]:
                         f"{architecture_name}__b{batch_size}__s{seed}"
                         f"__p{plan_week}"
                     )
-                    artifact_root = args.artifact_root / case_name
+                    artifact_root = artifact_root_base / case_name
                     command = [
                         sys.executable,
                         str(AB_RUNNER),
@@ -141,11 +159,22 @@ def build_sweep_runs(args: argparse.Namespace) -> list[SweepRun]:
                     ]
                     if args.clean_output:
                         command.append("--clean-output")
+                    for name in ("target_source", "exo_source"):
+                        source = getattr(args, name, None)
+                        if source is not None:
+                            command.extend([
+                                "--" + name.replace("_", "-"),
+                                str(Path(source).expanduser().resolve()),
+                            ])
                     runs.append(
                         SweepRun(
                             case_name=case_name,
                             artifact_root=str(artifact_root),
                             command=tuple(command),
+                            architecture=architecture_name,
+                            batch_size=batch_size,
+                            seed=seed,
+                            plan_week=plan_week,
                         )
                     )
     return runs
@@ -158,7 +187,10 @@ def write_manifest(
     args.artifact_root.mkdir(parents=True, exist_ok=True)
     manifest_path = args.artifact_root / "sweep_manifest.json"
     payload = {
-        "format_version": 1,
+        "format_version": 2,
+        "scope_label": getattr(args, "scope_label", "samsung_gcs"),
+        "lookback": args.lookback,
+        "horizon": args.horizon,
         "source_commits": list(SAMSUNG_SOURCE_COMMITS),
         "architectures": {
             name: asdict(ARCHITECTURE_CASES[name])
@@ -176,10 +208,15 @@ def write_manifest(
         ],
         "runs": [asdict(run) for run in runs],
     }
-    manifest_path.write_text(
-        json.dumps(payload, indent=2, sort_keys=True) + "\n",
-        encoding="ascii",
-    )
+    # 다른 설정의 manifest로 기존 실행 증적을 덮어쓰지 않는다.
+    if manifest_path.exists():
+        if json.loads(manifest_path.read_text(encoding="utf-8")) != json.loads(json.dumps(payload)):
+            raise FileExistsError(f"Different sweep manifest already exists: {manifest_path}")
+    else:
+        manifest_path.write_text(
+            json.dumps(payload, indent=2, sort_keys=True) + "\n",
+            encoding="ascii",
+        )
     return manifest_path
 
 

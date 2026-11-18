@@ -69,3 +69,16 @@ The following legacy behavior is intentionally excluded:
 - PDF files are marked binary through `.gitattributes`.
 - Checkpoints, benchmark output, local agent state, IDE state, archives, and OS
   metadata remain ignored.
+
+## Samsung GCS consolidation on 2026-11-18
+
+V2 remains the active development baseline. Samsung-specific plotting and
+evaluation utilities and the loss-comparison harness are selectively integrated
+without replacing V2 model implementations or public training contracts.
+The historical script name delegates to the maintained V2 sweep CLI.
+
+After validating the selectively migrated tree, an `ours` strategy merge records
+the Samsung source commit as ancestry without restoring obsolete common code.
+This does not import the dirty Samsung worktree or claim legacy runner parity.
+See `docs/SamsungGCSV2Consolidation.md` for the source mapping, exclusions,
+commands, and verification evidence.

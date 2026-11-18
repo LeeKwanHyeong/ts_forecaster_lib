@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Final
+from datetime import date
 
 import polars as pl
 
@@ -55,6 +56,29 @@ def _validate_forecast_frame(forecasts: pl.DataFrame) -> None:
     missing = sorted(_REQUIRED_COLUMNS - set(forecasts.columns))
     if missing:
         raise ValueError(f"FAR input is missing required columns: {missing}")
+    invalid_keys = forecasts.filter(
+        pl.any_horizontal([
+            pl.col(name).is_null()
+            for name in ("model_name", "part_no", "plan_week", "forecast_week")
+        ])
+        | (pl.col("model_name").str.strip_chars() == "")
+        | (pl.col("part_no").str.strip_chars() == "")
+    )
+    if invalid_keys.height:
+        raise ValueError("FAR input contains null or empty row keys")
+    invalid_values = forecasts.filter(
+        pl.col("prediction").is_null()
+        | ~pl.col("prediction").is_finite()
+        | (pl.col("prediction") < 0)
+        | (pl.col("actual").is_not_null() & (~pl.col("actual").is_finite() | (pl.col("actual") < 0)))
+    )
+    if invalid_values.height:
+        raise ValueError("FAR requires finite non-negative quantities; actual may be null")
+    for name in ("plan_week", "forecast_week"):
+        for week in forecasts.get_column(name).unique():
+            date.fromisocalendar(int(week) // 100, int(week) % 100, 1)
+    if forecasts.filter(pl.col("plan_week") > pl.col("forecast_week")).height:
+        raise ValueError("FAR plan_week must not be later than forecast_week")
     duplicate = (
         forecasts.group_by(
             ["model_name", "part_no", "plan_week", "forecast_week"]
@@ -85,10 +109,9 @@ def compute_revision_far(
         raise ValueError(
             f"FAR requires exactly {len(REVISION_WEIGHTS)} revisions."
         )
-    _validate_forecast_frame(forecasts)
-    if forecasts.is_empty():
-        return pl.DataFrame(schema=_RESULT_SCHEMA)
-
+    missing = sorted(_REQUIRED_COLUMNS - set(forecasts.columns))
+    if missing:
+        raise ValueError(f"FAR input is missing required columns: {missing}")
     normalized = forecasts.with_columns(
         pl.col("model_name").cast(pl.String),
         pl.col("part_no").cast(pl.String),
@@ -96,7 +119,14 @@ def compute_revision_far(
         pl.col("forecast_week").cast(pl.Int64),
         pl.col("prediction").cast(pl.Float64),
         pl.col("actual").cast(pl.Float64),
-    ).filter(pl.col("actual").is_not_null())
+    )
+    for name in ("plan_week", "forecast_week"):
+        if forecasts.filter(pl.col(name).cast(pl.Float64) != normalized.get_column(name).cast(pl.Float64)).height:
+            raise ValueError("FAR weeks must be integral ISO YYYYWW values")
+    _validate_forecast_frame(normalized)
+    if normalized.is_empty():
+        return pl.DataFrame(schema=_RESULT_SCHEMA)
+    normalized = normalized.filter(pl.col("actual").is_not_null())
 
     rows: list[dict[str, object]] = []
     for key, target_frame in normalized.partition_by(
@@ -111,6 +141,10 @@ def compute_revision_far(
         if len(plan_weeks) < revisions:
             continue
         selected_plan_weeks = plan_weeks[-revisions:]
+        # 연말과 53주 경계를 실제 날짜로 비교해 누락 주차를 건너뛰지 않는다.
+        dates = [date.fromisocalendar(w // 100, w % 100, 1) for w in selected_plan_weeks]
+        if any((right - left).days != 7 for left, right in zip(dates, dates[1:])):
+            continue
         weights = pl.DataFrame(
             {
                 "plan_week": selected_plan_weeks,
