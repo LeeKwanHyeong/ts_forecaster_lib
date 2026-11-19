@@ -1,0 +1,94 @@
+{
+  "date": "2026-11-18",
+  "repository": "ts_forecaster_lib",
+  "branch": "ts_forecaster_lib_v2",
+  "base_commit": "599eb8b4c76db6b4dadc59a9ec9a602759cf1243",
+  "evidence_scope": "Historical validation snapshot captured before subsequent balanced evaluation and Git publication",
+  "implementation": "independent wrapper and backbone using the official package, not a from-scratch reproduction",
+  "official_checkpoint": {
+    "model_id": "amazon/chronos-2",
+    "revision": "29ec3766d36d6f73f0696f85560a422f50e8498c",
+    "weights_bytes": 477930472,
+    "weights_sha256": "ddcda3c7508bf2528087723e98a20707cc04b7f370ae275a9fd88078ddba4f42",
+    "config_sha256": "ef1143bfdc9c0376d9a056eefca46cb4b1ec3d0ffacd541ff56feb40fb708031",
+    "verified_locally": true,
+    "weights_committed": false
+  },
+  "environment": {
+    "python": "3.12.10",
+    "torch": "2.9.1",
+    "numpy": "2.1.3",
+    "polars": "1.31.0",
+    "chronos_forecasting": "2.3.2",
+    "transformers": "4.57.6",
+    "device": "cpu",
+    "dtype": "float32",
+    "existing_environments_modified": false,
+    "inference_offline": true
+  },
+  "contract": {
+    "context_length": 52,
+    "horizon": 27,
+    "horizon_steps": "W0 through W26",
+    "point_method": "median",
+    "quantile_levels": [0.1, 0.5, 0.9],
+    "cross_learning": false,
+    "trainable_parameters": 0,
+    "future_actuals_used_as_input": false,
+    "future_features": "endogenous inference-only future patch representations"
+  },
+  "tests": {
+    "baseline": {"passed": 903, "skipped": 6, "subtests_passed": 46},
+    "chronos2_focused": {"passed": 47, "official_weight_tests_included": 5},
+    "full_with_official_weights": {"passed": 950, "skipped": 6, "subtests_passed": 46},
+    "without_optional_dependencies": {"passed": 945, "skipped": 11, "subtests_passed": 46},
+    "cuda_tests_skipped": 6,
+    "initial_full_run": "interrupted after prolonged computation in a BLAS/OpenMP stack; not counted as passed",
+    "successful_full_run_env": {"OMP_NUM_THREADS": "1", "OPENBLAS_NUM_THREADS": "1", "MKL_NUM_THREADS": "1"},
+    "wheel_build_and_installed_import": true,
+    "weights_excluded_from_wheel": true
+  },
+  "existing_tracked_model_files": {
+    "aggregate_sha256_before_and_after": "9116e0a0c4959320d95f60130ce99162a0ca3ef29473e83575ac82e77c12cce4",
+    "unchanged": true,
+    "registry_and_shared_training_api_changed": false
+  },
+  "runs": [
+    {
+      "artifact_dir": "artifacts/chronos2/synthetic_zero_shot_27_20261118_verified",
+      "kind": "synthetic seasonal, trend and intermittent patterns",
+      "series_count": 3,
+      "forecast_point_count_per_variant": 81,
+      "plan_week": 202601,
+      "point_shape": [3, 27, 1],
+      "future_token_shape": [3, 2, 768],
+      "endogenous_wape_pct": 2.8930296897888184,
+      "calendar_covariate_wape_pct": 2.9379003047943115,
+      "last_value_baseline_wape_pct": 21.944276809692383
+    },
+    {
+      "artifact_dir": "artifacts/chronos2/local_snapshot_zero_shot_27_20261118_verified",
+      "kind": "bounded local parquet sample; production provenance unverified",
+      "series_count": 8,
+      "forecast_point_count_per_variant": 216,
+      "plan_week": 202518,
+      "point_shape": [8, 27, 1],
+      "future_token_shape": [8, 2, 768],
+      "input_sha256": "fb010ce808265939524551cf1e3b4012dac09a946ea334274527f1ca5cd38469",
+      "endogenous_wape_pct": 17.680957794189453,
+      "calendar_covariate_wape_pct": 16.9827938079834,
+      "last_value_baseline_wape_pct": 13.160422325134277,
+      "beats_last_value_baseline": false
+    }
+  ],
+  "not_performed": [
+    "fine-tuning or new pretraining",
+    "large-scale operational performance qualification",
+    "verification of non-overlap with pretraining data",
+    "CUDA or MPS qualification",
+    "database writes or runtime deployment",
+    "model registry or common train API integration",
+    "ReasonCast training or semantic correction implementation",
+    "commit, push or main merge"
+  ]
+}
