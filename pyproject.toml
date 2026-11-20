@@ -96,6 +96,8 @@ where = ["src"]
 include = ["modeling_module*"]
 
 [tool.setuptools.package-data]
+"modeling_module.forecast_adapters.MORA" = ["README.md", "SOURCE.md"]
+"modeling_module.forecast_adapters.MORA.native" = ["README.md"]
 "modeling_module.models.Chronos2" = ["README.md"]
 "modeling_module.models.Chronos2.native" = ["LICENSE.upstream", "NOTICE.upstream", "README.md", "upstream_manifest.json"]
 "modeling_module.models.TimeMixer" = ["LICENSE.upstream", "upstream_manifest.json"]
