@@ -38,6 +38,12 @@ chronos2 = [
     "chronos-forecasting==2.3.2",
     "transformers==4.57.6",
 ]
+chronos2-native = [
+    "torch>=2.2,<3",
+    "transformers==4.57.6",
+    "einops>=0.7,<1",
+    "packaging>=24",
+]
 dev = [
     "build>=1",
     "loguru",
@@ -90,7 +96,10 @@ where = ["src"]
 include = ["modeling_module*"]
 
 [tool.setuptools.package-data]
+"modeling_module.forecast_adapters.MORA" = ["README.md", "SOURCE.md"]
+"modeling_module.forecast_adapters.MORA.native" = ["README.md"]
 "modeling_module.models.Chronos2" = ["README.md"]
+"modeling_module.models.Chronos2.native" = ["LICENSE.upstream", "NOTICE.upstream", "README.md", "upstream_manifest.json"]
 "modeling_module.models.TimeMixer" = ["LICENSE.upstream", "upstream_manifest.json"]
 "modeling_module.models.AutoTimes" = ["LICENSE.upstream", "docs/README.md", "upstream_manifest.json"]
 

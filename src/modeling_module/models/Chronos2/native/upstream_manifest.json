@@ -1,0 +1,49 @@
+{
+  "repository": "https://github.com/amazon-science/chronos-forecasting",
+  "tag": "v2.3.2",
+  "commit": "0aba28e9360b6355d5a919596c90b16c25939f02",
+  "license": "Apache-2.0",
+  "vendored_on": "2026-11-19",
+  "scope": "Chronos-2 computation core only; pipeline/dataset/trainer are not vendored",
+  "upstream_files": {
+    "src/chronos/chronos2/config.py": {
+      "url": "https://raw.githubusercontent.com/amazon-science/chronos-forecasting/0aba28e9360b6355d5a919596c90b16c25939f02/src/chronos/chronos2/config.py",
+      "sha256": "d4ffa61c796ee87b340540e7f8131008aedcf7b1c580321053dec51d609d3101"
+    },
+    "src/chronos/chronos2/layers.py": {
+      "url": "https://raw.githubusercontent.com/amazon-science/chronos-forecasting/0aba28e9360b6355d5a919596c90b16c25939f02/src/chronos/chronos2/layers.py",
+      "sha256": "73493f306ecfaa21fa57636ff46321ccb5d50ded02a382598cf759dbfc9dd60f"
+    },
+    "src/chronos/chronos2/model.py": {
+      "url": "https://raw.githubusercontent.com/amazon-science/chronos-forecasting/0aba28e9360b6355d5a919596c90b16c25939f02/src/chronos/chronos2/model.py",
+      "sha256": "2aaab2f90cc9bb486d69483cb1f0d11b593643ce54c97f4902958a7776905782"
+    },
+    "src/chronos/chronos_bolt.py": {
+      "url": "https://raw.githubusercontent.com/amazon-science/chronos-forecasting/0aba28e9360b6355d5a919596c90b16c25939f02/src/chronos/chronos_bolt.py",
+      "sha256": "93b3af9e4521ea981c4228b1acaa252321f7a190512f956088394426182c8b8c"
+    },
+    "LICENSE": {
+      "url": "https://raw.githubusercontent.com/amazon-science/chronos-forecasting/0aba28e9360b6355d5a919596c90b16c25939f02/LICENSE",
+      "sha256": "09e8a9bcec8067104652c168685ab0931e7868f9c8284b66f5ae6edae5f1130b"
+    },
+    "NOTICE": {
+      "url": "https://raw.githubusercontent.com/amazon-science/chronos-forecasting/0aba28e9360b6355d5a919596c90b16c25939f02/NOTICE",
+      "sha256": "d4290ed64c2edd0fce1d84e3f9dfb2881240fe534def76b8cd29ed6af683e287"
+    }
+  },
+  "local_files": {
+    "config.py": "2cfa0a859e27b4ebb9f07fcf4dbff1a77c24ef02277c5e7e385001191cc49508",
+    "layers.py": "ab09824c790d43a1b32f04cd70e0f31c631a50d14bd8f818244a83ef804759ed",
+    "model.py": "6487c4d973c957ec1ac647e1d231e0ddcd4cf06cbc5ecbd3e43b643bddddcc23",
+    "preprocessing.py": "0f50ff094751e78845deea408eb7fecc90fbe7da1fe5ee001cdcc9233d84194e",
+    "__init__.py": "f53b9169b2f49ba2f2723b5403c796fa87dc40f769c1c6792f030573cc7fe0ab",
+    "LICENSE.upstream": "09e8a9bcec8067104652c168685ab0931e7868f9c8284b66f5ae6edae5f1130b",
+    "NOTICE.upstream": "d4290ed64c2edd0fce1d84e3f9dfb2881240fe534def76b8cd29ed6af683e287"
+  },
+  "changes": [
+    "Korean explanatory comments only",
+    "model.py imports Patch/InstanceNorm from local preprocessing",
+    "Extracted Patch and InstanceNorm classes from chronos_bolt.py without changing class AST"
+  ],
+  "verification": "config/layers/model AST identical after the one permitted import rewrite; selected class AST unchanged"
+}
