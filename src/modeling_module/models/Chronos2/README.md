@@ -1,9 +1,9 @@
-# Chronos-2 독립 zero-shot 어댑터
+# Chronos-2: zero-shot 어댑터와 새 가중치 학습 계약
 
 ## 목적과 범위
 
 공식 사전학습 가중치로 기본 52주 이력에서 27주 수요를 예측하는 독립 모델.
-새 가중치 초기화나 fine-tuning으로 사전학습 모델을 대체하지 않는 구성.
+새 가중치 학습용 backbone은 별도 파일로 분리하며 사전학습 모델을 대체하지 않는 구성.
 기존 PatchTST, SELLM, TinyTimeMixer와 공통 학습·체크포인트 경로 변경 없음.
 
 현재는 직접 import하는 연구·검증용 모델이며 기존 `train(models=[...])`, 모델 등록부,
@@ -13,11 +13,38 @@
 |---|---|
 | 공식 가중치 zero-shot | 구현 및 검증 완료 |
 | Fine-tuning·추가 사전학습 | 공식 패키지의 학습 기능과 프로젝트 연결 미구현 |
-| 새 가중치로 처음부터 사전학습 | 초기화·데이터 표집·학습·체크포인트 경로 미구현 |
+| 새 가중치 초기화·학습 forward | 독립 backbone과 분할·배치 계약, 합성 데이터 역전파 검증 완료 |
+| 자체 데이터 사전학습 실행 | 데이터셋·표집·trainer·체크포인트·자체 가중치 로더 미구현 |
 
 `backbone.py`는 공식 구조를 재정의한 학습 모델이 아닌 동결 추론 어댑터.
 공식 체크포인트의 최대 context는 8192이며 현재 기본 입력은 52주, 예측은 27주.
 context 설정 변경만으로 가중치를 학습하거나 `2048 → 8192` 단계 학습을 수행하지 않는 동작.
+
+## 자체 사전학습의 현재 범위
+
+`trainable_backbone.py`는 공식 모델 생성자로 새 가중치를 초기화하는 독립 경로.
+공식 체크포인트나 Hub를 읽지 않으며 기존 동결 `backbone.py`와 실행 경계 분리.
+실제 연산은 저장소에 포함한 [`native/`](native/README.md)의 공식 v2.3.2 소스 사용.
+학습용 경로는 외부 `chronos-forecasting` 없이 실행하며 설치 명령은
+`python -m pip install -e '.[chronos2-native]'`.
+PyTorch·Transformers·einops 등 기반 라이브러리는 유지하는 구성.
+`training/`에는 모델 설정, 0수요·관측 마스크, 부품·정답 기간 분할 계약 포함.
+실제 원천은 ID·주차만 확인해 분할 manifest를 준비했으며 수량 품질·유효 창 검사는 후속 범위.
+
+```python
+from modeling_module.models.Chronos2.trainable_backbone import Chronos2TrainableBackbone
+from modeling_module.models.Chronos2.training import Chronos2TrainableConfig, Chronos2TrainingBatch
+```
+
+기본값은 CPU 계약 검증용 소형 구조이며 공식 사전학습 모델의 크기·성능과 다른 대상.
+현재 단변량 수요만 지원하며 covariate 그룹 학습·전체 학습 실행 API는 아직 미연결.
+확정된 70:15:15 분할, 합성 배치 예제와 남은 작업은
+[`docs/Chronos2PretrainingContracts.md`](../../../../docs/Chronos2PretrainingContracts.md) 참고.
+
+셀별 한글 설명과 실행 결과를 포함한
+[`학습용 노트북`](notebook/chronos2_pretraining_contracts_and_backbone.ipynb)에서
+분할 계약·관측 마스크·새 초기화·H27 출력·합성 AdamW 1회 갱신을 순서대로 확인 가능.
+실데이터 학습·DB 쓰기·공식 가중치 다운로드는 없는 실습.
 
 ## 파일 역할
 
@@ -53,11 +80,12 @@ Chronos2Model.predict
 - [고정 모델 snapshot](https://huggingface.co/amazon/chronos-2/tree/29ec3766d36d6f73f0696f85560a422f50e8498c)
 - [공식 패키지 2.3.2](https://pypi.org/project/chronos-forecasting/2.3.2/)
 
-이 어댑터는 공식 소스 전체를 복사한 재구현이 아니라 버전을 고정한 공식 패키지의 사용 경계를 분리한 구성.
+zero-shot 어댑터는 버전을 고정한 외부 공식 패키지를 호출하는 구성.
+반면 새 가중치 학습용 backbone은 `native/`에 포함한 연산 소스를 호출하는 별도 경로.
 로컬 파일의 `declared_revision`은 지정값이며, 실제 일치 여부는 파일 SHA-256 검증 결과로 구분.
 검증용이 아닌 다른 가중치로 교체하려면 별도 설정과 자격 검증 필요. 해시 검증을 해제한 실행은 공식 파일 검증 완료로 표시하지 않는 정책.
 
-## 설치와 로딩
+## Zero-shot 설치와 로딩
 
 저장소 루트와 별도 Python 환경에서 선택 의존성 설치.
 

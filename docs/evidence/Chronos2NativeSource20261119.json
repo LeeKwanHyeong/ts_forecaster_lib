@@ -1,0 +1,41 @@
+{
+  "date": "2026-11-19",
+  "repository": "ts_forecaster_lib",
+  "branch": "ts_forecaster_lib_v2",
+  "implementation_state": "uncommitted_worktree",
+  "source": {
+    "repository": "https://github.com/amazon-science/chronos-forecasting",
+    "tag": "v2.3.2",
+    "commit": "0aba28e9360b6355d5a919596c90b16c25939f02",
+    "local_directory": "src/modeling_module/models/Chronos2/native",
+    "manifest": "src/modeling_module/models/Chronos2/native/upstream_manifest.json",
+    "official_commit_matches_previous_installed_sources": true,
+    "license_and_notice_preserved": true,
+    "arithmetic_ast_preserved": true,
+    "allowed_changes": ["Korean explanatory comments", "local normalization/patch import", "exact class extraction from chronos_bolt.py"],
+    "whole_pipeline_dataset_trainer_vendored": false
+  },
+  "runtime": {
+    "scratch_implementation": "modeling_module.models.Chronos2.native.model.Chronos2Model",
+    "scratch_requires_external_chronos": false,
+    "existing_zero_shot_still_uses_external_chronos": true,
+    "foundation_libraries_retained": ["torch", "transformers", "einops", "packaging"],
+    "zero_shot_source_changed": false,
+    "official_weights_loaded_by_scratch_path": false
+  },
+  "verification": {
+    "focused_tests": {"passed": 64, "skipped": 0},
+    "original_vs_vendored_exact_comparison": ["initial_state_dict", "forward_quantiles", "native_loss", "parameter_gradients", "normalization_and_patching"],
+    "comparison_axes": {"context_lengths": [52, 53], "horizons": [13, 27, 33], "attention": ["sdpa", "eager"]},
+    "full_with_official_runtime": {"passed": 1037, "skipped_cuda": 6, "subtests_passed": 46},
+    "full_without_chronos_package": {"passed": 1025, "skipped": 18, "subtests_passed": 46},
+    "focused_without_optional_libraries": {"passed": 49, "skipped": 15},
+    "notebook": {"file": "src/modeling_module/models/Chronos2/notebook/chronos2_pretraining_contracts_and_backbone.ipynb", "cells": 45, "code_cells_executed": 21, "markdown_cells": 24, "figures": 2, "errors": 0, "external_chronos_installed": false, "synthetic_optimizer_steps": 1},
+    "wheel": {"file": "modeling_module-0.2.0-py3-none-any.whl", "sha256": "2f280f70284d4010e01ec89d02a51bf24469cfb7c17aa60e691ea6153492c202", "isolated_target_install": true, "source_and_license_resources_verified": true, "h27_forward_backward_without_chronos": true},
+    "junit_files": ["/private/tmp/chronos2-native-core-focused-20261119.xml", "/private/tmp/chronos2-native-full-20261119.xml", "/private/tmp/chronos2-native-only-full-20261119-final.xml"]
+  },
+  "real_data_training_executed": false,
+  "db_or_shared_runtime_changed": false,
+  "git_commit_push_executed": false,
+  "remaining": ["quantity/window eligibility checks and dataset", "pattern sampler", "trainer/checkpoint/resume and own-model inference", "separately approved real-data GPU pilot"]
+}

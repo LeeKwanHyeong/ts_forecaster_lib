@@ -1,0 +1,53 @@
+{
+  "date": "2026-11-19",
+  "repository": "ts_forecaster_lib",
+  "branch": "ts_forecaster_lib_v2",
+  "baseline_commit": "fcf5d72ffe517627287f503fd43e12ef94958d6a",
+  "implementation_state": "uncommitted_worktree",
+  "scope": ["data_and_evaluation_contracts", "randomly_initialized_native_backbone"],
+  "initialization": {
+    "source": "random",
+    "chronos_forecasting_version": "2.3.2",
+    "transformers_version": "4.57.6",
+    "pretrained_weights_loaded_by_trainable_backbone": false,
+    "synthetic_optimizer_steps_verified": 1,
+    "covariate_group_training_supported": false
+  },
+  "source": {
+    "file": "raw_data/master/tb_master_target.parquet",
+    "sha256": "328f547d5eb0a50c80dc60dc7bb89c09799599f8f6b8677406a0e3cc4a3ef547",
+    "rows": 2455508,
+    "series": 7000,
+    "provenance": "user_provided",
+    "zero_semantics": "observed_zero_user_confirmed",
+    "unchanged": true,
+    "quantity_values_materialized_for_split": false
+  },
+  "split": {
+    "context_length": 52,
+    "horizon": 27,
+    "seed": 42,
+    "allocation": "identity_only_role_salted_SHA256_70_15_15",
+    "assigned_counts": {"train": 4900, "validation": 1050, "test": 1050},
+    "target_periods": {"train": [201801, 202442], "validation": [202443, 202517], "test": [202518, 202544]},
+    "prior_evaluated_ids_excluded_from_test": 1177,
+    "prior_evaluation_test_overlap": 0,
+    "disjoint_series_audit_passed": true,
+    "manifest_file": "artifacts/chronos2/pretraining_contract_20261119_seed42/split_manifest.json",
+    "manifest_sha256": "a7b16441549e128297797be87d1c0853690a89bc1dc50baa112ca5883fc72238",
+    "quantity_and_window_quality_validated": false,
+    "ready_for_training": false
+  },
+  "verification": {
+    "new_tests_passed": 55,
+    "full_suite": {"passed": 1028, "skipped": 6, "subtests_passed": 46, "failures": 0, "errors": 0},
+    "without_optional_dependencies": {"passed": 1016, "skipped": 18, "subtests_passed": 46, "failures": 0, "errors": 0},
+    "full_suite_junit": "/private/tmp/chronos2-pretraining-stages12-full-20261119-final.xml",
+    "without_optional_dependencies_junit": "/private/tmp/chronos2-pretraining-noextras-full-20261119.xml",
+    "real_data_training_executed": false,
+    "gpu_training_executed": false,
+    "existing_frozen_inference_code_changed": false
+  },
+  "remaining": ["quantity_and_window_quality_checks", "window_dataset_and_pattern_sampler", "trainer_and_checkpoint_resume", "own_checkpoint_predictor", "separately_approved_real_data_gpu_pilot"],
+  "git_actions_executed": false
+}
