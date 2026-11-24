@@ -33,6 +33,13 @@ from modeling_module import DistributionLoss, forecast, load_predictor, predict,
   `PatchMixerArchitectureConfig`, `ExoTSTArchitectureConfig`,
   `NHITSArchitectureConfig`, `TimexerArchitectureConfig`
 
+TPP 모델(RMTPP matched head, PHEN, S2P2 matched head)은
+`modeling_module.api.event`에서 사용합니다. `predict_next_event()`는 다음
+이벤트 분포와 수량을 반환하고, `forecast_event_paths()`는 관측된 무수요 기간을
+반영한 시계열별 이벤트 경로를 반환합니다. `result.as_dict()`로 JSON에 전달할 수
+있으며, 예측 시작점의 이벤트 위치는 `offset=0`입니다. 기존 `forecast()`의
+정규 시계열 결과와는 별도 계약입니다.
+
 ## Installation
 
 Python 3.10 이상이 필요합니다. 새 환경에서는 dependency를 포함한 일반 설치를 권장합니다.

@@ -383,6 +383,41 @@ LEGACY_MODEL_SPECS: dict[str, ModelSpec] = {
 }
 
 
+@dataclass(frozen=True, slots=True)
+class EventModelSpec:
+    """Builder for event histories, outside the regular-window API."""
+
+    key: str
+    builder_attr: str
+    label: str
+    input_mode: str = "event_history"
+    execution_mode: str = "event"
+
+    def load_builder(self) -> Callable[..., Any]:
+        module = import_module("modeling_module.models.TPP.builders")
+        return getattr(module, self.builder_attr)
+
+
+_EVENT_MODEL_SPECS = {
+    spec.key: spec for spec in (
+        EventModelSpec("rmtpp_matched_head", "build_rmtpp", "RMTPP (matched head)"),
+        EventModelSpec("phen_tpp", "build_phen", "PHEN"),
+        EventModelSpec("s2p2_matched_head", "build_s2p2", "S2P2 (matched head)"),
+    )
+}
+
+
+def list_event_model_keys() -> tuple[str, ...]:
+    return tuple(_EVENT_MODEL_SPECS)
+
+
+def get_event_model_spec(key: str) -> EventModelSpec:
+    try:
+        return _EVENT_MODEL_SPECS[key]
+    except KeyError as exc:
+        raise ValueError(f"Unknown event model key: {key!r}") from exc
+
+
 _ALL_MODEL_SPECS = {**MODEL_SPECS, **LEGACY_MODEL_SPECS}
 
 
